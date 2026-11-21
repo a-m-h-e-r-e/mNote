@@ -221,6 +221,11 @@ impl Vim {
             || self.register.is_some()
     }
 
+    /// The register picked with `"x` for the next command, if any.
+    pub fn pending_register(&self) -> Option<char> {
+        self.register
+    }
+
     /// The contents of a register, as `p` would paste it.
     pub fn register(&mut self, name: char) -> Option<Register> {
         self.registers.get(Some(name))

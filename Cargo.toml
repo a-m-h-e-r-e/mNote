@@ -19,6 +19,8 @@ ropey = { version = "1.6.1", default-features = false, features = ["simd"] }
 # code fences) and source-view highlighting. Grammars only, no bundled parser wrapper.
 tree-sitter = "0.27.1"
 tree-sitter-md = { version = "0.5.4", default-features = false }
+# async-channel: carries file-watcher events to the UI thread. Already in gpui's tree.
+async-channel = "2.5.0"
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }
 
 [workspace.lints.rust]

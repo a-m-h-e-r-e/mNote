@@ -62,6 +62,18 @@ pub struct Buffer {
     pending: Option<Step>,
     syntax: Option<Syntax>,
     revision: u64,
+    /// Lines touched since the last [`take_changed_lines`](Self::take_changed_lines).
+    changed: Option<ChangedLines>,
+}
+
+/// Which lines changed since a view last looked, as the number of unchanged
+/// lines at the top and at the bottom of the note. Everything between them
+/// may have changed. Line counts are `Rope::len_lines` (a final newline is
+/// followed by one empty line).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChangedLines {
+    pub unchanged_top: usize,
+    pub unchanged_bottom: usize,
 }
 
 impl Buffer {
@@ -73,6 +85,7 @@ impl Buffer {
             pending: None,
             syntax: Syntax::markdown(),
             revision: 0,
+            changed: None,
         }
     }
 
@@ -103,7 +116,7 @@ impl Buffer {
     /// Whether the text differs from what was last saved or opened. Undoing
     /// back to the saved state makes the buffer clean again.
     pub fn is_dirty(&self) -> bool {
-        self.pending.is_some() || !self.history.is_saved()
+        self.pending.as_ref().is_some_and(|s| !s.forward.is_empty()) || !self.history.is_saved()
     }
 
     /// Starts one undo step that may span many edits, such as an insert-mode
@@ -174,6 +187,12 @@ impl Buffer {
         Ok(())
     }
 
+    /// The lines changed since the last call, or `None` if nothing changed.
+    /// A view uses it to re-measure only those lines.
+    pub fn take_changed_lines(&mut self) -> Option<ChangedLines> {
+        self.changed.take()
+    }
+
     /// Undoes the last step. Returns where the cursor should go, or `None`
     /// when there's nothing left to undo.
     pub fn undo(&mut self) -> Option<usize> {
@@ -200,12 +219,18 @@ impl Buffer {
         self.history.len()
     }
 
-    /// Marks the current text as saved. A step in progress is ended first,
-    /// so an autosave in the middle of typing splits the undo step there.
+    /// Marks the current text as saved. A step in progress is split there
+    /// (the part before the save is one undo step) and then continues, so an
+    /// autosave in the middle of typing keeps grouping what follows.
     pub fn mark_saved(&mut self) {
-        let cursor = self.pending.as_ref().map_or(0, |s| s.cursor_after);
-        self.end_change(cursor);
+        let in_progress = self.pending.as_ref().map(|s| s.cursor_after);
+        if let Some(cursor) = in_progress {
+            self.end_change(cursor);
+        }
         self.history.mark_saved();
+        if let Some(cursor) = in_progress {
+            self.begin_change(cursor);
+        }
     }
 
     /// Writes the buffer to its note atomically and marks it saved.
@@ -288,6 +313,18 @@ impl Buffer {
         rope.insert(change.start, &change.text);
 
         let new_end_byte = start_byte + change.text.len();
+        let top = start_position.row;
+        let bottom = rope.len_lines() - 1 - rope.byte_to_line(new_end_byte);
+        self.changed = Some(match self.changed {
+            Some(c) => ChangedLines {
+                unchanged_top: c.unchanged_top.min(top),
+                unchanged_bottom: c.unchanged_bottom.min(bottom),
+            },
+            None => ChangedLines {
+                unchanged_top: top,
+                unchanged_bottom: bottom,
+            },
+        });
         if let Some(syntax) = &mut self.syntax {
             syntax.edit(&InputEdit {
                 start_byte,
@@ -487,6 +524,45 @@ mod tests {
         dirty.edit(4..4, "!", 4).expect("edit");
         assert_eq!(dirty.reload("theirs"), Reload::KeptLocalEdits);
         assert_eq!(dirty.to_string(), "mine!");
+    }
+
+    #[test]
+    fn saving_mid_change_keeps_grouping_the_rest() {
+        let mut b = Buffer::new("");
+        b.begin_change(0);
+        b.edit(0..0, "ab", 0).expect("edit");
+        b.mark_saved();
+        assert!(!b.is_dirty());
+        b.edit(2..2, "c", 2).expect("edit");
+        b.edit(3..3, "d", 3).expect("edit");
+        assert!(b.is_dirty());
+        b.end_change(4);
+        assert_eq!(
+            b.undo_steps(),
+            2,
+            "before and after the save, not one per key"
+        );
+        b.undo();
+        assert_eq!(b.to_string(), "ab");
+        assert!(!b.is_dirty());
+    }
+
+    #[test]
+    fn reports_the_lines_that_changed() {
+        let mut b = Buffer::new("a\nb\nc\nd\ne\n");
+        assert_eq!(b.take_changed_lines(), None);
+        b.edit(2..3, "B\nB2", 0).expect("edit"); // line 1 becomes two lines
+        b.edit(9..9, "!", 0).expect("edit"); // line 4: "d" becomes "!d"
+        assert_eq!(
+            b.take_changed_lines(),
+            Some(ChangedLines {
+                unchanged_top: 1,
+                unchanged_bottom: 2
+            })
+        );
+        assert_eq!(b.take_changed_lines(), None, "taking clears it");
+        b.undo();
+        assert!(b.take_changed_lines().is_some(), "undo counts as a change");
     }
 
     #[test]

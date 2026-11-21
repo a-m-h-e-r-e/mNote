@@ -16,7 +16,7 @@ use std::path::Path;
 pub use error::{Result, VaultError};
 pub use frontmatter::Frontmatter;
 pub use note_path::NotePath;
-pub use text::{Autosave, Buffer, Reload};
+pub use text::{Autosave, Buffer, ChangedLines, Reload};
 pub use vault::Vault;
 pub use watch::{VaultEvent, VaultWatcher};
 

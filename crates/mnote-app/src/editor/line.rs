@@ -1,0 +1,281 @@
+//! [`LineText`]: one line of the note, shaped and wrapped by gpui's text
+//! system, with its selection and caret painted in.
+//!
+//! The block caret and the selection are drawn as text-run backgrounds, so
+//! they follow the glyphs across wrapped rows and the character under the
+//! block caret takes the `on-cursor` colour. The bar caret and the "newline is
+//! selected" cell are quads at positions from the shaped line.
+
+use std::cell::RefCell;
+use std::ops::Range;
+use std::rc::Rc;
+
+use gpui::{
+    App, AvailableSpace, Bounds, Element, ElementId, Font, GlobalElementId, Hsla,
+    InspectorElementId, IntoElement, LayoutId, Pixels, SharedString, Style, TextAlign, TextRun,
+    Window, WrappedLine, fill, point, px, relative, size,
+};
+use mnote_vim::CaretShape;
+
+/// Where and how to draw the caret on this line.
+#[derive(Debug, Clone, Copy)]
+pub struct Caret {
+    /// Byte offset in the line.
+    pub byte: usize,
+    pub shape: CaretShape,
+    pub color: Hsla,
+    /// Colour of the character under a block caret.
+    pub on_color: Hsla,
+}
+
+/// One rendered line of the note.
+pub struct LineText {
+    text: SharedString,
+    font: Font,
+    font_size: Pixels,
+    line_height: Pixels,
+    color: Hsla,
+    /// Selected bytes. An end past the text means the newline is selected
+    /// too, shown as a small cell after the last character.
+    selection: Option<(Range<usize>, Hsla)>,
+    caret: Option<Caret>,
+    shaped: Rc<RefCell<Option<Shaped>>>,
+}
+
+struct Shaped {
+    wrap_width: Option<Pixels>,
+    line: WrappedLine,
+}
+
+impl LineText {
+    pub fn new(
+        text: SharedString,
+        font: Font,
+        font_size: Pixels,
+        line_height: Pixels,
+        color: Hsla,
+    ) -> Self {
+        LineText {
+            text,
+            font,
+            font_size,
+            line_height,
+            color,
+            selection: None,
+            caret: None,
+            shaped: Rc::default(),
+        }
+    }
+
+    pub fn selection(mut self, bytes: Range<usize>, color: Hsla) -> Self {
+        self.selection = Some((bytes, color));
+        self
+    }
+
+    pub fn caret(mut self, caret: Option<Caret>) -> Self {
+        self.caret = caret;
+        self
+    }
+
+    /// Text runs: plain text, selected text on its background, and the
+    /// character under a block caret.
+    fn runs(&self) -> Vec<TextRun> {
+        let len = self.text.len();
+        let block = self
+            .caret
+            .filter(|c| c.shape == CaretShape::Block && c.byte < len)
+            .map(|c| {
+                let end = self.text[c.byte..]
+                    .chars()
+                    .next()
+                    .map_or(c.byte, |ch| c.byte + ch.len_utf8());
+                (c.byte..end, c)
+            });
+        let selection = self
+            .selection
+            .as_ref()
+            .map(|(r, color)| (r.start.min(len)..r.end.min(len), *color));
+
+        let mut cuts = vec![0, len];
+        for r in [
+            block.as_ref().map(|b| b.0.clone()),
+            selection.as_ref().map(|s| s.0.clone()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            cuts.extend([r.start, r.end]);
+        }
+        cuts.sort_unstable();
+        cuts.dedup();
+
+        cuts.windows(2)
+            .filter(|w| w[1] > w[0])
+            .map(|w| {
+                let at = w[0];
+                let in_block = block.as_ref().filter(|(r, _)| r.contains(&at));
+                let in_selection = selection.as_ref().filter(|(r, _)| r.contains(&at));
+                TextRun {
+                    len: w[1] - w[0],
+                    font: self.font.clone(),
+                    color: in_block.map_or(self.color, |(_, c)| c.on_color),
+                    background_color: in_block
+                        .map(|(_, c)| c.color)
+                        .or(in_selection.map(|(_, color)| *color)),
+                    underline: None,
+                    strikethrough: None,
+                }
+            })
+            .collect()
+    }
+}
+
+/// Shapes `text` at `wrap_width`, reusing the last result when the width
+/// hasn't changed. gpui caches shaped lines across frames too, so unchanged
+/// lines cost almost nothing to lay out again.
+fn shape(
+    shaped: &RefCell<Option<Shaped>>,
+    text: &SharedString,
+    runs: &[TextRun],
+    font_size: Pixels,
+    wrap_width: Option<Pixels>,
+    window: &mut Window,
+) {
+    if shaped
+        .borrow()
+        .as_ref()
+        .is_some_and(|s| s.wrap_width == wrap_width)
+    {
+        return;
+    }
+    let line = window
+        .text_system()
+        .shape_text(text.clone(), font_size, runs, wrap_width, None)
+        .ok()
+        .and_then(|lines| lines.into_iter().next())
+        .unwrap_or_default();
+    *shaped.borrow_mut() = Some(Shaped { wrap_width, line });
+}
+
+impl IntoElement for LineText {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for LineText {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        _cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        let runs = self.runs();
+        let text = self.text.clone();
+        let shaped = self.shaped.clone();
+        let (font_size, line_height) = (self.font_size, self.line_height);
+        let layout_id =
+            window.request_measured_layout(style, move |known, available, window, _cx| {
+                let wrap_width = known.width.or(match available.width {
+                    AvailableSpace::Definite(width) => Some(width),
+                    _ => None,
+                });
+                shape(&shaped, &text, &runs, font_size, wrap_width, window);
+                let height = shaped.borrow().as_ref().map_or(line_height, |s| {
+                    s.line.size(line_height).height.max(line_height)
+                });
+                size(wrap_width.unwrap_or(px(0.)), height)
+            });
+        (layout_id, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _: &mut (),
+        _window: &mut Window,
+        _cx: &mut App,
+    ) {
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let runs = self.runs();
+        shape(
+            &self.shaped,
+            &self.text,
+            &runs,
+            self.font_size,
+            Some(bounds.size.width),
+            window,
+        );
+        let shaped = self.shaped.borrow();
+        let Some(Shaped { line, .. }) = shaped.as_ref() else {
+            return;
+        };
+        let (origin, lh) = (bounds.origin, self.line_height);
+        let len = self.text.len();
+        let cell = self.font_size * 0.55;
+        let at = |byte: usize| {
+            line.position_for_index(byte.min(len), lh)
+                .unwrap_or_default()
+        };
+
+        // The newline (or an empty line) inside a selection: one cell.
+        if let Some((range, color)) = &self.selection
+            && range.end > len
+        {
+            let p = at(len);
+            window.paint_quad(fill(
+                Bounds::new(origin + point(p.x, p.y), size(cell, lh)),
+                *color,
+            ));
+        }
+
+        let _ = line.paint_background(origin, lh, TextAlign::Left, Some(bounds), window, cx);
+        let _ = line.paint(origin, lh, TextAlign::Left, Some(bounds), window, cx);
+
+        if let Some(caret) = self.caret {
+            let p = at(caret.byte);
+            let width = match caret.shape {
+                CaretShape::Bar => Some(px(2.)),
+                // A block on a character is drawn by its text run; past the
+                // end (an empty line) it needs a quad.
+                CaretShape::Block if caret.byte >= len => Some(cell),
+                CaretShape::Block => None,
+            };
+            if let Some(width) = width {
+                window.paint_quad(fill(
+                    Bounds::new(origin + point(p.x, p.y), size(width, lh)),
+                    caret.color,
+                ));
+            }
+        }
+    }
+}

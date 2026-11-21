@@ -11,7 +11,9 @@ name = "mnote"
 path = "src/main.rs"
 
 [dependencies]
+async-channel.workspace = true
 gpui.workspace = true
+mnote-core.workspace = true
 mnote-vim.workspace = true
 
 [lints]

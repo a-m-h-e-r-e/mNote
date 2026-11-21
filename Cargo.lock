@@ -2792,7 +2792,9 @@ dependencies = [
 name = "mnote-app"
 version = "0.1.0"
 dependencies = [
+ "async-channel 2.5.0",
  "gpui",
+ "mnote-core",
  "mnote-vim",
 ]
 
