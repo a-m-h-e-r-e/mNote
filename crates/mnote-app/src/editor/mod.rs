@@ -29,7 +29,7 @@ use mnote_vim::ex::cmdwin::CmdWindow;
 use mnote_vim::text::{clamp_normal, line_count, line_len, line_of, line_start};
 use mnote_vim::{Clipboard, Effect, Mode, Vim};
 
-use crate::picker::notes::NotesPicker;
+use crate::picker::finder::{CurrentNote, Finder};
 use crate::picker::{Picker, PickerAction, PickerOutcome};
 use crate::theme::{ActiveTheme, Palette, StyledExt, Theme, family, size, space, text};
 use crate::ui::{CommandLine, CompletionPopup, MessagePanel, StatusLine, TopBar};
@@ -278,7 +278,15 @@ impl Editor {
     /// The key after `space` in NORMAL mode.
     fn leader_key(&mut self, key: mnote_vim::Key, cx: &mut Context<Self>) {
         if key == mnote_vim::Key::Char('f') {
-            self.picker = Some(Picker::new(Box::new(NotesPicker::new(self.index.clone()))));
+            let current = CurrentNote {
+                path: match &self.source {
+                    Source::Note { note, .. } => Some(note.clone()),
+                    Source::Scratch => None,
+                },
+                text: self.buffer.to_string(),
+            };
+            let finder = Finder::new(self.index.clone(), current);
+            self.picker = Some(Picker::new(Box::new(finder)));
             self.restart_blink(cx);
             cx.notify();
         }
@@ -299,13 +307,58 @@ impl Editor {
                 self.picker = None;
                 self.restart_blink(cx);
             }
-            PickerOutcome::Act(PickerAction::OpenNote(note)) => {
+            PickerOutcome::Act(action) => {
                 self.picker = None;
-                self.switch_to(note, cx);
+                self.picker_action(action, cx);
                 self.restart_blink(cx);
             }
         }
         cx.notify();
+    }
+
+    fn picker_action(&mut self, action: PickerAction, cx: &mut Context<Self>) {
+        match action {
+            PickerAction::OpenNote(note) => self.switch_to(note, cx),
+            PickerAction::CreateNote(note) => {
+                let Source::Note { vault, .. } = &self.source else {
+                    self.reply = Some((
+                        "A scratch note has no vault to create notes in".into(),
+                        true,
+                    ));
+                    return;
+                };
+                if let Err(err) = vault.write(&note, "") {
+                    self.reply = Some((format!("Couldn't create {note}: {err}").into(), true));
+                    return;
+                }
+                self.index.borrow_mut().note_saved(note.clone(), "");
+                self.switch_to(note, cx);
+            }
+            PickerAction::GoToLine(line) => {
+                let rope = self.buffer.text();
+                let line = line.min(line_count(rope).saturating_sub(1));
+                self.vim.set_cursor(line_start(rope, line));
+                self.lines.scroll_to_reveal_item(line);
+            }
+            PickerAction::RunEx(command) => {
+                let revision = self.buffer.revision();
+                match self.vim.execute(&command, &mut self.buffer) {
+                    Ok(outcome) => {
+                        if let Some(message) = outcome.message {
+                            self.reply = Some((message.into(), false));
+                        }
+                        if let Some(app) = outcome.app {
+                            self.run_app_command(app, cx);
+                        }
+                    }
+                    Err(err) => self.reply = Some((err.to_string().into(), true)),
+                }
+                self.sync_lines();
+                if self.buffer.revision() != revision {
+                    self.schedule_autosave(cx);
+                }
+            }
+        }
     }
 
     /// Opens another note of the same vault in this editor, saving the

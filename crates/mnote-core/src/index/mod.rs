@@ -16,7 +16,7 @@ use std::thread;
 use std::time::SystemTime;
 
 pub use outline::Heading;
-pub use search::{HeadingHit, HitField, NoteHit, NoteSearch, TagHit};
+pub use search::{HeadingHit, HitField, NoteHit, NoteSearch, StringHit, TagHit};
 
 use crate::error::Result;
 use crate::note_path::NotePath;

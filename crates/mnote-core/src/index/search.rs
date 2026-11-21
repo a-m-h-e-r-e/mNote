@@ -8,7 +8,7 @@
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
-use super::NoteIndex;
+use super::{NoteEntry, NoteIndex};
 
 /// Which text of a note matched best.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +54,15 @@ pub struct TagHit {
     pub indices: Vec<u32>,
 }
 
+/// One of a plain list of strings that matched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StringHit {
+    /// Position in the list searched.
+    pub item: usize,
+    pub score: u32,
+    pub indices: Vec<u32>,
+}
+
 /// Reusable search state: matchers and buffers stay allocated between
 /// keystrokes.
 pub struct NoteSearch {
@@ -93,10 +102,22 @@ impl NoteSearch {
     /// The best `limit` notes for `query`, matching path, title and aliases.
     /// An empty query lists the most recently changed notes first.
     pub fn notes(&mut self, index: &NoteIndex, query: &str, limit: usize) -> Vec<NoteHit> {
+        self.notes_where(index, query, limit, |_| true)
+    }
+
+    /// Like [`Self::notes`], over the notes `keep` accepts (those with a tag,
+    /// say).
+    pub fn notes_where(
+        &mut self,
+        index: &NoteIndex,
+        query: &str,
+        limit: usize,
+        keep: impl Fn(&NoteEntry) -> bool,
+    ) -> Vec<NoteHit> {
         let notes = index.notes();
         self.set_query(query);
         if self.pattern.atoms.is_empty() {
-            let mut recent: Vec<usize> = (0..notes.len()).collect();
+            let mut recent: Vec<usize> = (0..notes.len()).filter(|&i| keep(&notes[i])).collect();
             let key = |&i: &usize| std::cmp::Reverse(notes[i].modified);
             if limit < recent.len() {
                 recent.select_nth_unstable_by_key(limit, key);
@@ -116,6 +137,9 @@ impl NoteSearch {
 
         let mut scored: Vec<(u32, usize, HitField)> = Vec::new();
         for (i, note) in notes.iter().enumerate() {
+            if !keep(note) {
+                continue;
+            }
             let mut best = self
                 .pattern
                 .score(
@@ -169,6 +193,36 @@ impl NoteSearch {
                     field,
                     indices,
                 }
+            })
+            .collect()
+    }
+
+    /// The best `limit` of `items` for `query`, for short fixed lists such
+    /// as commands. An empty query keeps the list's order.
+    pub fn strings<'a>(
+        &mut self,
+        query: &str,
+        items: impl IntoIterator<Item = &'a str>,
+        limit: usize,
+    ) -> Vec<StringHit> {
+        self.set_query(query);
+        let items: Vec<&str> = items.into_iter().collect();
+        let mut scored: Vec<(u32, usize)> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, item)| {
+                self.pattern
+                    .score(Utf32Str::new(item, &mut self.buf), &mut self.text)
+                    .map(|s| (s, i))
+            })
+            .collect();
+        top(&mut scored, limit, |a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        scored
+            .into_iter()
+            .map(|(score, item)| StringHit {
+                item,
+                score,
+                indices: indices(&self.pattern, items[item], &mut self.text, &mut self.buf),
             })
             .collect()
     }
@@ -334,6 +388,24 @@ mod tests {
                 "reading-list.md"
             ]
         );
+    }
+
+    #[test]
+    fn filtered_notes_and_plain_strings() {
+        let index = index();
+        let mut search = NoteSearch::new();
+        let rust = |n: &NoteEntry| n.tags.iter().any(|t| t == "rust");
+        let hits = search.notes_where(&index, "", 10, rust);
+        assert_eq!(hits.len(), 2);
+        let hits = search.notes_where(&index, "bench", 10, rust);
+        assert_eq!(paths(&index, &hits), ["inbox/gpu-benchmarks.md"]);
+
+        let items = ["Save note", "Quit", "Clear search highlights"];
+        let hits = search.strings("", items, 10);
+        assert_eq!(hits.iter().map(|h| h.item).collect::<Vec<_>>(), [0, 1, 2]);
+        let hits = search.strings("clr hl", items, 10);
+        assert_eq!(hits[0].item, 2);
+        assert!(!hits[0].indices.is_empty());
     }
 
     #[test]

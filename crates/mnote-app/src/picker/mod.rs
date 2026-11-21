@@ -7,7 +7,7 @@
 //! own: the window that opens it routes keys here and draws [`Picker::render`]
 //! on top of itself.
 
-pub mod notes;
+pub mod finder;
 
 use std::ops::Range;
 
@@ -40,6 +40,8 @@ pub struct Row {
     pub matches: Vec<usize>,
     /// Quiet text at the right end (a folder, an age).
     pub detail: Option<SharedString>,
+    /// A secondary row in `ink-2`, such as "create …".
+    pub quiet: bool,
 }
 
 /// What the preview pane shows for the selected row.
@@ -54,6 +56,22 @@ pub struct PreviewContent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickerAction {
     OpenNote(NotePath),
+    /// Create the note (it doesn't exist yet), then open it.
+    CreateNote(NotePath),
+    /// Move the cursor to this line (0-based) of the open note.
+    GoToLine(usize),
+    /// Run an ex command, as if typed after `:`.
+    RunEx(String),
+}
+
+/// What confirming a row does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Confirm {
+    /// Close the picker and do this.
+    Act(PickerAction),
+    /// Stay open with this query (a tag narrows the finder to its notes).
+    SetQuery(String),
+    Close,
 }
 
 /// The result of a key in the picker.
@@ -68,9 +86,11 @@ pub enum PickerOutcome {
 
 /// What a particular picker lists and does.
 pub trait PickerDelegate {
-    /// The character before the query (`›`, `/`, `#`).
-    fn prefix(&self) -> &'static str {
-        "›"
+    /// The character before the query (`›`, `#`, `@`), and how many bytes
+    /// at the start of `query` it stands for. A scope character typed first
+    /// shows as the prefix instead of in the text.
+    fn prefix(&self, _query: &str) -> (&'static str, usize) {
+        ("›", 0)
     }
 
     /// An optional title row: `(title, quieter subtitle)`.
@@ -98,7 +118,7 @@ pub trait PickerDelegate {
     fn preview(&self, ix: usize) -> Option<PreviewContent>;
 
     /// `enter` (or `l` in NORMAL) on row `ix`.
-    fn confirm(&mut self, ix: usize) -> Option<PickerAction>;
+    fn confirm(&mut self, ix: usize) -> Confirm;
 
     /// Keys the hint bar shows, after the list keys the shell adds.
     fn hints(&self, _mode: Mode) -> Vec<Hint> {
@@ -154,14 +174,26 @@ impl Picker {
                     return PickerOutcome::Open;
                 }
                 return match self.delegate.confirm(self.selected) {
-                    Some(action) => PickerOutcome::Act(action),
-                    None => PickerOutcome::Close,
+                    Confirm::Act(action) => PickerOutcome::Act(action),
+                    Confirm::SetQuery(query) => {
+                        self.set_query(&query);
+                        PickerOutcome::Open
+                    }
+                    Confirm::Close => PickerOutcome::Close,
                 };
             }
             InputAction::Claimed(_) => {}
             InputAction::Close => return PickerOutcome::Close,
         }
         PickerOutcome::Open
+    }
+
+    /// Replaces the query (keeping the field in INSERT) and refreshes.
+    pub fn set_query(&mut self, query: &str) {
+        self.input = VimInput::new(query);
+        self.delegate.set_query(query);
+        self.selected = 0;
+        self.scroll = 0;
     }
 
     /// Moves the selection, wrapping at both ends as Vim's completion menu
@@ -297,8 +329,12 @@ impl Picker {
     /// caret, and the scope at the right. No mode pill (D-001).
     fn render_input(&self, mode: Mode, caret_on: bool, p: &Palette) -> impl IntoElement {
         let style = text::INPUT;
-        let query: SharedString = self.input.text().into();
-        let cursor = self.input.cursor();
+        let full = self.input.text();
+        // A scope character at the start shows as the prefix instead.
+        let (prefix, skip) = self.delegate.prefix(&full);
+        let skip_chars = full[..skip].chars().count();
+        let query: SharedString = full[skip..].to_owned().into();
+        let cursor = self.input.cursor().saturating_sub(skip_chars);
         let byte = |chars: usize| {
             query
                 .char_indices()
@@ -317,7 +353,11 @@ impl Picker {
             Theme::color(p.ink),
         );
         if let Some(sel) = self.input.selection() {
-            line = line.selection(byte(sel.start)..byte(sel.end), Theme::color(p.select));
+            let (from, to) = (
+                sel.start.saturating_sub(skip_chars),
+                sel.end.saturating_sub(skip_chars),
+            );
+            line = line.selection(byte(from)..byte(to), Theme::color(p.select));
         }
         if caret_on || mode != Mode::Insert {
             line = line.caret(Some(Caret {
@@ -342,7 +382,7 @@ impl Picker {
                     .flex_none()
                     .text_color(Theme::color(p.cursor))
                     .font_weight(FontWeight::MEDIUM)
-                    .child(SharedString::new_static(self.delegate.prefix())),
+                    .child(SharedString::new_static(prefix)),
             )
             .child(div().flex_1().min_w_0().child(line))
             .children(self.delegate.scope(mode).map(|scope| {
@@ -357,10 +397,10 @@ impl Picker {
 }
 
 fn render_row(row: &Row, selected: bool, p: &Palette) -> AnyElement {
-    let (ink, quiet, strong) = if selected {
-        (p.select_ink, p.select_ink, p.select_ink)
-    } else {
-        (p.ink_2, p.ink_3, p.ink)
+    let (ink, quiet, strong) = match (selected, row.quiet) {
+        (true, _) => (p.select_ink, p.select_ink, p.select_ink),
+        (false, true) => (p.ink_2, p.ink_3, p.ink),
+        (false, false) => (p.ink, p.ink_3, p.ink),
     };
     let label = &row.label;
     let bold: Vec<(Range<usize>, HighlightStyle)> = label
@@ -475,10 +515,12 @@ mod tests {
         fn preview(&self, _ix: usize) -> Option<PreviewContent> {
             None
         }
-        fn confirm(&mut self, ix: usize) -> Option<PickerAction> {
-            NotePath::new(format!("{}.md", self.shown[ix]))
-                .ok()
-                .map(PickerAction::OpenNote)
+        fn confirm(&mut self, ix: usize) -> Confirm {
+            match self.shown[ix] {
+                "cherry" => Confirm::SetQuery("ch".into()),
+                name => NotePath::new(format!("{name}.md"))
+                    .map_or(Confirm::Close, |p| Confirm::Act(PickerAction::OpenNote(p))),
+            }
         }
     }
 
@@ -533,6 +575,14 @@ mod tests {
             PickerOutcome::Open,
             "nothing to open"
         );
+    }
+
+    #[test]
+    fn confirming_can_change_the_query() {
+        let mut p = picker();
+        assert_eq!(keys(&mut p, "cher<cr>"), PickerOutcome::Open);
+        assert_eq!(p.input.text(), "ch");
+        assert_eq!((p.delegate.len(), p.mode()), (1, Mode::Insert));
     }
 
     #[test]
