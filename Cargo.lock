@@ -2809,6 +2809,9 @@ dependencies = [
 [[package]]
 name = "mnote-vim"
 version = "0.1.0"
+dependencies = [
+ "ropey",
+]
 
 [[package]]
 name = "moxcms"
