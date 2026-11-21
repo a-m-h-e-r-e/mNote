@@ -1,28 +1,39 @@
 //! mNote desktop app entry point.
 //!
-//! For now this opens one window on the dark `paper` colour from the design
-//! system, to prove the gpui toolchain works. The real window, theme and chrome
-//! arrive in AMI-153 and AMI-154.
+//! Opens one window drawn from the design-system theme. The window chrome (top
+//! bar and status line) arrives in AMI-154.
 
 use gpui::{
-    App, Application, Bounds, Context, SharedString, Window, WindowBounds, WindowOptions, div,
-    prelude::*, px, rgb, size,
+    App, Application, Bounds, Context, SharedString, Subscription, Window, WindowBounds,
+    WindowOptions, div, prelude::*, px, size,
 };
+use mnote_app::theme::{ActiveTheme, Theme, text};
 use mnote_vim::Mode;
-
-/// Dark theme colours from the design system's tokens.json (temporary until AMI-153).
-mod colors {
-    pub const PAPER: u32 = 0x282c34;
-    pub const INK: u32 = 0xd7dae0;
-    pub const INK_3: u32 = 0x969dab;
-}
 
 struct MNoteWindow {
     mode: Mode,
+    _appearance: Subscription,
+}
+
+impl MNoteWindow {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let appearance = cx.observe_window_appearance(window, |_, window, cx| {
+            if Theme::sync_with(window, cx) {
+                cx.notify();
+            }
+        });
+        Self {
+            mode: Mode::default(),
+            _appearance: appearance,
+        }
+    }
 }
 
 impl Render for MNoteWindow {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = cx.theme().palette;
+        let title = text::NOTE_TITLE;
+        let status = text::STATUS;
         div()
             .flex()
             .flex_col()
@@ -30,35 +41,37 @@ impl Render for MNoteWindow {
             .justify_center()
             .items_center()
             .gap_2()
-            .bg(rgb(colors::PAPER))
+            .bg(Theme::color(p.paper))
             .child(
                 div()
-                    .text_3xl()
-                    .text_color(rgb(colors::INK))
-                    .child(SharedString::from("mNote")),
+                    .font_family(title.font_family())
+                    .font_weight(title.font_weight())
+                    .text_size(title.size())
+                    .line_height(title.line_height())
+                    .text_color(Theme::color(p.ink))
+                    .child(SharedString::new_static("mNote")),
             )
             .child(
                 div()
-                    .text_sm()
-                    .text_color(rgb(colors::INK_3))
-                    .child(SharedString::from(self.mode.label())),
+                    .font_family(status.font_family())
+                    .text_size(status.size())
+                    .line_height(status.line_height())
+                    .text_color(Theme::color(p.ink_3))
+                    .child(SharedString::new_static(self.mode.label())),
             )
     }
 }
 
 fn main() {
     Application::new().run(|cx: &mut App| {
+        Theme::init(cx);
         let bounds = Bounds::centered(None, size(px(1200.), px(720.)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |_, cx| {
-                cx.new(|_| MNoteWindow {
-                    mode: Mode::default(),
-                })
-            },
+            |window, cx| cx.new(|cx| MNoteWindow::new(window, cx)),
         )
         .expect("failed to open the mNote window");
         cx.activate(true);

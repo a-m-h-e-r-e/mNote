@@ -1,0 +1,208 @@
+//! The app theme: the design-system tokens plus the dark or light choice, which
+//! follows the system appearance.
+//!
+//! Colours, type, spacing, radii and sizes are generated into [`tokens`] from
+//! `design/tokens.json` by `tools/gen_theme.py`. Never hard-code a colour or size
+//! in a view; read it from [`Theme`] or the token modules.
+
+pub mod fonts;
+mod tokens;
+
+pub use tokens::{Family, Palette, ShadowLayer, TextStyle, family, radius, size, space, text};
+
+use gpui::{
+    App, BoxShadow, FontWeight, Global, Hsla, Pixels, SharedString, Window, WindowAppearance,
+    point, px, rgba,
+};
+
+/// Dark or light. Dark is mNote's primary theme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Appearance {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl From<WindowAppearance> for Appearance {
+    fn from(appearance: WindowAppearance) -> Self {
+        match appearance {
+            WindowAppearance::Dark | WindowAppearance::VibrantDark => Appearance::Dark,
+            WindowAppearance::Light | WindowAppearance::VibrantLight => Appearance::Light,
+        }
+    }
+}
+
+/// The active theme, stored as a gpui global.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Theme {
+    pub appearance: Appearance,
+    pub palette: &'static Palette,
+    modal_shadow: &'static [ShadowLayer],
+}
+
+impl Global for Theme {}
+
+impl Theme {
+    pub fn new(appearance: Appearance) -> Self {
+        match appearance {
+            Appearance::Dark => Self {
+                appearance,
+                palette: &tokens::DARK,
+                modal_shadow: tokens::SHADOW_MODAL_DARK,
+            },
+            Appearance::Light => Self {
+                appearance,
+                palette: &tokens::LIGHT,
+                modal_shadow: tokens::SHADOW_MODAL_LIGHT,
+            },
+        }
+    }
+
+    /// Registers the bundled fonts and installs the theme for the system's
+    /// current appearance.
+    pub fn init(cx: &mut App) {
+        fonts::register(cx);
+        cx.set_global(Self::new(cx.window_appearance().into()));
+    }
+
+    /// Switches the theme when the window's appearance changed. Returns true when
+    /// it did, so the caller can re-render.
+    pub fn sync_with(window: &Window, cx: &mut App) -> bool {
+        let appearance = Appearance::from(window.appearance());
+        if cx.theme().appearance == appearance {
+            return false;
+        }
+        cx.set_global(Self::new(appearance));
+        true
+    }
+
+    /// A palette colour (`0xRRGGBBAA`) as a gpui colour.
+    pub fn color(value: u32) -> Hsla {
+        rgba(value).into()
+    }
+
+    /// The shadow every modal and toast carries. It's the only shadow in mNote.
+    pub fn modal_shadow(&self) -> Vec<BoxShadow> {
+        self.modal_shadow
+            .iter()
+            .map(|l| BoxShadow {
+                color: Self::color(l.color),
+                offset: point(px(l.x), px(l.y)),
+                blur_radius: px(l.blur),
+                spread_radius: px(l.spread),
+            })
+            .collect()
+    }
+}
+
+impl TextStyle {
+    pub fn font_family(&self) -> SharedString {
+        SharedString::new_static(match self.family {
+            Family::Prose => family::PROSE,
+            Family::Mono => family::MONO,
+        })
+    }
+
+    pub fn font_weight(&self) -> FontWeight {
+        FontWeight(f32::from(self.weight))
+    }
+
+    pub fn size(&self) -> Pixels {
+        px(self.size)
+    }
+
+    pub fn line_height(&self) -> Pixels {
+        px(self.line_height)
+    }
+}
+
+/// Access to the active theme from any gpui context.
+pub trait ActiveTheme {
+    fn theme(&self) -> &Theme;
+}
+
+impl ActiveTheme for App {
+    fn theme(&self) -> &Theme {
+        self.global::<Theme>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WCAG 2 relative luminance of an opaque `0xRRGGBBAA` colour.
+    fn luminance(c: u32) -> f64 {
+        let channel = |shift: u32| {
+            let v = f64::from((c >> shift) & 0xff) / 255.0;
+            if v <= 0.039_28 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(24) + 0.7152 * channel(16) + 0.0722 * channel(8)
+    }
+
+    fn contrast(a: u32, b: u32) -> f64 {
+        let (la, lb) = (luminance(a), luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    /// Text pairs the design system promises at 4.5:1, and marks at 3:1.
+    fn pairs(p: &Palette) -> Vec<(&'static str, u32, u32, f64)> {
+        vec![
+            ("ink on paper", p.ink, p.paper, 4.5),
+            ("ink-2 on paper", p.ink_2, p.paper, 4.5),
+            ("ink-3 on paper", p.ink_3, p.paper, 4.5),
+            ("ink-3 on chrome", p.ink_3, p.chrome, 4.5),
+            ("ink-3 on overlay", p.ink_3, p.overlay, 4.5),
+            ("ink-3 on well", p.ink_3, p.well, 4.5),
+            ("ink-2 on overlay", p.ink_2, p.overlay, 4.5),
+            ("select-ink on select", p.select_ink, p.select, 4.5),
+            ("ink on match", p.ink, p.match_, 4.5),
+            ("on-cursor on cursor", p.on_cursor, p.cursor, 4.5),
+            ("insert on insert-wash", p.insert, p.insert_wash, 4.5),
+            ("visual on visual-wash", p.visual, p.visual_wash, 4.5),
+            ("danger on danger-wash", p.danger, p.danger_wash, 4.5),
+            ("syn-heading on paper", p.syn_heading, p.paper, 4.5),
+            ("syn-strong on paper", p.syn_strong, p.paper, 4.5),
+            ("syn-link on paper", p.syn_link, p.paper, 4.5),
+            ("syn-url on paper", p.syn_url, p.paper, 4.5),
+            ("syn-code on well", p.syn_code, p.well, 4.5),
+            ("syn-keyword on well", p.syn_keyword, p.well, 4.5),
+            ("cursor on paper", p.cursor, p.paper, 3.0),
+            ("line-strong on overlay", p.line_strong, p.overlay, 3.0),
+        ]
+    }
+
+    #[test]
+    fn every_theme_meets_its_contrast_promises() {
+        for (name, palette) in [("dark", &tokens::DARK), ("light", &tokens::LIGHT)] {
+            for (pair, fg, bg, min) in pairs(palette) {
+                let ratio = contrast(fg, bg);
+                assert!(
+                    ratio >= min,
+                    "{name}: {pair} is {ratio:.2}:1, needs {min}:1"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn system_appearance_picks_the_theme() {
+        assert_eq!(
+            Appearance::from(WindowAppearance::VibrantDark),
+            Appearance::Dark
+        );
+        assert_eq!(Appearance::from(WindowAppearance::Light), Appearance::Light);
+        assert_eq!(Theme::new(Appearance::Dark).palette.paper, 0x282c34ff);
+        assert_eq!(Theme::new(Appearance::Light).palette.paper, 0xfbfcfbff);
+    }
+
+    #[test]
+    fn modal_shadow_has_its_layers() {
+        assert_eq!(Theme::new(Appearance::Dark).modal_shadow().len(), 2);
+        assert_eq!(Theme::new(Appearance::Light).modal_shadow().len(), 2);
+    }
+}
