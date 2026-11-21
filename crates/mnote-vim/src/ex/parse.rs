@@ -50,6 +50,10 @@ pub struct Parsed<'a> {
 /// matters where abbreviations overlap: the first match wins.
 const COMMANDS: &[(&str, usize)] = &[
     ("substitute", 1),
+    ("cnext", 2),
+    ("cNext", 2),
+    ("cprevious", 2),
+    ("copen", 4),
     ("global", 1),
     ("vglobal", 1),
     ("delete", 1),
@@ -310,6 +314,10 @@ mod tests {
         assert_eq!(parse("m 0").expect("ok").name, "move");
         assert_eq!(parse(">>").expect("ok").args, ">");
         assert_eq!(parse("42").expect("ok").name, "goto");
+        assert_eq!(parse("cn").expect("ok").name, "cnext");
+        assert_eq!(parse("cp").expect("ok").name, "cprevious");
+        assert_eq!(parse("cope").expect("ok").name, "copen");
+        assert_eq!(parse("co 0").expect("ok").name, "copy");
     }
 
     #[test]

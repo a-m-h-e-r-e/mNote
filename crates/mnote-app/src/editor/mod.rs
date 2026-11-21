@@ -30,7 +30,8 @@ use mnote_vim::text::{clamp_normal, line_count, line_len, line_of, line_start};
 use mnote_vim::{Clipboard, Effect, Mode, Vim};
 
 use crate::picker::finder::{CurrentNote, Finder};
-use crate::picker::{Picker, PickerAction, PickerOutcome};
+use crate::picker::list::ListPicker;
+use crate::picker::{ListEntry, Picker, PickerAction, PickerOutcome};
 use crate::theme::{ActiveTheme, Palette, StyledExt, Theme, family, size, space, text};
 use crate::ui::{CommandLine, CompletionPopup, MessagePanel, StatusLine, TopBar};
 use line::{Caret, Highlight, LineText};
@@ -105,6 +106,9 @@ pub struct Editor {
     picker: Option<Picker>,
     /// `space` was pressed in NORMAL mode: the next key is a leader command.
     leader: bool,
+    /// The results list (`⌃q` in content search) and where `:cnext` is.
+    list: Vec<ListEntry>,
+    list_pos: usize,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -198,6 +202,8 @@ impl Editor {
             index: Rc::default(),
             picker: None,
             leader: false,
+            list: Vec::new(),
+            list_pos: 0,
             _tasks: Vec::new(),
             _subscriptions: subscriptions,
         }
@@ -285,7 +291,11 @@ impl Editor {
                 },
                 text: self.buffer.to_string(),
             };
-            let finder = Finder::new(self.index.clone(), current);
+            let vault = match &self.source {
+                Source::Note { vault, .. } => Some(vault.clone()),
+                Source::Scratch => None,
+            };
+            let finder = Finder::new(self.index.clone(), current, vault);
             self.picker = Some(Picker::new(Box::new(finder)));
             self.restart_blink(cx);
             cx.notify();
@@ -313,7 +323,76 @@ impl Editor {
                 self.restart_blink(cx);
             }
         }
+        self.run_picker_job(cx);
         cx.notify();
+    }
+
+    /// Runs the picker's background work (a content search) off the UI
+    /// thread and hands the result back, if the picker is still open.
+    fn run_picker_job(&mut self, cx: &mut Context<Self>) {
+        let Some(job) = self.picker.as_mut().and_then(Picker::take_job) else {
+            return;
+        };
+        let task = cx.background_executor().spawn(async move { job() });
+        cx.spawn(async move |this, cx| {
+            if let Some(result) = task.await {
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(picker) = this.picker.as_mut() {
+                        picker.job_done(result);
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Opens `path` (if it isn't open) with the cursor at `line`.
+    fn go_to(&mut self, path: NotePath, line: usize, cx: &mut Context<Self>) {
+        let here = matches!(&self.source, Source::Note { note, .. } if *note == path);
+        if !here {
+            self.switch_to(path.clone(), cx);
+            if !matches!(&self.source, Source::Note { note, .. } if *note == path) {
+                return;
+            }
+        }
+        self.go_to_line(line);
+    }
+
+    fn go_to_line(&mut self, line: usize) {
+        let rope = self.buffer.text();
+        let line = line.min(line_count(rope).saturating_sub(1));
+        self.vim.set_cursor(line_start(rope, line));
+        self.lines.scroll_to_reveal_item(line);
+    }
+
+    /// `:cnext` (`by` 1), `:cprevious` (-1), or a jump to entry `to`.
+    fn list_go(&mut self, to: usize, cx: &mut Context<Self>) {
+        let Some(entry) = self.list.get(to).cloned() else {
+            return;
+        };
+        self.list_pos = to;
+        self.go_to(entry.path, entry.line, cx);
+        self.reply = Some((
+            format!("({} of {}) {}", to + 1, self.list.len(), entry.text).into(),
+            false,
+        ));
+    }
+
+    fn list_step(&mut self, by: isize, cx: &mut Context<Self>) {
+        if self.list.is_empty() {
+            self.reply = Some((
+                "E42: No results list (⌃q in a / search makes one)".into(),
+                true,
+            ));
+            return;
+        }
+        let to = self.list_pos as isize + by;
+        if to < 0 || to as usize >= self.list.len() {
+            self.reply = Some(("E553: No more items".into(), true));
+            return;
+        }
+        self.list_go(to as usize, cx);
     }
 
     fn picker_action(&mut self, action: PickerAction, cx: &mut Context<Self>) {
@@ -334,12 +413,13 @@ impl Editor {
                 self.index.borrow_mut().note_saved(note.clone(), "");
                 self.switch_to(note, cx);
             }
-            PickerAction::GoToLine(line) => {
-                let rope = self.buffer.text();
-                let line = line.min(line_count(rope).saturating_sub(1));
-                self.vim.set_cursor(line_start(rope, line));
-                self.lines.scroll_to_reveal_item(line);
+            PickerAction::GoToLine(line) => self.go_to_line(line),
+            PickerAction::JumpTo { path, line } => self.go_to(path, line, cx),
+            PickerAction::SendToList(entries) => {
+                self.list = entries;
+                self.list_go(0, cx);
             }
+            PickerAction::ListGo(n) => self.list_go(n, cx),
             PickerAction::RunEx(command) => {
                 let revision = self.buffer.revision();
                 match self.vim.execute(&command, &mut self.buffer) {
@@ -425,6 +505,20 @@ impl Editor {
             AppCommand::Explore(_) => self.not_yet(":explore"),
             AppCommand::Find(_) => self.not_yet(":find"),
             AppCommand::Daily => self.not_yet(":daily"),
+            AppCommand::ListNext => self.list_step(1, cx),
+            AppCommand::ListPrevious => self.list_step(-1, cx),
+            AppCommand::ListOpen => {
+                if self.list.is_empty() {
+                    self.reply = Some((
+                        "E42: No results list (⌃q in a / search makes one)".into(),
+                        true,
+                    ));
+                } else {
+                    let list = ListPicker::new(self.list.clone());
+                    self.picker = Some(Picker::new(Box::new(list)));
+                    self.restart_blink(cx);
+                }
+            }
         }
     }
 

@@ -2804,6 +2804,7 @@ version = "0.1.0"
 dependencies = [
  "notify",
  "nucleo-matcher",
+ "regex",
  "ropey",
  "tree-sitter",
  "tree-sitter-md",

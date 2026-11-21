@@ -8,6 +8,7 @@
 //! on top of itself.
 
 pub mod finder;
+pub mod list;
 
 use std::ops::Range;
 
@@ -16,6 +17,7 @@ use gpui::{
     StyledText, div, font, prelude::FluentBuilder, px,
 };
 use mnote_core::NotePath;
+use mnote_core::content::FileHits;
 use mnote_vim::{InputAction, Key, Mode, VimInput};
 
 use crate::editor::line::{Caret, LineText};
@@ -42,6 +44,31 @@ pub struct Row {
     pub detail: Option<SharedString>,
     /// A secondary row in `ink-2`, such as "create …".
     pub quiet: bool,
+    pub kind: RowKind,
+    /// Byte ranges of `label` on the `match` fill (content search hits).
+    pub marks: Vec<Range<usize>>,
+}
+
+/// How a row looks and behaves.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RowKind {
+    /// An ordinary row.
+    #[default]
+    Item,
+    /// A heading over the rows below it (a file in content search). It can't
+    /// be selected.
+    Group,
+    /// A matching line, shown in mono after its line number (1-based).
+    Hit { line: usize },
+}
+
+/// Lines of a file around a hit, for the preview.
+#[derive(Debug, Clone, Default)]
+pub struct CodePreview {
+    /// `(line number, text, marked byte ranges)`, 1-based line numbers.
+    pub lines: Vec<(usize, SharedString, Vec<Range<usize>>)>,
+    /// The line number of the hit, drawn on `well`.
+    pub current: usize,
 }
 
 /// What the preview pane shows for the selected row.
@@ -50,6 +77,7 @@ pub struct PreviewContent {
     pub title: SharedString,
     pub meta: Option<SharedString>,
     pub lines: Vec<SharedString>,
+    pub code: Option<CodePreview>,
 }
 
 /// What confirming a row asks the app to do.
@@ -62,6 +90,38 @@ pub enum PickerAction {
     GoToLine(usize),
     /// Run an ex command, as if typed after `:`.
     RunEx(String),
+    /// Open a note at a line (0-based).
+    JumpTo {
+        path: NotePath,
+        line: usize,
+    },
+    /// Keep these places as the results list (`⌃q`), and go to the first.
+    SendToList(Vec<ListEntry>),
+    /// Go to entry `n` of the results list (`:copen`).
+    ListGo(usize),
+}
+
+/// A place in the results list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListEntry {
+    pub path: NotePath,
+    /// 0-based.
+    pub line: usize,
+    /// The line's text, as it was when found.
+    pub text: String,
+}
+
+/// Work a picker hands off to a background thread.
+pub type Job = Box<dyn FnOnce() -> Option<JobResult> + Send>;
+
+/// What a [`Job`] found.
+#[derive(Debug)]
+pub enum JobResult {
+    /// Content search results for the search started in `generation`.
+    Content {
+        generation: u64,
+        files: Vec<FileHits>,
+    },
 }
 
 /// What confirming a row does.
@@ -129,6 +189,24 @@ pub trait PickerDelegate {
     fn count(&self) -> Option<SharedString> {
         None
     }
+
+    /// Whether row `ix` can be selected (group rows can't).
+    fn selectable(&self, _ix: usize) -> bool {
+        true
+    }
+
+    /// Background work to start after the query changed, if any.
+    fn take_job(&mut self) -> Option<Job> {
+        None
+    }
+
+    /// A job's result arrived.
+    fn job_done(&mut self, _result: JobResult) {}
+
+    /// `⌃q`: the results as a list, if this picker has places to list.
+    fn send_to_list(&mut self) -> Option<PickerAction> {
+        None
+    }
 }
 
 /// An open picker.
@@ -161,16 +239,21 @@ impl Picker {
 
     /// Handles one key.
     pub fn handle_key(&mut self, key: Key) -> PickerOutcome {
+        if key == Key::Ctrl('q') {
+            return match self.delegate.send_to_list() {
+                Some(action) => PickerOutcome::Act(action),
+                None => PickerOutcome::Open,
+            };
+        }
         match self.input.handle_key(key, |c| c == 'l') {
             InputAction::Edited => {
                 self.delegate.set_query(&self.input.text());
-                self.selected = 0;
-                self.scroll = 0;
+                self.reset_selection();
             }
             InputAction::Moved => {}
             InputAction::Select(by) => self.move_selection(by),
             InputAction::Submit | InputAction::Claimed('l') => {
-                if self.delegate.is_empty() {
+                if self.delegate.is_empty() || !self.delegate.selectable(self.selected) {
                     return PickerOutcome::Open;
                 }
                 return match self.delegate.confirm(self.selected) {
@@ -192,18 +275,51 @@ impl Picker {
     pub fn set_query(&mut self, query: &str) {
         self.input = VimInput::new(query);
         self.delegate.set_query(query);
-        self.selected = 0;
-        self.scroll = 0;
+        self.reset_selection();
     }
 
-    /// Moves the selection, wrapping at both ends as Vim's completion menu
-    /// does.
+    /// Background work the delegate wants done now.
+    pub fn take_job(&mut self) -> Option<Job> {
+        self.delegate.take_job()
+    }
+
+    /// Hands a finished job back to the delegate.
+    pub fn job_done(&mut self, result: JobResult) {
+        self.delegate.job_done(result);
+        self.reset_selection();
+    }
+
+    /// The first selectable row, at the top of the list.
+    fn reset_selection(&mut self) {
+        self.selected = 0;
+        self.scroll = 0;
+        if !self.delegate.is_empty() && !self.delegate.selectable(0) {
+            self.move_selection(1);
+        }
+    }
+
+    /// Moves the selection over selectable rows, wrapping at both ends as
+    /// Vim's completion menu does.
     fn move_selection(&mut self, by: isize) {
         let len = self.delegate.len();
         if len == 0 {
             return;
         }
-        self.selected = (self.selected as isize + by).rem_euclid(len as isize) as usize;
+        let step = by.signum();
+        let mut left = by.unsigned_abs();
+        let mut at = self.selected;
+        for _ in 0..len * by.unsigned_abs().max(1) {
+            at = (at as isize + step).rem_euclid(len as isize) as usize;
+            if self.delegate.selectable(at) {
+                left -= 1;
+                if left == 0 {
+                    break;
+                }
+            }
+        }
+        if self.delegate.selectable(at) {
+            self.selected = at;
+        }
     }
 
     /// Keeps the selection inside the `rows` visible ones.
@@ -396,14 +512,10 @@ impl Picker {
     }
 }
 
-fn render_row(row: &Row, selected: bool, p: &Palette) -> AnyElement {
-    let (ink, quiet, strong) = match (selected, row.quiet) {
-        (true, _) => (p.select_ink, p.select_ink, p.select_ink),
-        (false, true) => (p.ink_2, p.ink_3, p.ink),
-        (false, false) => (p.ink, p.ink_3, p.ink),
-    };
+/// Bold for fuzzy-matched characters, the `match` fill for marked ranges.
+fn label_styles(row: &Row, strong: u32, p: &Palette) -> Vec<(Range<usize>, HighlightStyle)> {
     let label = &row.label;
-    let bold: Vec<(Range<usize>, HighlightStyle)> = label
+    let mut styles: Vec<(Range<usize>, HighlightStyle)> = label
         .char_indices()
         .enumerate()
         .filter(|(i, _)| row.matches.contains(i))
@@ -416,6 +528,61 @@ fn render_row(row: &Row, selected: bool, p: &Palette) -> AnyElement {
             (b..b + c.len_utf8(), style)
         })
         .collect();
+    styles.extend(marks(&row.marks, label.len(), p));
+    styles
+}
+
+/// Match-fill styles for byte ranges, clipped to `len` and kept on char
+/// boundaries by the caller.
+fn marks(ranges: &[Range<usize>], len: usize, p: &Palette) -> Vec<(Range<usize>, HighlightStyle)> {
+    ranges
+        .iter()
+        .filter(|r| r.start < r.end && r.end <= len)
+        .map(|r| {
+            let style = HighlightStyle {
+                background_color: Some(Theme::color(p.match_)),
+                color: Some(Theme::color(p.ink)),
+                ..HighlightStyle::default()
+            };
+            (r.clone(), style)
+        })
+        .collect()
+}
+
+fn render_row(row: &Row, selected: bool, p: &Palette) -> AnyElement {
+    if row.kind == RowKind::Group {
+        return div()
+            .flex()
+            .flex_none()
+            .items_baseline()
+            .gap(px(6.))
+            .pt(px(6.))
+            .pb(px(2.))
+            .px(px(space::S2))
+            .whitespace_nowrap()
+            .overflow_hidden()
+            .text_style(text::UI_STRONG)
+            .text_color(Theme::color(p.ink))
+            .child(row.label.clone())
+            .children(row.detail.clone().map(|detail| {
+                div()
+                    .text_style(text::HINT)
+                    .font_weight(FontWeight::NORMAL)
+                    .text_color(Theme::color(p.ink_3))
+                    .child(detail)
+            }))
+            .into_any_element();
+    }
+    let (ink, quiet, strong) = match (selected, row.quiet) {
+        (true, _) => (p.select_ink, p.select_ink, p.select_ink),
+        (false, true) => (p.ink_2, p.ink_3, p.ink),
+        (false, false) => (p.ink, p.ink_3, p.ink),
+    };
+    let styles = label_styles(row, strong, p);
+    let hit_line = match row.kind {
+        RowKind::Hit { line } => Some(line),
+        _ => None,
+    };
     div()
         .flex()
         .flex_none()
@@ -427,14 +594,24 @@ fn render_row(row: &Row, selected: bool, p: &Palette) -> AnyElement {
         .whitespace_nowrap()
         .overflow_hidden()
         .text_style(text::UI)
+        .when(hit_line.is_some(), |row| {
+            row.text_style(text::STATUS).line_height(px(20.))
+        })
         .text_color(Theme::color(ink))
         .when(selected, |row| row.bg(Theme::color(p.select)))
+        .children(hit_line.map(|line| {
+            div()
+                .flex_none()
+                .min_w(px(22.))
+                .text_color(Theme::color(quiet))
+                .child(SharedString::from(line.to_string()))
+        }))
         .child(
             div()
                 .min_w_0()
                 .overflow_hidden()
                 .text_ellipsis()
-                .child(StyledText::new(label.clone()).with_highlights(bold)),
+                .child(StyledText::new(row.label.clone()).with_highlights(styles)),
         )
         .child(div().flex_1())
         .children(row.detail.clone().map(|detail| {
@@ -482,6 +659,35 @@ fn render_preview(content: PreviewContent, p: &Palette) -> AnyElement {
                 .into_iter()
                 .map(|line| div().whitespace_nowrap().overflow_hidden().child(line)),
         )
+        .children(content.code.map(|code| {
+            div()
+                .flex()
+                .flex_col()
+                .text_style(text::STATUS)
+                .line_height(px(20.))
+                .children(code.lines.into_iter().map(|(number, line, ranges)| {
+                    let current = number == code.current;
+                    let styles = marks(&ranges, line.len(), p);
+                    div()
+                        .flex()
+                        .gap(px(space::S2))
+                        .rounded(px(radius::SM))
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .when(current, |row| {
+                            row.bg(Theme::color(p.well)).text_color(Theme::color(p.ink))
+                        })
+                        .child(
+                            div()
+                                .flex_none()
+                                .min_w(px(28.))
+                                .text_right()
+                                .text_color(Theme::color(p.ink_3))
+                                .child(SharedString::from(number.to_string())),
+                        )
+                        .child(StyledText::new(line).with_highlights(styles))
+                }))
+        }))
         .into_any_element()
 }
 

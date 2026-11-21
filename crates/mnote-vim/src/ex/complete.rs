@@ -46,6 +46,9 @@ impl Completion {
 /// Commands offered by completion, with what each does. Abbreviations that
 /// are only aliases (`t`, `display`, `xit`) are left out.
 const COMMANDS: &[(&str, &str)] = &[
+    ("cnext", "next place in the results list"),
+    ("copen", "show the results list"),
+    ("cprevious", "previous place in the results list"),
     ("copy", "copy lines below an address"),
     ("daily", "open today's note"),
     ("delete", "delete lines"),

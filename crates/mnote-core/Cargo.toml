@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 notify.workspace = true
 nucleo-matcher.workspace = true
+regex.workspace = true
 ropey.workspace = true
 tree-sitter.workspace = true
 tree-sitter-md.workspace = true

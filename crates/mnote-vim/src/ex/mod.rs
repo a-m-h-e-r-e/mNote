@@ -92,6 +92,12 @@ pub enum AppCommand {
     Find(Option<String>),
     /// `:daily`
     Daily,
+    /// `:cnext`: the next place in the results list.
+    ListNext,
+    /// `:cprevious` / `:cNext`
+    ListPrevious,
+    /// `:copen`: the results list in a picker.
+    ListOpen,
 }
 
 /// What a successful command produced.
@@ -406,6 +412,14 @@ impl Vim {
             "view" => Ok(ExOutcome::app(AppCommand::View(arg()))),
             "explore" => Ok(ExOutcome::app(AppCommand::Explore(arg()))),
             "find" => Ok(ExOutcome::app(AppCommand::Find(arg()))),
+            "cnext" | "cprevious" | "cNext" | "copen" => {
+                no_args(args)?;
+                Ok(ExOutcome::app(match cmd.name {
+                    "cnext" => AppCommand::ListNext,
+                    "copen" => AppCommand::ListOpen,
+                    _ => AppCommand::ListPrevious,
+                }))
+            }
             "daily" => {
                 no_args(args)?;
                 Ok(ExOutcome::app(AppCommand::Daily))
