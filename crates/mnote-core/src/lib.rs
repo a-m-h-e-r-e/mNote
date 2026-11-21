@@ -1,0 +1,43 @@
+//! mNote's core: the vault of plain Markdown files, the note index and links.
+//!
+//! This crate has no UI dependencies so it can be tested on its own and reused
+//! by a future CLI. The vault itself arrives in AMI-155.
+
+use std::path::Path;
+
+/// File extensions mNote treats as notes.
+pub const NOTE_EXTENSIONS: &[&str] = &["md", "markdown"];
+
+/// Returns true when `path` looks like a note mNote should index.
+///
+/// Hidden files and folders (such as `.obsidian/` or `.git/`) are skipped.
+pub fn is_note(path: &Path) -> bool {
+    let hidden = path
+        .components()
+        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'));
+    let has_note_ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| NOTE_EXTENSIONS.iter().any(|n| n.eq_ignore_ascii_case(e)));
+    has_note_ext && !hidden
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn markdown_files_are_notes() {
+        assert!(is_note(Path::new("projects/ui-design.md")));
+        assert!(is_note(Path::new("README.MD")));
+        assert!(is_note(Path::new("journal/2026-11-21.markdown")));
+    }
+
+    #[test]
+    fn other_and_hidden_files_are_not_notes() {
+        assert!(!is_note(Path::new("assets/explorer.png")));
+        assert!(!is_note(Path::new("notes")));
+        assert!(!is_note(Path::new(".obsidian/workspace.md")));
+        assert!(!is_note(Path::new("projects/.draft.md")));
+    }
+}

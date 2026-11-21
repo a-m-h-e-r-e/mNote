@@ -1,0 +1,12 @@
+[package]
+name = "mnote-vim"
+description = "Vim modes, motions, operators and the ex command parser for mNote. Pure logic."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

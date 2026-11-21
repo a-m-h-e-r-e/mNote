@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = ["crates/mnote-core", "crates/mnote-vim", "crates/mnote-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+mnote-core = { path = "crates/mnote-core" }
+mnote-vim = { path = "crates/mnote-vim" }
+gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.dev]
+# Line tables are enough for backtraces and keep gpui debug builds a fraction of the size.
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false

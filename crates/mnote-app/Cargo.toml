@@ -1,0 +1,19 @@
+[package]
+name = "mnote-app"
+description = "The mNote desktop app, built with gpui."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "mnote"
+path = "src/main.rs"
+
+[dependencies]
+gpui.workspace = true
+mnote-core.workspace = true
+mnote-vim.workspace = true
+
+[lints]
+workspace = true
