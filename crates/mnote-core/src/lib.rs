@@ -1,9 +1,21 @@
 //! mNote's core: the vault of plain Markdown files, the note index and links.
 //!
-//! This crate has no UI dependencies so it can be tested on its own and reused
-//! by a future CLI. The vault itself arrives in AMI-155.
+//! This crate has no UI dependencies, so it can be tested on its own and reused
+//! by a future CLI.
+
+mod error;
+pub mod frontmatter;
+mod note_path;
+mod vault;
+mod watch;
 
 use std::path::Path;
+
+pub use error::{Result, VaultError};
+pub use frontmatter::Frontmatter;
+pub use note_path::NotePath;
+pub use vault::Vault;
+pub use watch::{VaultEvent, VaultWatcher};
 
 /// File extensions mNote treats as notes.
 pub const NOTE_EXTENSIONS: &[&str] = &["md", "markdown"];
