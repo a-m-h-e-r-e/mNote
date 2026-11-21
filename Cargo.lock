@@ -2803,6 +2803,7 @@ name = "mnote-core"
 version = "0.1.0"
 dependencies = [
  "notify",
+ "nucleo-matcher",
  "ropey",
  "tree-sitter",
  "tree-sitter-md",
@@ -2978,6 +2979,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cbd044e85df3d939d8e32a1c35a3b737c7d0a4eeb7acd737bd207644e00f4e5f"
 dependencies = [
  "bitflags 2.13.2",
+]
+
+[[package]]
+name = "nucleo-matcher"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf33f538733d1a5a3494b836ba913207f14d9d4a1d3cd67030c5061bdd2cac85"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

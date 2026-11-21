@@ -21,6 +21,9 @@ tree-sitter = "0.27.1"
 tree-sitter-md = { version = "0.5.4", default-features = false }
 # regex: Vim search patterns and :s. Already in the tree through tree-sitter and gpui.
 regex = { version = "1.13.2", default-features = false, features = ["std", "perf", "unicode"] }
+# nucleo-matcher: the fuzzy matcher of nucleo (Helix), for the finder and pickers.
+# Only the matcher: nucleo's own threading isn't needed. Needs memchr, already locked.
+nucleo-matcher = { version = "0.3.1", default-features = false, features = ["unicode-normalization", "unicode-casefold"] }
 # async-channel: carries file-watcher events to the UI thread. Already in gpui's tree.
 async-channel = "2.5.0"
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }
