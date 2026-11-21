@@ -116,6 +116,19 @@ impl TextStyle {
     }
 }
 
+/// Applies a design-system text style (family, size, line height, weight) to
+/// any styled element: `div().text_style(text::STATUS)`.
+pub trait StyledExt: gpui::Styled + Sized {
+    fn text_style(self, style: TextStyle) -> Self {
+        self.font_family(style.font_family())
+            .text_size(style.size())
+            .line_height(style.line_height())
+            .font_weight(style.font_weight())
+    }
+}
+
+impl<E: gpui::Styled> StyledExt for E {}
+
 /// Access to the active theme from any gpui context.
 pub trait ActiveTheme {
     fn theme(&self) -> &Theme;
