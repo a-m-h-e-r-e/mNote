@@ -3,21 +3,24 @@
 //! Pure logic with no UI or file-system access, so every behaviour can be unit
 //! tested. Text is a `ropey::Rope`; positions are character offsets.
 //!
-//! - [`Vim`] is the mode state machine: keys in, [`Action`]s out.
+//! - [`Vim`] is the mode state machine. It reads keys and edits a
+//!   `mnote_core::Buffer`: motions, operators, text objects, registers, marks,
+//!   undo and `.` repeat. The ex command parser arrives in AMI-160.
 //! - [`Motion`] computes where a motion lands and how operators treat it.
-//! - Operators, text objects and registers arrive in AMI-158, the ex parser in
-//!   AMI-160.
 
 mod keys;
 mod motion;
+mod registers;
 mod state;
 pub mod text;
+mod textobj;
 
 use std::fmt;
 
 pub use keys::{Key, parse_keys};
 pub use motion::{Find, Motion, MotionKind, Target};
-pub use state::{Action, Vim};
+pub use registers::{Clipboard, MemoryClipboard, Register};
+pub use state::{Effect, Operator, Vim};
 
 /// The Vim mode an editor or text input is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -48,6 +51,11 @@ impl Mode {
             Mode::VisualLine => "V-LINE",
             Mode::Command => "COMMAND",
         }
+    }
+
+    /// Visual or visual-line mode.
+    pub fn is_visual(self) -> bool {
+        matches!(self, Mode::Visual | Mode::VisualLine)
     }
 
     pub fn caret(self) -> CaretShape {
@@ -89,40 +97,41 @@ mod tests {
 }
 
 /// Motion tests written the way Vim's docs read: `|` marks the cursor.
+/// Shared test harness: `|` in a string marks the cursor.
+#[cfg(test)]
+pub(crate) mod harness {
+    use super::*;
+    use mnote_core::Buffer;
+
+    /// Runs `keys` on `before` (cursor at its `|`) and returns the text with
+    /// `|` at the new cursor, plus the Vim state for further checks.
+    pub fn run(before: &str, keys: &str) -> (String, Vim, Buffer) {
+        let start = before.find('|').expect("cursor marker in before");
+        let mut buf = Buffer::new(&before.replacen('|', "", 1));
+        let mut vim = Vim::new();
+        vim.set_cursor(buf.text().byte_to_char(start));
+        for key in parse_keys(keys) {
+            vim.handle_key(key, &mut buf);
+        }
+        let mut shown = buf.to_string();
+        let at = buf.text().char_to_byte(vim.cursor().min(buf.len_chars()));
+        shown.insert(at, '|');
+        (shown, vim, buf)
+    }
+
+    /// Asserts that `keys` turn `before` into `after`, text and cursor.
+    #[track_caller]
+    pub fn check(before: &str, keys: &str, after: &str) {
+        let (got, _, _) = run(before, keys);
+        assert_eq!(got, after, "after {keys:?} on {before:?}");
+    }
+}
+
 #[cfg(test)]
 mod motion_tests {
+    use super::harness::check;
     use super::*;
-    use ropey::Rope;
-
-    /// Runs `keys` in normal mode on `before` and checks the cursor lands
-    /// where `after` puts its `|`. Both strings are the same text otherwise.
-    #[track_caller]
-    fn check(before: &str, keys: &str, after: &str) {
-        let start = before.find('|').expect("cursor marker in before");
-        let text = Rope::from_str(&before.replacen('|', "", 1));
-        let want = after.find('|').expect("cursor marker in after");
-        assert_eq!(
-            before.replacen('|', "", 1),
-            after.replacen('|', "", 1),
-            "test texts differ"
-        );
-        let mut vim = Vim::new();
-        vim.set_cursor(text.byte_to_char(start));
-        for key in parse_keys(keys) {
-            vim.handle_key(key, &text);
-        }
-        let got = vim.cursor();
-        let shown = {
-            let mut s = text.to_string();
-            s.insert(text.char_to_byte(got), '|');
-            s
-        };
-        assert_eq!(
-            got,
-            text.byte_to_char(want),
-            "after {keys:?}:\n got: {shown:?}\nwant: {after:?}"
-        );
-    }
+    use mnote_core::Buffer;
 
     #[test]
     fn h_and_l_stay_on_the_line() {
@@ -232,48 +241,46 @@ mod motion_tests {
 
     #[test]
     fn modes_switch_and_move_the_cursor_like_vim() {
-        let text = Rope::from_str("  hello\n");
+        let mut buf = Buffer::new("  hello\n");
         let mut vim = Vim::new();
         vim.set_cursor(4);
+        vim.handle_key(Key::Char('a'), &mut buf);
+        assert_eq!((vim.mode(), vim.cursor()), (Mode::Insert, 5));
+        vim.handle_key(Key::Char('x'), &mut buf);
+        assert_eq!(buf.to_string(), "  helxlo\n");
+        vim.handle_key(Key::Esc, &mut buf);
         assert_eq!(
-            vim.handle_key(Key::Char('a'), &text),
-            Action::ModeChanged(Mode::Insert)
+            (vim.mode(), vim.cursor()),
+            (Mode::Normal, 5),
+            "esc steps back onto the typed character"
         );
-        assert_eq!(vim.cursor(), 5);
-        assert_eq!(
-            vim.handle_key(Key::Char('x'), &text),
-            Action::Insert("x".into())
-        );
-        assert_eq!(
-            vim.handle_key(Key::Esc, &text),
-            Action::ModeChanged(Mode::Normal)
-        );
-        assert_eq!(vim.cursor(), 4, "esc steps back onto the last character");
-        vim.handle_key(Key::Char('I'), &text);
+        vim.handle_key(Key::Char('I'), &mut buf);
         assert_eq!((vim.mode(), vim.cursor()), (Mode::Insert, 2));
-        vim.handle_key(Key::Esc, &text);
-        vim.handle_key(Key::Char('A'), &text);
-        assert_eq!(vim.cursor(), 7);
-        vim.handle_key(Key::Esc, &text);
-        vim.handle_key(Key::Char(':'), &text);
+        vim.handle_key(Key::Esc, &mut buf);
+        vim.handle_key(Key::Char('A'), &mut buf);
+        assert_eq!(vim.cursor(), 8);
+        vim.handle_key(Key::Esc, &mut buf);
+        vim.handle_key(Key::Char(':'), &mut buf);
         assert_eq!(vim.mode(), Mode::Command);
-        vim.handle_key(Key::Esc, &text);
+        assert_eq!(
+            vim.handle_key(Key::Char('w'), &mut buf),
+            Effect::Unhandled(Key::Char('w'))
+        );
+        vim.handle_key(Key::Esc, &mut buf);
         assert_eq!(vim.mode(), Mode::Normal);
     }
 
     #[test]
     fn visual_mode_selects_from_anchor_to_cursor() {
-        let text = Rope::from_str("one two three");
+        let mut buf = Buffer::new("one two three");
         let mut vim = Vim::new();
         vim.set_cursor(4);
-        vim.handle_key(Key::Char('v'), &text);
-        for key in parse_keys("e") {
-            vim.handle_key(key, &text);
-        }
+        vim.handle_key(Key::Char('v'), &mut buf);
+        vim.handle_key(Key::Char('e'), &mut buf);
         assert_eq!(vim.selection(), Some(4..7));
-        vim.handle_key(Key::Char('o'), &text);
+        vim.handle_key(Key::Char('o'), &mut buf);
         assert_eq!((vim.anchor(), vim.cursor()), (6, 4));
-        vim.handle_key(Key::Esc, &text);
+        vim.handle_key(Key::Esc, &mut buf);
         assert_eq!((vim.mode(), vim.selection()), (Mode::Normal, None));
     }
 
@@ -285,42 +292,240 @@ mod motion_tests {
     #[test]
     fn a_stray_key_cancels_a_half_typed_sequence() {
         check("|a-b", "fg", "|a-b");
-        check("|one two", "gx w", "one |two");
+        check("|one two", "gxw", "one |two");
         check("|one two three", "2gxw", "one |two three");
     }
 
     #[test]
-    fn empty_text_never_panics() {
-        let text = Rope::new();
+    fn unbound_keys_are_left_to_the_app() {
+        let mut buf = Buffer::new("text");
         let mut vim = Vim::new();
-        for key in parse_keys("hjklwbeWBE0^$ggG%{}]][[fxtx;,vjk<esc>") {
-            vim.handle_key(key, &text);
-            assert_eq!(vim.cursor(), 0);
+        assert_eq!(
+            vim.handle_key(Key::Char(' '), &mut buf),
+            Effect::Unhandled(Key::Char(' '))
+        );
+    }
+
+    #[test]
+    fn empty_text_never_panics() {
+        let mut buf = Buffer::new("");
+        let mut vim = Vim::new();
+        for key in parse_keys("hjklwbeWBE0^$ggG%{}]][[fxtx;,vjk<esc>xXDdddwyypPu<c-r>.>><<guu~") {
+            vim.handle_key(key, &mut buf);
+            assert!(vim.cursor() <= buf.len_chars());
         }
+    }
+}
+
+#[cfg(test)]
+mod operator_tests {
+    use super::harness::{check, run};
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[test]
+    fn delete_with_motions() {
+        check("one |two three", "dw", "one |three");
+        check("one |two three", "d2w", "one| ");
+        check("one tw|o\nthree", "dw", "one t|w\nthree");
+        check("|one two", "de", "| two");
+        check("one |two", "d$", "one| ");
+        check("one |two", "D", "one| ");
+        check("a-|b-c", "dt-", "a-|-c");
+        check("a|bc", "x", "a|c");
+        check("ab|c", "x", "a|b");
+        check("ab|c", "X", "a|c");
+        check("|abc", "fzd", "|abc");
+    }
+
+    #[test]
+    fn doubled_operators_work_on_whole_lines() {
+        check("one\n|two\nthree\n", "dd", "one\n|three\n");
+        check("one\ntwo\n|three", "dd", "one\n|two");
+        check("|a\nb\nc\n", "2dd", "|c\n");
+        check("|a\nb\nc\n", "d2d", "|c\n");
+        check("|a\nb\nc\n", "dj", "|c\n");
+        check("one\n|two\n", "yyp", "one\ntwo\n|two\n");
+        check("  |old\n", "ccnew<esc>", "  ne|w\n");
+        check("|a\nb\n", ">>", "  |a\nb\n");
+        check("|a\nb\n", "2>>", "  |a\n  b\n");
+        check("    |a\n", "<<", "  |a\n");
+        check("\t|a\n", "<<", "|a\n");
+    }
+
+    #[test]
+    fn case_operators() {
+        check("|Hello World", "gUiw", "|HELLO World");
+        check("|Hello World", "guu", "|hello world");
+        check("|Hello World", "gUU", "|HELLO WORLD");
+        check("|Hello World", "gUgU", "|HELLO WORLD");
+        check("|Hello World", "gu$", "|hello world");
+    }
+
+    #[test]
+    fn change_word_changes_to_the_end_of_the_word() {
+        check("|foo bar", "cwbaz<esc>", "ba|z bar");
+        check("fo|o bar", "cwx<esc>", "fo|x bar");
+        check("|foo bar baz", "c2wq<esc>", "|q baz");
+        check("one |two", "Cend<esc>", "one en|d");
+        check("|ab", "sX<esc>", "|Xb");
+    }
+
+    #[test]
+    fn operators_take_text_objects() {
+        check("say \"he|llo\" now", "ci\"bye<esc>", "say \"by|e\" now");
+        check("f(a, |b)", "da(", "|f");
+        check("f(a, |b)", "di(", "f(|)");
+        check("one tw|o three", "daw", "one |three");
+        check("a\n|b\nc\n\nd\n", "dap", "|d\n");
+        check("x [1, |2] y", "ci[0<esc>", "x [|0] y");
+    }
+
+    #[test]
+    fn paste_charwise_and_linewise() {
+        check("|ab", "ylp", "a|ab");
+        check("|ab", "ylP", "|aab");
+        check("|one\ntwo", "yyjp", "one\ntwo\n|one");
+        check("one\n|two\n", "yykP", "|two\none\ntwo\n");
+        check("|x", "yl3p", "xxx|x");
+        check("|", "p", "|");
+    }
+
+    #[test]
+    fn named_numbered_and_black_hole_registers() {
+        let (_, mut vim, _) = run("|one two", "\"ayiwwyiw");
+        assert_eq!(vim.register('a').expect("a").text, "one");
+        assert_eq!(vim.register('0').expect("0").text, "two");
+        check("|one two", "\"ayiww\"ap", "one ton|ewo");
+        let (_, mut vim, _) = run("|a\nb\n", "dddd");
+        assert_eq!(vim.register('1').expect("1").text, "b\n");
+        assert_eq!(vim.register('2').expect("2").text, "a\n");
+        check("|ab", "yl\"_xp", "b|a");
+        let (_, mut vim, _) = run("|one two", "\"byw\"Byw");
+        assert_eq!(vim.register('b').expect("b").text, "one one ");
+    }
+
+    #[test]
+    fn the_plus_register_uses_the_system_clipboard() {
+        struct Shared(Rc<RefCell<Option<String>>>);
+        impl Clipboard for Shared {
+            fn read(&mut self) -> Option<String> {
+                self.0.borrow().clone()
+            }
+            fn write(&mut self, text: &str) {
+                *self.0.borrow_mut() = Some(text.to_owned());
+            }
+        }
+        let system = Rc::new(RefCell::new(None));
+        let mut buf = mnote_core::Buffer::new("copy me");
+        let mut vim = Vim::new();
+        vim.set_clipboard(Box::new(Shared(system.clone())));
+        for key in parse_keys("\"+yiw") {
+            vim.handle_key(key, &mut buf);
+        }
+        assert_eq!(system.borrow().as_deref(), Some("copy"));
+        *system.borrow_mut() = Some("from elsewhere\n".into());
+        for key in parse_keys("\"+p") {
+            vim.handle_key(key, &mut buf);
+        }
+        assert_eq!(
+            buf.to_string(),
+            "copy me\nfrom elsewhere",
+            "a trailing newline pastes as a line"
+        );
+    }
+
+    #[test]
+    fn undo_and_redo() {
+        check("|one two", "dwu", "|one two");
+        check("|one two", "dwu<c-r>", "|two");
+        check("|ab", "ixy<esc>u", "|ab");
+        check("|a b c", "dwdwuu", "|a b c");
+        check("|a b c", "dwdw2u", "|a b c");
+    }
+
+    #[test]
+    fn dot_repeats_the_last_change() {
+        check("|a b c d", "dw..", "|d");
+        check("|a b c d e", "dw2.", "|d e");
+        check("|x\ny\nz\n", "A!<esc>j.j.", "x!\ny!\nz|!\n");
+        check("|foo foo", "cwbar<esc>w.", "bar ba|r");
+        check("|a\nb\n", "ddu.", "|b\n");
+        check("|ab", "lx.", "|");
+        check("|one two", "dwyw.", "|");
+    }
+
+    #[test]
+    fn insert_counts_and_open_line() {
+        check("|", "3ix<esc>", "xx|x");
+        check("|  item", "onext<esc>", "  item\n  nex|t");
+        check("|a", "Ob<esc>", "|b\na");
+        check("|a", "2ob<esc>", "a\nb\n|b");
+        check("|a", "ix<bs><bs>y<esc>", "|ya");
+    }
+
+    #[test]
+    fn marks_follow_edits() {
+        check("one\n|two\nthree", "majdd'a", "one\n|two");
+        check("one\n|two\nthree", "makdd`a", "|two\nthree");
+        check("|one\ntwo", "G''", "|one\ntwo");
+        let (_, vim, _) = run("|one two", "wvey<esc>");
+        assert_eq!((vim.mark('<'), vim.mark('>')), (Some(4), Some(6)));
+    }
+
+    #[test]
+    fn visual_operators() {
+        check("one |two three", "ved", "one | three");
+        check("|a\nb\nc\n", "Vjd", "|c\n");
+        check("|a\nb\n", "Vj>", "  |a\n  b\n");
+        check("|Hello", "veU", "|HELLO");
+        check("|one two", "yiwwviwp", "one on|e");
+        check("say \"|hi\" ok", "vi\"d", "say \"|\" ok");
+        let (_, mut vim, _) = run("|one two", "vey");
+        assert_eq!(vim.register('"').expect("unnamed").text, "one");
     }
 }
 
 #[cfg(test)]
 mod budget {
     use super::*;
-    use ropey::Rope;
     use std::time::{Duration, Instant};
 
-    /// Keystroke budget from CLAUDE.md (8 ms to pixels): the slowest motions,
-    /// which scan the whole note, stay well inside it on a 1 MB note.
+    /// Keystroke budget from CLAUDE.md (8 ms to pixels): the slowest motions
+    /// (which scan the whole note) and common edits stay well inside it on a
+    /// 1 MB note.
     /// Run with `cargo test -p mnote-vim --release -- --ignored`.
     #[test]
     #[ignore = "timing test; run with --release -- --ignored"]
     fn whole_note_motions_on_one_megabyte_stay_within_budget() {
         let block = "## Section\n\nSome text with words and (brackets).\n\n```\n# fenced\n```\n\n";
-        let text = Rope::from_str(&block.repeat(1_048_576 / block.len() + 1));
+        let mut buf = mnote_core::Buffer::new(&block.repeat(1_048_576 / block.len() + 1));
         let mut worst = Duration::ZERO;
-        for keys in ["G", "[[", "gg", "]]", "50%", "}", "{", "w", "e", "b"] {
+        for keys in [
+            "G",
+            "[[",
+            "gg",
+            "]]",
+            "50%",
+            "}",
+            "{",
+            "w",
+            "e",
+            "b",
+            "dd",
+            "dap",
+            "u",
+            ">>",
+            "yiwP",
+            "ciwx<esc>",
+            "x.",
+        ] {
             let mut vim = Vim::new();
-            vim.set_cursor(text.len_chars() / 2);
+            vim.set_cursor(buf.len_chars() / 2);
             let start = Instant::now();
             for key in parse_keys(keys) {
-                vim.handle_key(key, &text);
+                vim.handle_key(key, &mut buf);
             }
             let took = start.elapsed();
             eprintln!("{keys:>4}: {took:?}");

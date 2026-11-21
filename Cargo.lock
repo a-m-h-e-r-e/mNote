@@ -2810,6 +2810,7 @@ dependencies = [
 name = "mnote-vim"
 version = "0.1.0"
 dependencies = [
+ "mnote-core",
  "ropey",
 ]
 

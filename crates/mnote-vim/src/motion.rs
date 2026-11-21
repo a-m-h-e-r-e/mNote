@@ -270,11 +270,10 @@ fn word_forward(text: &Rope, pos: usize, big: bool) -> usize {
         }
         i += 1;
     }
-    if i >= len {
-        len.saturating_sub(1).max(pos)
-    } else {
-        i
-    }
+    // Running off the end lands just past the last character: an operator
+    // (`dw` on the last word) then covers it, and a plain cursor move is
+    // clamped back onto it.
+    i.min(len)
 }
 
 fn word_end(text: &Rope, pos: usize, big: bool) -> usize {
