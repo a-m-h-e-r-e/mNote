@@ -11,7 +11,7 @@ use gpui::{
 };
 use mnote_vim::ex::cmdline::{CommandKind, Token, tokens};
 
-use crate::theme::{ActiveTheme, Palette, StyledExt, Theme, size, space, text};
+use crate::theme::{ActiveTheme, Palette, StyledExt, Theme, radius, size, space, text};
 
 /// The colour (`0xRRGGBBAA`) of each part of a command line.
 pub fn token_color(token: Token, p: &Palette) -> u32 {
@@ -31,7 +31,8 @@ pub struct CommandLine {
     /// `None` for a message on its own (`search hit BOTTOM…`).
     kind: Option<CommandKind>,
     text: SharedString,
-    caret: bool,
+    /// Byte offset of the bar caret, while the line is being typed.
+    caret: Option<usize>,
     info: Option<SharedString>,
     error: bool,
 }
@@ -42,7 +43,7 @@ impl CommandLine {
         Self {
             kind: Some(kind),
             text: text.into(),
-            caret: false,
+            caret: None,
             info: None,
             error: false,
         }
@@ -53,15 +54,15 @@ impl CommandLine {
         Self {
             kind: None,
             text: text.into(),
-            caret: false,
+            caret: None,
             info: None,
             error,
         }
     }
 
-    /// Shows the bar caret after the text.
-    pub fn caret(mut self, on: bool) -> Self {
-        self.caret = on;
+    /// Shows the bar caret at byte `at` (`None` while it blinks off).
+    pub fn caret(mut self, at: Option<usize>) -> Self {
+        self.caret = at;
         self
     }
 
@@ -123,20 +124,33 @@ impl RenderOnce for CommandLine {
                     .font_weight(FontWeight::MEDIUM)
                     .child(SharedString::from(kind.prefix().to_string()))
             }))
-            .child(
+            .child({
+                // The text either side of the caret, each with its colours.
+                let at = self.caret.unwrap_or(self.text.len()).min(self.text.len());
+                let part = |range: Range<usize>| {
+                    let shifted = highlights.iter().filter_map(|(r, style)| {
+                        let (from, to) = (r.start.max(range.start), r.end.min(range.end));
+                        (from < to).then(|| (from - range.start..to - range.start, *style))
+                    });
+                    let text = SharedString::from(self.text[range.clone()].to_owned());
+                    StyledText::new(text).with_highlights(shifted.collect::<Vec<_>>())
+                };
                 div()
+                    .flex()
+                    .items_center()
                     .min_w_0()
                     .overflow_hidden()
-                    .child(StyledText::new(self.text.clone()).with_highlights(highlights)),
-            )
-            .when(self.caret, |line| {
-                line.child(
-                    div()
-                        .flex_none()
-                        .w(px(2.))
-                        .h(input.line_height())
-                        .bg(Theme::color(p.cursor)),
-                )
+                    .child(part(0..at))
+                    .when(self.caret.is_some(), |line| {
+                        line.child(
+                            div()
+                                .flex_none()
+                                .w(px(2.))
+                                .h(input.line_height())
+                                .bg(Theme::color(p.cursor)),
+                        )
+                    })
+                    .child(part(at..self.text.len()))
             })
             .child(div().flex_1())
             .children(self.info.map(|info| {
@@ -146,6 +160,71 @@ impl RenderOnce for CommandLine {
                     .text_style(text::STATUS)
                     .text_color(Theme::color(if self.error { p.danger } else { p.ink_2 }))
                     .child(info)
+            }))
+    }
+}
+
+/// The `⇥` completion popup, above the command line's left end.
+#[derive(IntoElement)]
+pub struct CompletionPopup {
+    rows: Vec<(SharedString, SharedString, bool)>,
+}
+
+impl CompletionPopup {
+    /// `rows` are `(name, detail, selected)`.
+    pub fn new(rows: Vec<(SharedString, SharedString, bool)>) -> Self {
+        Self { rows }
+    }
+}
+
+impl RenderOnce for CompletionPopup {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
+        let p = theme.palette;
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(1.))
+            .min_w(px(300.))
+            .max_w(px(440.))
+            .p(px(space::S1))
+            .bg(Theme::color(p.overlay))
+            .border_1()
+            .border_color(Theme::color(p.line_strong))
+            .rounded(px(radius::MD))
+            .shadow(theme.modal_shadow())
+            .children(self.rows.into_iter().map(|(name, detail, selected)| {
+                let (fill, ink, quiet) = if selected {
+                    (Some(p.select), p.select_ink, p.select_ink)
+                } else {
+                    (None, p.ink, p.ink_3)
+                };
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S2))
+                    .h(px(size::ROW_H))
+                    .px(px(space::S2))
+                    .rounded(px(radius::SM))
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .when_some(fill, |row, fill| row.bg(Theme::color(fill)))
+                    .child(
+                        div()
+                            .text_style(text::INPUT)
+                            .text_size(px(13.))
+                            .text_color(Theme::color(ink))
+                            .child(name),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_style(text::HINT)
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(Theme::color(quiet))
+                            .child(detail),
+                    )
             }))
     }
 }

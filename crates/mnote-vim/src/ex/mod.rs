@@ -7,6 +7,8 @@
 //! found: modal`).
 
 pub mod cmdline;
+pub mod cmdwin;
+pub mod complete;
 pub mod parse;
 pub mod pattern;
 

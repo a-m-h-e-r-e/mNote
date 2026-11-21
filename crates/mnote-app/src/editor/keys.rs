@@ -4,7 +4,7 @@ use gpui::Keystroke;
 use mnote_vim::Key;
 
 /// The Vim key for a keystroke, or `None` for keys Vim doesn't see (`⌘`
-/// shortcuts, arrows and function keys), which go on to the app.
+/// shortcuts and function keys), which go on to the app.
 pub fn vim_key(keystroke: &Keystroke) -> Option<Key> {
     let m = &keystroke.modifiers;
     if m.platform {
@@ -14,7 +14,12 @@ pub fn vim_key(keystroke: &Keystroke) -> Option<Key> {
         "escape" => return Some(Key::Esc),
         "enter" => return Some(Key::Enter),
         "backspace" => return Some(Key::Backspace),
+        "tab" if !m.control && m.shift => return Some(Key::BackTab),
         "tab" if !m.control => return Some(Key::Tab),
+        "up" => return Some(Key::Up),
+        "down" => return Some(Key::Down),
+        "left" => return Some(Key::Left),
+        "right" => return Some(Key::Right),
         "space" if !m.control => return Some(Key::Char(' ')),
         _ => {}
     }
@@ -83,6 +88,15 @@ mod tests {
         assert_eq!(vim_key(&ks("r", None, ctrl)), Some(Key::Ctrl('r')));
         assert_eq!(vim_key(&ks("[", None, ctrl)), Some(Key::Esc));
         assert_eq!(vim_key(&ks("k", None, cmd)), None, "⌘K is the app's");
-        assert_eq!(vim_key(&ks("left", None, Modifiers::default())), None);
+        assert_eq!(
+            vim_key(&ks("left", None, Modifiers::default())),
+            Some(Key::Left)
+        );
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(vim_key(&ks("tab", None, shift)), Some(Key::BackTab));
+        assert_eq!(vim_key(&ks("f1", None, Modifiers::default())), None);
     }
 }

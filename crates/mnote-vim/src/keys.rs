@@ -11,6 +11,12 @@ pub enum Key {
     Enter,
     Backspace,
     Tab,
+    /// Shift-Tab.
+    BackTab,
+    Up,
+    Down,
+    Left,
+    Right,
 }
 
 /// Parses Vim-style key notation, for tests and key-binding tables:
@@ -40,6 +46,11 @@ fn named_key(name: &str) -> Option<Key> {
         "cr" | "enter" => Key::Enter,
         "bs" => Key::Backspace,
         "tab" => Key::Tab,
+        "s-tab" => Key::BackTab,
+        "up" => Key::Up,
+        "down" => Key::Down,
+        "left" => Key::Left,
+        "right" => Key::Right,
         "lt" => Key::Char('<'),
         _ => {
             let ch = lower.strip_prefix("c-")?;

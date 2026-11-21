@@ -83,6 +83,8 @@ enum Pending {
     },
     Register,
     SetMark,
+    /// `q`, waiting for `:`, `/` or `?` (the command-line window).
+    Q,
     JumpMark {
         exact: bool,
     },
@@ -139,6 +141,11 @@ pub struct Vim {
     pub(crate) message: Option<crate::ex::cmdline::Message>,
     /// An app command from the last command line, until the app takes it.
     pub(crate) app_command: Option<crate::ex::AppCommand>,
+    /// Lines run from the command line, oldest first.
+    pub(crate) ex_history: Vec<String>,
+    pub(crate) search_history: Vec<String>,
+    pub(crate) completer: Option<Box<dyn crate::ex::cmdline::Completer>>,
+    pub(crate) cmdwin: Option<Box<crate::ex::cmdwin::CmdWindow>>,
     insert: Option<InsertSession>,
     /// Keys of the command being typed, and of the last change, for `.`.
     keys: Vec<Key>,
@@ -182,6 +189,10 @@ impl Default for Vim {
             preview: None,
             message: None,
             app_command: None,
+            ex_history: Vec::new(),
+            search_history: Vec::new(),
+            completer: None,
+            cmdwin: None,
             insert: None,
             keys: Vec::new(),
             last_change: None,
@@ -274,6 +285,10 @@ impl Vim {
         }
         self.keys.push(key);
         self.message = None;
+        if self.cmdwin.is_some() {
+            self.cmd_window_key(key, buf);
+            return Effect::Handled;
+        }
         match self.mode {
             Mode::Insert => self.insert_key(key, buf),
             Mode::Command => {
@@ -329,7 +344,9 @@ impl Vim {
                     }
                 }
             }
-            Key::Ctrl(_) => return Effect::Unhandled(key),
+            Key::Ctrl(_) | Key::BackTab | Key::Up | Key::Down | Key::Left | Key::Right => {
+                return Effect::Unhandled(key);
+            }
         }
         Effect::Handled
     }
@@ -365,6 +382,14 @@ impl Vim {
             (Pending::None, key) => return self.normal_start(key, buf),
             (Pending::Register, Key::Char(c)) if is_register_name(c) => {
                 self.register = Some(c);
+                return Effect::Handled;
+            }
+            (Pending::Q, Key::Char(c @ (':' | '/' | '?'))) => {
+                let kind = match c {
+                    ':' => CommandKind::Ex,
+                    c => CommandKind::Search { forward: c == '/' },
+                };
+                self.open_cmd_window(kind, "", buf);
                 return Effect::Handled;
             }
             (Pending::SetMark, Key::Char(c)) if c.is_ascii_lowercase() => {
@@ -432,6 +457,11 @@ impl Vim {
     fn normal_start(&mut self, key: Key, buf: &mut Buffer) -> Effect {
         let c = match key {
             Key::Char(c) => c,
+            // Arrows move like `h` `j` `k` `l`.
+            Key::Left => 'h',
+            Key::Down => 'j',
+            Key::Up => 'k',
+            Key::Right => 'l',
             Key::Esc => {
                 let was_visual = self.mode.is_visual();
                 self.cancel();
@@ -496,6 +526,8 @@ impl Vim {
             '`' => Some(Pending::JumpMark { exact: true }),
             '"' if self.op.is_none() => Some(Pending::Register),
             'm' if self.op.is_none() && !self.mode.is_visual() => Some(Pending::SetMark),
+            // Macros aren't recorded yet; `q:` opens the command-line window.
+            'q' if self.op.is_none() && !self.mode.is_visual() => Some(Pending::Q),
             'i' | 'a' if self.op.is_some() || self.mode.is_visual() => {
                 Some(Pending::Object { around: c == 'a' })
             }

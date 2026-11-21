@@ -12,6 +12,7 @@ use std::ops::Range;
 use mnote_core::Buffer;
 use ropey::Rope;
 
+use super::complete::{self, Completion};
 use super::parse::{self, split_delimited};
 use super::pattern::{Pattern, Replacement};
 use super::{AppCommand, DefaultRange, ExError, plan_substitute, plural};
@@ -44,6 +45,73 @@ impl CommandKind {
 pub struct CommandLine {
     pub kind: CommandKind,
     pub text: String,
+    /// Byte offset of the caret in `text`.
+    pub cursor: usize,
+    /// The `⇥` popup, while open.
+    pub completion: Option<Completion>,
+    /// Walking the history with `↑`/`↓` (or `⌃p`/`⌃n`).
+    history: Option<HistoryWalk>,
+    /// `⌃r` was typed; the next key names the register to paste.
+    register_pending: bool,
+}
+
+/// Where a walk through the history is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HistoryWalk {
+    /// What was typed before the walk started; `↑` only recalls entries that
+    /// start with it.
+    typed: String,
+    /// Whether to filter by `typed` (`↑`/`↓`) or not (`⌃p`/`⌃n`).
+    filter: bool,
+    /// The entry shown, or the history's length for `typed` itself.
+    index: usize,
+}
+
+impl CommandLine {
+    pub(crate) fn new(kind: CommandKind, text: &str) -> Self {
+        CommandLine {
+            kind,
+            text: text.to_owned(),
+            cursor: text.len(),
+            completion: None,
+            history: None,
+            register_pending: false,
+        }
+    }
+
+    fn set_text(&mut self, text: String) {
+        self.cursor = text.len();
+        self.text = text;
+    }
+
+    fn insert(&mut self, s: &str) {
+        self.text.insert_str(self.cursor, s);
+        self.cursor += s.len();
+    }
+
+    fn prev_char(&self) -> Option<usize> {
+        self.text[..self.cursor]
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+    }
+
+    fn next_char(&self) -> Option<usize> {
+        self.text[self.cursor..]
+            .chars()
+            .next()
+            .map(|c| self.cursor + c.len_utf8())
+    }
+}
+
+/// Entries kept per history (`:` and search), as Vim's default `history`.
+const HISTORY_LEN: usize = 100;
+
+/// Where the command line gets note paths for `⇥` after `:e`, `:w`, `:find`
+/// and `:explore`. The app plugs in the vault; it's only asked on `⇥`.
+pub trait Completer {
+    /// Vault-relative note paths with `.md` (`projects/mnote/ui-design.md`).
+    fn paths(&mut self) -> Vec<String>;
 }
 
 /// What the last command line or search said: a result such as `5
@@ -155,45 +223,221 @@ impl Vim {
     /// mode).
     pub(crate) fn open_command_line(&mut self, kind: CommandKind, text: &str, buf: &Buffer) {
         self.enter(Mode::Command, buf.text());
-        self.cmdline = Some(CommandLine {
-            kind,
-            text: text.to_owned(),
-        });
+        self.cmdline = Some(CommandLine::new(kind, text));
         self.update_preview(buf);
+    }
+
+    /// Plugs in note paths for completion.
+    pub fn set_completer(&mut self, completer: Box<dyn Completer>) {
+        self.completer = Some(completer);
+    }
+
+    /// The `:` or search history, oldest first.
+    pub fn history(&self, kind: CommandKind) -> &[String] {
+        match kind {
+            CommandKind::Ex => &self.ex_history,
+            CommandKind::Search { .. } => &self.search_history,
+        }
+    }
+
+    fn remember_line(&mut self, kind: CommandKind, text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
+        let history = match kind {
+            CommandKind::Ex => &mut self.ex_history,
+            CommandKind::Search { .. } => &mut self.search_history,
+        };
+        history.retain(|h| h != text);
+        history.push(text.to_owned());
+        if history.len() > HISTORY_LEN {
+            history.remove(0);
+        }
     }
 
     /// A key typed in command mode.
     pub(crate) fn command_key(&mut self, key: Key, buf: &mut Buffer) {
-        let Some(line) = self.cmdline.as_mut() else {
+        let Some(mut line) = self.cmdline.take() else {
             self.enter(Mode::Normal, buf.text());
             return;
         };
+
+        if std::mem::take(&mut line.register_pending) {
+            if let Some(text) = self.register_text(key, buf) {
+                line.insert(&text);
+            }
+            return self.edited(line, buf);
+        }
+
+        // The popup takes ⇥, ⌃n and ⌃p; any other key keeps the choice.
+        if line.completion.is_some() {
+            match key {
+                Key::Tab | Key::Ctrl('n') => return self.cycle(line, true, buf),
+                Key::BackTab | Key::Ctrl('p') => return self.cycle(line, false, buf),
+                _ => line.completion = None,
+            }
+        }
+        match key {
+            Key::Up | Key::Down | Key::Ctrl('p') | Key::Ctrl('n') => {
+                let older = matches!(key, Key::Up | Key::Ctrl('p'));
+                self.walk_history(&mut line, older, matches!(key, Key::Up | Key::Down));
+                return self.edited(line, buf);
+            }
+            _ => line.history = None,
+        }
+
         match key {
             Key::Esc | Key::Ctrl('c') => return self.close_command_line(buf),
-            Key::Enter => return self.submit(buf),
+            Key::Enter => return self.run_line(line, buf),
+            Key::Ctrl('f') => {
+                self.close_command_line(buf);
+                return self.open_cmd_window(line.kind, &line.text, buf);
+            }
             Key::Backspace | Key::Ctrl('h') => {
                 // Backspace on an empty line leaves, as in Vim.
-                if line.text.pop().is_none() {
+                if line.text.is_empty() {
                     return self.close_command_line(buf);
+                }
+                if let Some(at) = line.prev_char() {
+                    line.text.replace_range(at..line.cursor, "");
+                    line.cursor = at;
                 }
             }
             Key::Ctrl('w') => {
-                // Deletes the word before the end, or one punctuation mark.
+                // Deletes the word before the caret, or one punctuation mark.
                 let is_word = |c: char| c.is_alphanumeric() || c == '_';
-                let text = line.text.trim_end();
-                let cut = match text.chars().next_back() {
+                let before = line.text[..line.cursor].trim_end();
+                let cut = match before.chars().next_back() {
                     None => 0,
-                    Some(c) if is_word(c) => text.trim_end_matches(is_word).len(),
-                    Some(c) => text.len() - c.len_utf8(),
+                    Some(c) if is_word(c) => before.trim_end_matches(is_word).len(),
+                    Some(c) => before.len() - c.len_utf8(),
                 };
-                line.text.truncate(cut);
+                line.text.replace_range(cut..line.cursor, "");
+                line.cursor = cut;
             }
-            Key::Ctrl('u') => line.text.clear(),
-            Key::Char(c) => line.text.push(c),
-            // Completion and history come with AMI-162.
-            _ => return,
+            Key::Ctrl('u') => {
+                line.text.replace_range(..line.cursor, "");
+                line.cursor = 0;
+            }
+            Key::Left => line.cursor = line.prev_char().unwrap_or(0),
+            Key::Right => line.cursor = line.next_char().unwrap_or(line.cursor),
+            Key::Ctrl('b') => line.cursor = 0,
+            Key::Ctrl('e') => line.cursor = line.text.len(),
+            Key::Ctrl('r') => line.register_pending = true,
+            Key::Tab if line.kind == CommandKind::Ex => return self.complete(line, buf),
+            Key::Char(c) => line.insert(c.encode_utf8(&mut [0; 4])),
+            _ => {}
         }
+        self.edited(line, buf);
+    }
+
+    /// Puts the line back after an edit and refreshes the preview.
+    fn edited(&mut self, line: CommandLine, buf: &Buffer) {
+        self.cmdline = Some(line);
         self.update_preview(buf);
+    }
+
+    /// Whether `⌃r` is waiting for a register name, so the app can read the
+    /// system clipboard first if it's `+` or `*`.
+    pub fn awaits_register(&self) -> bool {
+        self.cmdline.as_ref().is_some_and(|l| l.register_pending)
+    }
+
+    /// What `⌃r {key}` pastes: a register, `:` the last command, `/` the
+    /// last search, or with `⌃w` the word under the cursor in the note. Line
+    /// breaks become spaces; the line holds one line.
+    fn register_text(&mut self, key: Key, buf: &Buffer) -> Option<String> {
+        let text = match key {
+            Key::Ctrl('w') => word_under(buf.text(), self.cursor)?,
+            Key::Char(':') => self.ex_history.last()?.clone(),
+            Key::Char('/') => self.last_search.clone()?,
+            Key::Char(c) if crate::registers::is_register_name(c) => {
+                self.registers.get(Some(c))?.text
+            }
+            _ => return None,
+        };
+        Some(text.trim_end_matches('\n').replace('\n', " "))
+    }
+
+    /// `↑`/`⌃p` (older) and `↓`/`⌃n` (newer). With `filter`, only entries
+    /// starting with what was typed come up.
+    fn walk_history(&self, line: &mut CommandLine, older: bool, filter: bool) {
+        let history = self.history(line.kind);
+        let walk = line.history.get_or_insert_with(|| HistoryWalk {
+            typed: line.text.clone(),
+            filter,
+            index: history.len(),
+        });
+        walk.filter = filter;
+        let matches = |i: &usize| !walk.filter || history[*i].starts_with(&walk.typed);
+        let next = if older {
+            (0..walk.index).rev().find(matches)
+        } else {
+            (walk.index + 1..history.len()).find(matches)
+        };
+        match next {
+            Some(i) => {
+                walk.index = i;
+                let text = history[i].clone();
+                line.set_text(text);
+            }
+            // Past the newest entry: back to what was typed.
+            None if !older => {
+                walk.index = history.len();
+                let text = walk.typed.clone();
+                line.set_text(text);
+            }
+            None => {}
+        }
+    }
+
+    /// The first `⇥`: completes the word before the caret. One candidate is
+    /// filled in; several open the popup with the first one chosen.
+    fn complete(&mut self, mut line: CommandLine, buf: &Buffer) {
+        let mut completer = self.completer.take();
+        let found = complete::candidates(&line.text, line.cursor, &self.options, || {
+            completer.as_mut().map(|c| c.paths()).unwrap_or_default()
+        });
+        self.completer = completer;
+        if let Some((start, items)) = found.filter(|(_, items)| !items.is_empty()) {
+            let original = line.text[start..line.cursor].to_owned();
+            if items.len() == 1 {
+                line.text.replace_range(start..line.cursor, &items[0].text);
+                line.cursor = start + items[0].text.len();
+            } else {
+                line.completion = Some(Completion {
+                    start,
+                    original,
+                    items,
+                    selected: None,
+                });
+                return self.cycle(line, true, buf);
+            }
+        }
+        self.edited(line, buf);
+    }
+
+    /// `⇥`/`⌃n` and `⇧⇥`/`⌃p` in the popup: the next or previous candidate,
+    /// and after the last one the text as typed.
+    fn cycle(&mut self, mut line: CommandLine, forward: bool, buf: &Buffer) {
+        let Some(c) = line.completion.as_mut() else {
+            return self.edited(line, buf);
+        };
+        let n = c.items.len();
+        c.selected = match (c.selected, forward) {
+            (None, true) => Some(0),
+            (None, false) => Some(n - 1),
+            (Some(i), true) => (i + 1 < n).then_some(i + 1),
+            (Some(i), false) => i.checked_sub(1),
+        };
+        let fill = c
+            .selected
+            .map_or(c.original.as_str(), |i| c.items[i].text.as_str());
+        let fill = fill.to_owned();
+        let start = c.start;
+        line.text.replace_range(start..line.cursor, &fill);
+        line.cursor = start + fill.len();
+        self.edited(line, buf);
     }
 
     fn close_command_line(&mut self, buf: &Buffer) {
@@ -202,13 +446,15 @@ impl Vim {
         self.enter(Mode::Normal, buf.text());
     }
 
-    /// `enter`: runs the line.
-    fn submit(&mut self, buf: &mut Buffer) {
-        let Some(line) = self.cmdline.take() else {
-            return;
-        };
+    /// `enter`: runs the line (typed, or picked in the command-line window).
+    pub(crate) fn run_line(&mut self, mut line: CommandLine, buf: &mut Buffer) {
+        self.cmdline = None;
         self.preview = None;
         self.enter(Mode::Normal, buf.text());
+        line.completion = None;
+        line.history = None;
+        line.cursor = line.text.len();
+        self.remember_line(line.kind, &line.text);
         let result = match line.kind {
             CommandKind::Ex => self.execute(&line.text, buf).map(|outcome| {
                 self.app_command = outcome.app;
@@ -452,6 +698,31 @@ fn delimited_end(s: &str, delim: char) -> Option<usize> {
         }
     }
     None
+}
+
+/// The word under (or after, on the same line) `pos`, for `⌃r ⌃w`.
+fn word_under(text: &Rope, pos: usize) -> Option<String> {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let line = line_of(text, pos);
+    let start = line_start(text, line);
+    let content: String = text.line(line).chars().take_while(|&c| c != '\n').collect();
+    let chars: Vec<char> = content.chars().collect();
+    let mut at = pos.saturating_sub(start).min(chars.len());
+    while at < chars.len() && !is_word(chars[at]) {
+        at += 1;
+    }
+    if at == chars.len() {
+        return None;
+    }
+    let from = (0..at)
+        .rev()
+        .take_while(|&i| is_word(chars[i]))
+        .last()
+        .unwrap_or(at);
+    let to = (at..chars.len())
+        .find(|&i| !is_word(chars[i]))
+        .unwrap_or(chars.len());
+    Some(chars[from..to].iter().collect())
 }
 
 // ---- searching ---------------------------------------------------------------
@@ -976,5 +1247,140 @@ mod budget {
             assert!(vim.preview().is_some());
             assert!(took < Duration::from_millis(16), "{typed} took {took:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod editing_tests {
+    use super::*;
+    use crate::parse_keys;
+
+    fn type_keys(vim: &mut Vim, buf: &mut Buffer, keys: &str) {
+        for key in parse_keys(keys) {
+            vim.handle_key(key, buf);
+        }
+    }
+
+    fn line(vim: &Vim) -> (String, usize) {
+        let l = vim.command_line().expect("open");
+        (l.text.clone(), l.cursor)
+    }
+
+    struct Paths;
+    impl Completer for Paths {
+        fn paths(&mut self) -> Vec<String> {
+            vec!["inbox.md".into(), "ideas.md".into()]
+        }
+    }
+
+    #[test]
+    fn the_caret_moves_and_edits_happen_at_it() {
+        let (mut vim, mut buf) = (Vim::new(), Buffer::new("x\n"));
+        type_keys(&mut vim, &mut buf, ":sort<left><left>X");
+        assert_eq!(line(&vim), ("soXrt".into(), 3));
+        type_keys(&mut vim, &mut buf, "<bs><c-b>%<c-e>!");
+        assert_eq!(line(&vim), ("%sort!".into(), 6));
+        type_keys(&mut vim, &mut buf, "<left><left><c-w>");
+        assert_eq!(
+            line(&vim),
+            ("%t!".into(), 1),
+            "⌃w deletes the word before the caret"
+        );
+        type_keys(&mut vim, &mut buf, "<right><c-u>");
+        assert_eq!(line(&vim), ("!".into(), 0));
+    }
+
+    #[test]
+    fn history_filters_by_what_is_typed() {
+        let (mut vim, mut buf) = (Vim::new(), Buffer::new("b\na\n"));
+        type_keys(
+            &mut vim,
+            &mut buf,
+            ":sort<cr>:set sw=4<cr>:sort u<cr>:set sw=2<cr>",
+        );
+        assert_eq!(
+            vim.history(CommandKind::Ex),
+            ["sort", "set sw=4", "sort u", "set sw=2"]
+        );
+        type_keys(&mut vim, &mut buf, ":so<up>");
+        assert_eq!(line(&vim).0, "sort u");
+        type_keys(&mut vim, &mut buf, "<up>");
+        assert_eq!(line(&vim).0, "sort");
+        type_keys(&mut vim, &mut buf, "<up>");
+        assert_eq!(line(&vim).0, "sort", "no older match: stays");
+        type_keys(&mut vim, &mut buf, "<down><down>");
+        assert_eq!(line(&vim).0, "so", "past the newest: what was typed");
+        type_keys(&mut vim, &mut buf, "<c-p>");
+        assert_eq!(line(&vim).0, "set sw=2", "⌃p doesn't filter");
+        type_keys(&mut vim, &mut buf, "<esc>:sort<cr>");
+        assert_eq!(
+            vim.history(CommandKind::Ex).last().map(String::as_str),
+            Some("sort"),
+            "a repeat moves to the end, once"
+        );
+        assert_eq!(vim.history(CommandKind::Ex).len(), 4);
+        type_keys(&mut vim, &mut buf, "/a<cr>/<up>");
+        assert_eq!(line(&vim).0, "a", "search has its own history");
+    }
+
+    #[test]
+    fn ctrl_r_pastes_registers_and_the_word_under_the_cursor() {
+        let (mut vim, mut buf) = (Vim::new(), Buffer::new("hello world\n"));
+        type_keys(&mut vim, &mut buf, "yiww:s/<c-r><c-w>/<c-r>0/");
+        assert_eq!(line(&vim).0, "s/world/hello/");
+        type_keys(&mut vim, &mut buf, "<cr>:<c-r>:");
+        assert_eq!(line(&vim).0, "s/world/hello/", "⌃r : is the last command");
+        type_keys(&mut vim, &mut buf, "<esc>yy:<c-r>\"");
+        assert_eq!(
+            line(&vim).0,
+            "hello hello",
+            "a linewise register drops its newline"
+        );
+        type_keys(&mut vim, &mut buf, "<esc>:x<c-r>q");
+        assert_eq!(line(&vim).0, "x", "an empty register pastes nothing");
+    }
+
+    #[test]
+    fn tab_completes_commands_with_a_popup() {
+        let (mut vim, mut buf) = (Vim::new(), Buffer::new("b\na\n"));
+        type_keys(&mut vim, &mut buf, ":'<,'>so<tab>");
+        let l = vim.command_line().expect("open");
+        assert_eq!(l.text, "'<,'>sort");
+        let popup = l
+            .completion
+            .as_ref()
+            .expect("several candidates open a popup");
+        assert_eq!(popup.selected, Some(0));
+        type_keys(&mut vim, &mut buf, "<tab><c-n>");
+        assert_eq!(line(&vim).0, "'<,'>sort i");
+        type_keys(&mut vim, &mut buf, "<c-p><s-tab><s-tab>");
+        assert_eq!(line(&vim).0, "'<,'>so", "before the first: what was typed");
+        type_keys(&mut vim, &mut buf, "<tab><tab>");
+        assert_eq!(line(&vim).0, "'<,'>sort!");
+        type_keys(&mut vim, &mut buf, " ");
+        let l = vim.command_line().expect("open");
+        assert!(
+            l.completion.is_none(),
+            "typing keeps the choice and closes the popup"
+        );
+        assert_eq!(l.text, "'<,'>sort! ");
+
+        type_keys(&mut vim, &mut buf, "<esc>:noh<tab>");
+        let l = vim.command_line().expect("open");
+        assert_eq!(
+            (l.text.as_str(), l.completion.is_none()),
+            ("nohlsearch", true),
+            "one candidate fills in"
+        );
+    }
+
+    #[test]
+    fn tab_completes_paths_from_the_app() {
+        let (mut vim, mut buf) = (Vim::new(), Buffer::new("x\n"));
+        vim.set_completer(Box::new(Paths));
+        type_keys(&mut vim, &mut buf, ":e in<tab>");
+        assert_eq!(line(&vim).0, "e inbox.md");
+        type_keys(&mut vim, &mut buf, "<esc>/x<tab>");
+        assert_eq!(line(&vim).0, "x", "search lines don't complete");
     }
 }

@@ -24,12 +24,13 @@ use gpui::{
 };
 use mnote_core::{Autosave, Buffer, NotePath, Reload, Vault, VaultEvent, VaultWatcher};
 use mnote_vim::ex::AppCommand;
-use mnote_vim::ex::cmdline::line_matches;
+use mnote_vim::ex::cmdline::{Completer, line_matches};
+use mnote_vim::ex::cmdwin::CmdWindow;
 use mnote_vim::text::{clamp_normal, line_count, line_len, line_of, line_start};
 use mnote_vim::{Clipboard, Effect, Mode, Vim};
 
 use crate::theme::{ActiveTheme, Palette, StyledExt, Theme, family, size, space, text};
-use crate::ui::{CommandLine, MessagePanel, StatusLine, TopBar};
+use crate::ui::{CommandLine, CompletionPopup, MessagePanel, StatusLine, TopBar};
 use line::{Caret, Highlight, LineText};
 
 /// Width left for the macOS traffic-light buttons in the top bar.
@@ -64,6 +65,18 @@ impl Clipboard for SharedClipboard {
 
     fn write(&mut self, text: &str) {
         self.0.borrow_mut().write = Some(text.to_owned());
+    }
+}
+
+/// Note paths for `⇥` on the command line, read from the vault when asked.
+struct VaultPaths(Vault);
+
+impl Completer for VaultPaths {
+    fn paths(&mut self) -> Vec<String> {
+        self.0
+            .notes()
+            .map(|notes| notes.iter().map(ToString::to_string).collect())
+            .unwrap_or_default()
     }
 }
 
@@ -112,6 +125,7 @@ impl Editor {
                 let _ = tx.try_send(event);
             })
             .ok();
+        let paths = VaultPaths(vault.clone());
         let mut editor = Self::build(
             buffer,
             Source::Note {
@@ -123,6 +137,7 @@ impl Editor {
             cx,
         );
         editor.notice = notice;
+        editor.vim.set_completer(Box::new(paths));
         editor._tasks.push(cx.spawn(async move |this, cx| {
             while let Ok(event) = rx.recv().await {
                 if this
@@ -181,11 +196,13 @@ impl Editor {
         let Some(key) = keys::vim_key(&event.keystroke) else {
             return;
         };
-        if matches!(self.vim.pending_register(), Some('+' | '*')) {
+        let clipboard_paste = matches!(self.vim.pending_register(), Some('+' | '*'))
+            || (self.vim.awaits_register() && matches!(key, mnote_vim::Key::Char('+' | '*')));
+        if clipboard_paste {
             self.clipboard.borrow_mut().read =
                 cx.read_from_clipboard().and_then(|item| item.text());
         }
-        let mode_before = self.vim.mode();
+        let mode_before = self.shown_mode();
         let revision_before = self.buffer.revision();
         self.reply = None;
 
@@ -216,10 +233,17 @@ impl Editor {
         if let Some(command) = self.vim.take_app_command() {
             self.run_app_command(command, cx);
         }
-        if self.vim.mode() != mode_before || has_bar_caret(self.vim.mode()) {
+        if self.shown_mode() != mode_before || has_bar_caret(self.shown_mode()) {
             self.restart_blink(cx);
         }
         cx.notify();
+    }
+
+    /// The mode to show: the command-line window's while it's open.
+    fn shown_mode(&self) -> Mode {
+        self.vim
+            .cmd_window()
+            .map_or(self.vim.mode(), |w| w.vim.mode())
     }
 
     /// Commands from the command line that belong to the app.
@@ -300,7 +324,7 @@ impl Editor {
     /// with no timer running.
     fn restart_blink(&mut self, cx: &mut Context<Self>) {
         self.caret_on = true;
-        if !has_bar_caret(self.vim.mode()) {
+        if !has_bar_caret(self.shown_mode()) {
             self.blink_task = None;
             return;
         }
@@ -444,6 +468,9 @@ impl Editor {
             .flex()
             .w_full()
             .when(current, |row| row.bg(Theme::color(p.well)))
+            .when(self.in_visual_range(ix), |row| {
+                row.bg(Theme::color(p.select))
+            })
             .child(
                 div()
                     .flex_none()
@@ -463,6 +490,25 @@ impl Editor {
                     .child(line),
             )
             .into_any_element()
+    }
+
+    /// Whether line `ix` is in the `'<,'>` range of the command being typed,
+    /// so the selection stays tinted while the command line is open.
+    fn in_visual_range(&self, ix: usize) -> bool {
+        let Some(line) = self.vim.command_line() else {
+            return false;
+        };
+        if !line.text.trim_start().starts_with("'<,'>") {
+            return false;
+        }
+        let rope = self.buffer.text();
+        match (self.vim.mark('<'), self.vim.mark('>')) {
+            (Some(a), Some(b)) => {
+                let (a, b) = (line_of(rope, a.min(b)), line_of(rope, a.max(b)));
+                (a..=b).contains(&ix)
+            }
+            _ => false,
+        }
     }
 
     /// The text to show for line `ix` and its highlights: `:s` replacements
@@ -589,11 +635,7 @@ impl Editor {
     /// line shows.
     fn command_area(&self) -> Vec<AnyElement> {
         if let Some(line) = self.vim.command_line() {
-            let mut bar = CommandLine::new(line.kind, line.text.clone()).caret(self.caret_on);
-            if let Some(info) = self.vim.preview().and_then(|p| p.info.clone()) {
-                bar = bar.info(info);
-            }
-            return vec![bar.into_any_element()];
+            return vec![self.typed_line(line).into_any_element()];
         }
         let (text, error, line) = match (self.vim.message(), &self.reply) {
             (Some(m), _) => (m.text.clone(), m.error, m.line.clone()),
@@ -614,6 +656,106 @@ impl Editor {
             None => CommandLine::message(text, error),
         };
         vec![bar.into_any_element()]
+    }
+}
+
+impl Editor {
+    fn typed_line(&self, line: &mnote_vim::ex::cmdline::CommandLine) -> CommandLine {
+        let caret = self.caret_on.then_some(line.cursor);
+        let mut bar = CommandLine::new(line.kind, line.text.clone()).caret(caret);
+        if let Some(info) = self.vim.preview().and_then(|p| p.info.clone()) {
+            bar = bar.info(info);
+        }
+        bar
+    }
+
+    /// The `⇥` popup, if open: placed by the caller just above the line.
+    fn completion_popup(&self) -> Option<CompletionPopup> {
+        let completion = self.vim.command_line()?.completion.as_ref()?;
+        let (first, rows) = completion.visible();
+        let rows = rows
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let selected = completion.selected == Some(first + i);
+                (c.text.clone().into(), c.detail.clone().into(), selected)
+            })
+            .collect();
+        Some(CompletionPopup::new(rows))
+    }
+
+    /// The command-line window (`q:`): history lines in mono, with the
+    /// window's own caret and status line, above the bottom bar.
+    fn cmd_window_area(&self, win: &CmdWindow, p: &Palette) -> Vec<AnyElement> {
+        let rope = win.buffer.text();
+        let (first, last) = win.visible();
+        let cursor = win.vim.cursor();
+        let cursor_line = line_of(rope, cursor);
+        let code = text::CODE;
+        let mono = Font {
+            weight: code.font_weight(),
+            ..font(family::MONO)
+        };
+        let rows = (first..=last).map(|ix| {
+            let start = line_start(rope, ix);
+            let len = line_len(rope, ix);
+            let content: SharedString = rope.slice(start..start + len).to_string().into();
+            let current = ix == cursor_line;
+            let mode = win.vim.mode();
+            let mut line = LineText::new(
+                content.clone(),
+                mono.clone(),
+                code.size(),
+                code.line_height(),
+                Theme::color(p.ink),
+            );
+            if current && mode != Mode::Command && (self.caret_on || mode != Mode::Insert) {
+                line = line.caret(Some(Caret {
+                    byte: char_to_byte(&content, cursor - start),
+                    shape: mode.caret(),
+                    color: Theme::color(p.cursor),
+                    on_color: Theme::color(p.on_cursor),
+                }));
+            }
+            div()
+                .flex()
+                .px(px(space::S3))
+                .when(current, |row| row.bg(Theme::color(p.well)))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(space::S6))
+                        .text_style(text::STATUS)
+                        .line_height(code.line_height())
+                        .text_color(Theme::color(p.ink_3))
+                        .child(SharedString::new_static(match win.kind.prefix() {
+                            ':' => ":",
+                            '/' => "/",
+                            _ => "?",
+                        })),
+                )
+                .child(div().flex_1().min_w_0().child(line))
+        });
+        let panel = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .py(px(space::S1))
+            .bg(Theme::color(p.paper))
+            .border_t_1()
+            .border_color(Theme::color(p.line))
+            .children(rows)
+            .into_any_element();
+        // The window's own status line, or its command line while `:` is typed
+        // in it.
+        let bar = match win.vim.command_line() {
+            Some(line) => self.typed_line(line).into_any_element(),
+            None => StatusLine::new(win.vim.mode())
+                .file("[Command Line]")
+                .item("⏎ run · esc close")
+                .into_any_element(),
+        };
+        vec![panel, bar]
     }
 }
 
@@ -641,6 +783,7 @@ impl Render for Editor {
         div()
             .flex()
             .flex_col()
+            .relative()
             .size_full()
             .bg(Theme::color(p.paper))
             .track_focus(&self.focus)
@@ -648,7 +791,10 @@ impl Render for Editor {
             .child(
                 TopBar::new(self.path_segments())
                     .dirty(self.buffer.is_dirty())
-                    .leading_inset(px(TRAFFIC_LIGHT_INSET)),
+                    .leading_inset(px(TRAFFIC_LIGHT_INSET))
+                    .when(self.vim.command_line().is_some(), |bar| {
+                        bar.hint("⇥ complete · ↑ history · ⌃f edit")
+                    }),
             )
             .child(
                 div()
@@ -668,6 +814,9 @@ impl Render for Editor {
             // The command line takes the status line's place while it's
             // typed, and while it shows the result.
             .map(|editor| {
+                if let Some(win) = self.vim.cmd_window() {
+                    return editor.children(self.cmd_window_area(win, p));
+                }
                 let command = self.command_area();
                 if command.is_empty() {
                     editor.child(status)
@@ -675,5 +824,12 @@ impl Render for Editor {
                     editor.children(command)
                 }
             })
+            .children(self.completion_popup().map(|popup| {
+                div()
+                    .absolute()
+                    .left(px(space::S3))
+                    .bottom(px(size::BAR_H + space::S1))
+                    .child(popup)
+            }))
     }
 }
