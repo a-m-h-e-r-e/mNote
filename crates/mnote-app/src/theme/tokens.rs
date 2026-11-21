@@ -200,32 +200,32 @@ pub mod text {
     /// The note's H1, once per note.
     pub const NOTE_TITLE: TextStyle = TextStyle {
         family: Family::Prose,
-        size: 28.0,
-        line_height: 36.0,
+        size: 30.0,
+        line_height: 38.0,
         weight: 600,
         letter_spacing: -0.01,
     };
     /// ## headings.
     pub const NOTE_H2: TextStyle = TextStyle {
         family: Family::Prose,
-        size: 21.0,
-        line_height: 30.0,
+        size: 23.0,
+        line_height: 32.0,
         weight: 600,
         letter_spacing: 0.0,
     };
     /// ### headings and deeper.
     pub const NOTE_H3: TextStyle = TextStyle {
         family: Family::Prose,
-        size: 17.0,
-        line_height: 26.0,
+        size: 19.0,
+        line_height: 28.0,
         weight: 600,
         letter_spacing: 0.0,
     };
-    /// All note text: paragraphs, lists, quotes, table cells.
+    /// All note text: paragraphs, lists, quotes, table cells. Sized so Plex Sans reads like a 16px mono editor font.
     pub const NOTE_BODY: TextStyle = TextStyle {
         family: Family::Prose,
-        size: 15.0,
-        line_height: 26.0,
+        size: 17.0,
+        line_height: 28.0,
         weight: 400,
         letter_spacing: 0.0,
     };
@@ -307,8 +307,8 @@ pub mod radius {
 
 /// Size tokens in px.
 pub mod size {
-    /// Max width of the note column (about 70 characters of note-body).
-    pub const MEASURE: f32 = 640.0;
+    /// Max width of the note column (about 70 characters of note-body at 17px).
+    pub const MEASURE: f32 = 720.0;
     /// Finder, explorer and palette width; below 700px of window they go full width and stack the preview.
     pub const MODAL_W: f32 = 760.0;
     /// Quick capture panel width.
