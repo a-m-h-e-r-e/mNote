@@ -12,6 +12,7 @@
 
 mod anchors;
 pub mod ex;
+mod input;
 mod keys;
 mod motion;
 mod registers;
@@ -21,6 +22,7 @@ mod textobj;
 
 use std::fmt;
 
+pub use input::{InputAction, VimInput};
 pub use keys::{Key, parse_keys};
 pub use motion::{Find, Motion, MotionKind, Target};
 pub use registers::{Clipboard, MemoryClipboard, Register};

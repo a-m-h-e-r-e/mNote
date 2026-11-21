@@ -3,6 +3,8 @@
 
 mod chrome;
 mod command_line;
+mod hints;
 
 pub use chrome::{ModePill, StatusLine, TopBar, mode_colors};
 pub use command_line::{CommandLine, CompletionPopup, MessagePanel, token_color};
+pub use hints::{Hint, HintBar, KeyCap};

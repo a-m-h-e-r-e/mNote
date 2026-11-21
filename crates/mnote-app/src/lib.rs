@@ -2,5 +2,6 @@
 //! into windows.
 
 pub mod editor;
+pub mod picker;
 pub mod theme;
 pub mod ui;

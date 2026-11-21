@@ -11,7 +11,7 @@
 //! preview; nothing changes until `enter`.
 
 mod keys;
-mod line;
+pub(crate) mod line;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -22,13 +22,15 @@ use gpui::{
     ListAlignment, ListState, ParentElement, Render, SharedString, Styled, Subscription, Task,
     Window, div, font, list, prelude::*, px,
 };
-use mnote_core::{Autosave, Buffer, NotePath, Reload, Vault, VaultEvent, VaultWatcher};
+use mnote_core::{Autosave, Buffer, NoteIndex, NotePath, Reload, Vault, VaultEvent, VaultWatcher};
 use mnote_vim::ex::AppCommand;
 use mnote_vim::ex::cmdline::{Completer, line_matches};
 use mnote_vim::ex::cmdwin::CmdWindow;
 use mnote_vim::text::{clamp_normal, line_count, line_len, line_of, line_start};
 use mnote_vim::{Clipboard, Effect, Mode, Vim};
 
+use crate::picker::notes::NotesPicker;
+use crate::picker::{Picker, PickerAction, PickerOutcome};
 use crate::theme::{ActiveTheme, Palette, StyledExt, Theme, family, size, space, text};
 use crate::ui::{CommandLine, CompletionPopup, MessagePanel, StatusLine, TopBar};
 use line::{Caret, Highlight, LineText};
@@ -96,6 +98,13 @@ pub struct Editor {
     /// The app's answer to a command line (`"inbox.md" written`), shown in
     /// the command line until the next key. The flag marks an error.
     reply: Option<(SharedString, bool)>,
+    /// Every note in the vault, for the pickers. Built in the background
+    /// when the vault opens, then kept current by watcher events and saves.
+    index: Rc<RefCell<NoteIndex>>,
+    /// The open picker, drawn over the note; it gets every key.
+    picker: Option<Picker>,
+    /// `space` was pressed in NORMAL mode: the next key is a leader command.
+    leader: bool,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -138,6 +147,7 @@ impl Editor {
         );
         editor.notice = notice;
         editor.vim.set_completer(Box::new(paths));
+        editor.build_index(cx);
         editor._tasks.push(cx.spawn(async move |this, cx| {
             while let Ok(event) = rx.recv().await {
                 if this
@@ -185,6 +195,9 @@ impl Editor {
             blink_task: None,
             notice: None,
             reply: None,
+            index: Rc::default(),
+            picker: None,
+            leader: false,
             _tasks: Vec::new(),
             _subscriptions: subscriptions,
         }
@@ -196,6 +209,14 @@ impl Editor {
         let Some(key) = keys::vim_key(&event.keystroke) else {
             return;
         };
+        if self.picker.is_some() {
+            cx.stop_propagation();
+            return self.picker_key(key, cx);
+        }
+        if std::mem::take(&mut self.leader) {
+            cx.stop_propagation();
+            return self.leader_key(key, cx);
+        }
         let clipboard_paste = matches!(self.vim.pending_register(), Some('+' | '*'))
             || (self.vim.awaits_register() && matches!(key, mnote_vim::Key::Char('+' | '*')));
         if clipboard_paste {
@@ -211,8 +232,12 @@ impl Editor {
         if let Some(text) = self.clipboard.borrow_mut().write.take() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
-        if let Effect::Unhandled(_) = effect {
-            // Leave it to the app (the space leader, ⌘ shortcuts, `:` text).
+        if let Effect::Unhandled(key) = effect {
+            if key == mnote_vim::Key::Char(' ') && self.vim.mode() == Mode::Normal {
+                self.leader = true;
+                cx.stop_propagation();
+            }
+            // Anything else is the app's (⌘ shortcuts).
             return;
         }
         cx.stop_propagation();
@@ -239,11 +264,92 @@ impl Editor {
         cx.notify();
     }
 
-    /// The mode to show: the command-line window's while it's open.
+    /// The mode whose caret is showing: the picker field's, or the
+    /// command-line window's, while either is open.
     fn shown_mode(&self) -> Mode {
+        if let Some(picker) = &self.picker {
+            return picker.mode();
+        }
         self.vim
             .cmd_window()
             .map_or(self.vim.mode(), |w| w.vim.mode())
+    }
+
+    /// The key after `space` in NORMAL mode.
+    fn leader_key(&mut self, key: mnote_vim::Key, cx: &mut Context<Self>) {
+        if key == mnote_vim::Key::Char('f') {
+            self.picker = Some(Picker::new(Box::new(NotesPicker::new(self.index.clone()))));
+            self.restart_blink(cx);
+            cx.notify();
+        }
+    }
+
+    fn picker_key(&mut self, key: mnote_vim::Key, cx: &mut Context<Self>) {
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+        let mode_before = picker.mode();
+        match picker.handle_key(key) {
+            PickerOutcome::Open => {
+                if picker.mode() != mode_before || picker.mode() == Mode::Insert {
+                    self.restart_blink(cx);
+                }
+            }
+            PickerOutcome::Close => {
+                self.picker = None;
+                self.restart_blink(cx);
+            }
+            PickerOutcome::Act(PickerAction::OpenNote(note)) => {
+                self.picker = None;
+                self.switch_to(note, cx);
+                self.restart_blink(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Opens another note of the same vault in this editor, saving the
+    /// current one first. Registers, history and options carry over.
+    fn switch_to(&mut self, target: NotePath, cx: &mut Context<Self>) {
+        self.save_now(cx);
+        let Source::Note { vault, note, .. } = &mut self.source else {
+            return;
+        };
+        if *note == target {
+            return;
+        }
+        let buffer = match Buffer::open(vault, &target) {
+            Ok(buffer) => buffer,
+            Err(err) => {
+                self.reply = Some((format!("Couldn't open {target}: {err}").into(), true));
+                return;
+            }
+        };
+        *note = target;
+        self.buffer = buffer;
+        self.vim.set_cursor(0);
+        self.autosave_task = None;
+        self.notice = None;
+        self.lines.reset(self.buffer.text().len_lines());
+    }
+
+    /// Reads the whole vault into the index on a background thread.
+    fn build_index(&mut self, cx: &mut Context<Self>) {
+        let Source::Note { vault, .. } = &self.source else {
+            return;
+        };
+        let vault = vault.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { NoteIndex::build(&vault) });
+        self._tasks.push(cx.spawn(async move |this, cx| {
+            if let Ok(index) = task.await {
+                let _ = this.update(cx, |this, cx| {
+                    *this.index.borrow_mut() = index;
+                    cx.notify();
+                });
+            }
+        }));
     }
 
     /// Commands from the command line that belong to the app.
@@ -371,6 +477,9 @@ impl Editor {
             Ok(()) => {
                 self.autosave.saved();
                 self.notice = None;
+                self.index
+                    .borrow_mut()
+                    .note_saved(note.clone(), &self.buffer.to_string());
             }
             Err(err) => {
                 self.notice = Some(format!("Couldn't save. {err}").into());
@@ -383,6 +492,7 @@ impl Editor {
         let Source::Note { vault, note, .. } = &self.source else {
             return;
         };
+        self.index.borrow_mut().apply(vault, &event);
         match event {
             VaultEvent::Changed(path) if &path == note => {
                 let Ok(disk) = vault.read(note) else { return };
@@ -760,8 +870,14 @@ impl Editor {
 }
 
 impl Render for Editor {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = cx.theme().palette;
+        let width = window.viewport_size().width / px(1.);
+        let caret_on = self.caret_on;
+        let picker = self
+            .picker
+            .as_mut()
+            .map(|picker| picker.render(width, caret_on, p));
         let rope = self.buffer.text();
         let cursor = self.vim.cursor();
         let line = line_of(rope, cursor);
@@ -831,5 +947,6 @@ impl Render for Editor {
                     .bottom(px(size::BAR_H + space::S1))
                     .child(popup)
             }))
+            .children(picker)
     }
 }
