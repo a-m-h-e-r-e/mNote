@@ -121,14 +121,19 @@ pub fn parse(input: &str) -> Result<Parsed<'_>, ExError> {
     })
 }
 
-fn lookup(word: &str) -> Option<&'static str> {
+pub(crate) fn lookup(word: &str) -> Option<&'static str> {
     COMMANDS
         .iter()
         .find(|(full, min)| word.len() >= *min && full.starts_with(word))
         .map(|(full, _)| *full)
 }
 
-fn parse_range(input: &str) -> Result<(Range, &str), ExError> {
+/// Whether `word` starts some command's name (`so` while typing `sort`).
+pub(crate) fn is_command_prefix(word: &str) -> bool {
+    COMMANDS.iter().any(|(full, _)| full.starts_with(word))
+}
+
+pub(crate) fn parse_range(input: &str) -> Result<(Range, &str), ExError> {
     if let Some(rest) = input.strip_prefix('%') {
         return Ok((Range::Whole, rest));
     }

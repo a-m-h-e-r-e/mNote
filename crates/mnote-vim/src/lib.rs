@@ -5,7 +5,9 @@
 //!
 //! - [`Vim`] is the mode state machine. It reads keys and edits a
 //!   `mnote_core::Buffer`: motions, operators, text objects, registers, marks,
-//!   undo and `.` repeat. The ex command parser arrives in AMI-160.
+//!   undo and `.` repeat.
+//! - [`ex`] runs `:` commands, and its [`ex::cmdline`] module the command
+//!   line itself: `/` and `?` search and the live preview.
 //! - [`Motion`] computes where a motion lands and how operators treat it.
 
 mod anchors;
@@ -266,7 +268,8 @@ mod motion_tests {
         assert_eq!(vim.mode(), Mode::Command);
         assert_eq!(
             vim.handle_key(Key::Char('w'), &mut buf),
-            Effect::Unhandled(Key::Char('w'))
+            Effect::Handled,
+            "command mode types into the command line"
         );
         vim.handle_key(Key::Esc, &mut buf);
         assert_eq!(vim.mode(), Mode::Normal);

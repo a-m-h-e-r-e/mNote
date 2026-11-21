@@ -1,10 +1,11 @@
 //! [`LineText`]: one line of the note, shaped and wrapped by gpui's text
 //! system, with its selection and caret painted in.
 //!
-//! The block caret and the selection are drawn as text-run backgrounds, so
-//! they follow the glyphs across wrapped rows and the character under the
-//! block caret takes the `on-cursor` colour. The bar caret and the "newline is
-//! selected" cell are quads at positions from the shaped line.
+//! The block caret, the selection and search or substitute highlights are
+//! drawn as text-run backgrounds, so they follow the glyphs across wrapped
+//! rows and the character under the block caret takes the `on-cursor` colour.
+//! The bar caret, highlight outlines and the "newline is selected" cell are
+//! quads at positions from the shaped line.
 
 use std::cell::RefCell;
 use std::ops::Range;
@@ -13,7 +14,7 @@ use std::rc::Rc;
 use gpui::{
     App, AvailableSpace, Bounds, Element, ElementId, Font, GlobalElementId, Hsla,
     InspectorElementId, IntoElement, LayoutId, Pixels, SharedString, Style, TextAlign, TextRun,
-    Window, WrappedLine, fill, point, px, relative, size,
+    Window, WrappedLine, fill, outline, point, px, relative, size,
 };
 use mnote_vim::CaretShape;
 
@@ -28,6 +29,17 @@ pub struct Caret {
     pub on_color: Hsla,
 }
 
+/// Coloured text on the line: a search match, or a `:s` replacement.
+#[derive(Debug, Clone)]
+pub struct Highlight {
+    /// Byte range in the line.
+    pub bytes: Range<usize>,
+    pub background: Hsla,
+    pub color: Hsla,
+    /// A 1px outline around it (the `:s` match that runs first).
+    pub outline: Option<Hsla>,
+}
+
 /// One rendered line of the note.
 pub struct LineText {
     text: SharedString,
@@ -39,6 +51,7 @@ pub struct LineText {
     /// too, shown as a small cell after the last character.
     selection: Option<(Range<usize>, Hsla)>,
     caret: Option<Caret>,
+    highlights: Vec<Highlight>,
     shaped: Rc<RefCell<Option<Shaped>>>,
 }
 
@@ -63,6 +76,7 @@ impl LineText {
             color,
             selection: None,
             caret: None,
+            highlights: Vec::new(),
             shaped: Rc::default(),
         }
     }
@@ -77,8 +91,14 @@ impl LineText {
         self
     }
 
-    /// Text runs: plain text, selected text on its background, and the
-    /// character under a block caret.
+    /// Highlights, in order and not overlapping. Empty ones are skipped.
+    pub fn highlights(mut self, highlights: Vec<Highlight>) -> Self {
+        self.highlights = highlights;
+        self
+    }
+
+    /// Text runs: plain text, highlights, selected text on its background,
+    /// and the character under a block caret, which wins over the rest.
     fn runs(&self) -> Vec<TextRun> {
         let len = self.text.len();
         let block = self
@@ -106,6 +126,9 @@ impl LineText {
         {
             cuts.extend([r.start, r.end]);
         }
+        for h in &self.highlights {
+            cuts.extend([h.bytes.start.min(len), h.bytes.end.min(len)]);
+        }
         cuts.sort_unstable();
         cuts.dedup();
 
@@ -115,12 +138,17 @@ impl LineText {
                 let at = w[0];
                 let in_block = block.as_ref().filter(|(r, _)| r.contains(&at));
                 let in_selection = selection.as_ref().filter(|(r, _)| r.contains(&at));
+                let in_highlight = self.highlights.iter().find(|h| h.bytes.contains(&at));
                 TextRun {
                     len: w[1] - w[0],
                     font: self.font.clone(),
-                    color: in_block.map_or(self.color, |(_, c)| c.on_color),
+                    color: in_block.map_or_else(
+                        || in_highlight.map_or(self.color, |h| h.color),
+                        |(_, c)| c.on_color,
+                    ),
                     background_color: in_block
                         .map(|(_, c)| c.color)
+                        .or(in_highlight.map(|h| h.background))
                         .or(in_selection.map(|(_, color)| *color)),
                     underline: None,
                     strikethrough: None,
@@ -260,6 +288,25 @@ impl Element for LineText {
 
         let _ = line.paint_background(origin, lh, TextAlign::Left, Some(bounds), window, cx);
         let _ = line.paint(origin, lh, TextAlign::Left, Some(bounds), window, cx);
+
+        // Outlines sit 1px outside the highlight, on its first row.
+        for h in &self.highlights {
+            let Some(color) = h.outline else { continue };
+            let (from, to) = (at(h.bytes.start), at(h.bytes.end));
+            let right = if to.y == from.y {
+                to.x
+            } else {
+                bounds.size.width
+            };
+            window.paint_quad(outline(
+                Bounds::new(
+                    origin + point(from.x - px(2.), from.y),
+                    size(right - from.x + px(4.), lh),
+                ),
+                color,
+                gpui::BorderStyle::Solid,
+            ));
+        }
 
         if let Some(caret) = self.caret {
             let p = at(caret.byte);

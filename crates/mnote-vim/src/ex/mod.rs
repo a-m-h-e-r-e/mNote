@@ -6,6 +6,7 @@
 //! [`AppCommand`]. Errors use Vim's numbers and wording (`E486: Pattern not
 //! found: modal`).
 
+pub mod cmdline;
 pub mod parse;
 pub mod pattern;
 
@@ -215,7 +216,7 @@ pub fn each_line(text: &Rope, first: usize, last: usize, mut f: impl FnMut(usize
     }
 }
 
-fn plural(n: usize, one: &str, many: &str) -> String {
+pub(crate) fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
@@ -381,7 +382,11 @@ impl Vim {
                 self.search_highlight = false;
                 Ok(ExOutcome::default())
             }
-            "set" => self.set(args),
+            "set" => {
+                let result = self.set(args);
+                self.recompile_search();
+                result
+            }
             "registers" | "display" => Ok(ExOutcome::message(self.list_registers())),
             "write" => Ok(ExOutcome::app(AppCommand::Write {
                 path: arg(),
@@ -491,8 +496,7 @@ impl Vim {
             }
             Base::Search { pattern, forward } => {
                 let compiled = self.compile(pattern)?;
-                self.last_search = Some(compiled.source.clone());
-                self.search_highlight = true;
+                self.remember_search(&compiled);
                 let total = last_line(text) + 1;
                 let from = current as usize - 1;
                 let order: Box<dyn Iterator<Item = usize>> = if *forward {
@@ -590,8 +594,7 @@ impl Vim {
             last = (last + n.max(1) - 1).min(last_line(text));
         }
 
-        self.last_search = Some(pattern.source.clone());
-        self.search_highlight = true;
+        self.remember_search(&pattern);
         self.last_substitute = Some((
             pattern.source.clone(),
             replacement_src,
@@ -655,8 +658,7 @@ impl Vim {
         let (pattern_src, command) = split_delimited(&args[delim.len_utf8()..], delim);
         let command = command.trim();
         let pattern = self.compile(&pattern_src)?;
-        self.last_search = Some(pattern.source.clone());
-        self.search_highlight = true;
+        self.remember_search(&pattern);
 
         let text = buf.text();
         let (first, last) = self.lines(cmd, text, DefaultRange::Whole)?;

@@ -5,6 +5,10 @@
 //! measured again. Saving is automatic: about a second after the last edit,
 //! and when the window loses focus. Changes made to the note by other apps are
 //! picked up live.
+//!
+//! `:`, `/` and `?` turn the status line into the command line. While it's
+//! typed, matches and `:s` replacements are painted into the note as a
+//! preview; nothing changes until `enter`.
 
 mod keys;
 mod line;
@@ -19,12 +23,14 @@ use gpui::{
     Window, div, font, list, prelude::*, px,
 };
 use mnote_core::{Autosave, Buffer, NotePath, Reload, Vault, VaultEvent, VaultWatcher};
+use mnote_vim::ex::AppCommand;
+use mnote_vim::ex::cmdline::line_matches;
 use mnote_vim::text::{clamp_normal, line_count, line_len, line_of, line_start};
 use mnote_vim::{Clipboard, Effect, Mode, Vim};
 
-use crate::theme::{ActiveTheme, StyledExt, Theme, family, size, space, text};
-use crate::ui::{StatusLine, TopBar};
-use line::{Caret, LineText};
+use crate::theme::{ActiveTheme, Palette, StyledExt, Theme, family, size, space, text};
+use crate::ui::{CommandLine, MessagePanel, StatusLine, TopBar};
+use line::{Caret, Highlight, LineText};
 
 /// Width left for the macOS traffic-light buttons in the top bar.
 const TRAFFIC_LIGHT_INSET: f32 = 76.;
@@ -74,6 +80,9 @@ pub struct Editor {
     blink_task: Option<Task<()>>,
     /// A message for the status line: a save error or a reload notice.
     notice: Option<SharedString>,
+    /// The app's answer to a command line (`"inbox.md" written`), shown in
+    /// the command line until the next key. The flag marks an error.
+    reply: Option<(SharedString, bool)>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -160,6 +169,7 @@ impl Editor {
             caret_on: true,
             blink_task: None,
             notice: None,
+            reply: None,
             _tasks: Vec::new(),
             _subscriptions: subscriptions,
         }
@@ -177,6 +187,7 @@ impl Editor {
         }
         let mode_before = self.vim.mode();
         let revision_before = self.buffer.revision();
+        self.reply = None;
 
         let effect = self.vim.handle_key(key, &mut self.buffer);
 
@@ -190,16 +201,85 @@ impl Editor {
         cx.stop_propagation();
 
         self.sync_lines();
-        let cursor_line = line_of(self.buffer.text(), self.vim.cursor());
-        self.lines.scroll_to_reveal_item(cursor_line);
+        // While a pattern is typed, the view follows its next match.
+        let reveal = self
+            .vim
+            .preview()
+            .and_then(|p| p.current.as_ref())
+            .map_or(self.vim.cursor(), |m| m.start);
+        self.lines
+            .scroll_to_reveal_item(line_of(self.buffer.text(), reveal));
         if self.buffer.revision() != revision_before {
             self.notice = None;
             self.schedule_autosave(cx);
         }
-        if self.vim.mode() != mode_before || self.vim.mode() == Mode::Insert {
+        if let Some(command) = self.vim.take_app_command() {
+            self.run_app_command(command, cx);
+        }
+        if self.vim.mode() != mode_before || has_bar_caret(self.vim.mode()) {
             self.restart_blink(cx);
         }
         cx.notify();
+    }
+
+    /// Commands from the command line that belong to the app.
+    fn run_app_command(&mut self, command: AppCommand, cx: &mut Context<Self>) {
+        match command {
+            AppCommand::Write { path: None, .. } => {
+                if let Err(err) = self.write(cx) {
+                    self.reply = Some((err.into(), true));
+                } else if let Source::Note { note, .. } = &self.source {
+                    self.reply = Some((format!("\"{}\" written", note.file_name()).into(), false));
+                }
+            }
+            AppCommand::Write { path: Some(_), .. } => {
+                self.reply = Some(("Writing to another file isn't supported yet".into(), true));
+            }
+            AppCommand::Quit { force } => self.quit(false, force, cx),
+            AppCommand::WriteQuit { force } => self.quit(true, force, cx),
+            AppCommand::Edit { .. } => self.not_yet(":edit"),
+            AppCommand::View(_) => self.not_yet(":view"),
+            AppCommand::Explore(_) => self.not_yet(":explore"),
+            AppCommand::Find(_) => self.not_yet(":find"),
+            AppCommand::Daily => self.not_yet(":daily"),
+        }
+    }
+
+    fn not_yet(&mut self, command: &str) {
+        self.reply = Some((format!("{command} isn't available yet").into(), true));
+    }
+
+    /// `:w`: saves now. A scratch note has nowhere to go.
+    fn write(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        if matches!(self.source, Source::Scratch) {
+            return Err("E32: No file name".into());
+        }
+        self.save_now(cx);
+        if self.buffer.is_dirty() {
+            return Err(self
+                .notice
+                .as_ref()
+                .map_or_else(|| "Couldn't save".into(), ToString::to_string));
+        }
+        Ok(())
+    }
+
+    /// `:q`, `:wq`, `:x`. Notes autosave, so quitting saves them first; only
+    /// unsaved scratch text needs `!` to throw away.
+    fn quit(&mut self, write: bool, force: bool, cx: &mut Context<Self>) {
+        let result = match self.source {
+            Source::Scratch if write => Err("E32: No file name".to_owned()),
+            Source::Scratch if self.buffer.is_dirty() && !force => {
+                Err("E37: No write since last change (add ! to override)".to_owned())
+            }
+            Source::Scratch => Ok(()),
+            Source::Note { .. } => self.write(cx),
+        };
+        match result {
+            Ok(()) => cx.quit(),
+            Err(_) if force => cx.quit(),
+            Err(err) => self.reply = Some((err.into(), true)),
+        }
     }
 
     /// Re-measures only the lines the last edits touched, keeping the scroll
@@ -215,11 +295,12 @@ impl Editor {
         self.lines.splice(top..old - bottom, new - top - bottom);
     }
 
-    /// The bar caret blinks at about 1 Hz in insert mode and stays solid
-    /// while you type. Other modes use a steady block, with no timer running.
+    /// The bar caret (insert mode, and the command line) blinks at about
+    /// 1 Hz and stays solid while you type. Other modes use a steady block,
+    /// with no timer running.
     fn restart_blink(&mut self, cx: &mut Context<Self>) {
         self.caret_on = true;
-        if self.vim.mode() != Mode::Insert {
+        if !has_bar_caret(self.vim.mode()) {
             self.blink_task = None;
             return;
         }
@@ -328,13 +409,15 @@ impl Editor {
         };
 
         let body = text::NOTE_BODY;
+        let (shown, highlights) = self.decorate(ix, start, len, &content, p);
         let mut line = LineText::new(
-            content.clone(),
+            shown,
             prose_font(body),
             body.size(),
             body.line_height(),
             Theme::color(p.ink),
-        );
+        )
+        .highlights(highlights);
 
         if let Some(chars) = self.selection_on_line(ix, start, len) {
             let to_byte = |c: usize| char_to_byte(&content, c);
@@ -345,7 +428,9 @@ impl Editor {
             };
             line = line.selection(to_byte(chars.start)..end, Theme::color(p.select));
         }
-        if current && (self.caret_on || self.vim.mode() != Mode::Insert) {
+        let mode = self.vim.mode();
+        // In command mode the caret is in the command line.
+        if current && mode != Mode::Command && (self.caret_on || mode != Mode::Insert) {
             line = line.caret(Some(Caret {
                 byte: char_to_byte(&content, cursor - start),
                 shape: self.vim.mode().caret(),
@@ -378,6 +463,70 @@ impl Editor {
                     .child(line),
             )
             .into_any_element()
+    }
+
+    /// The text to show for line `ix` and its highlights: `:s` replacements
+    /// while one is typed, else matches of the pattern being typed, else
+    /// matches of the last search until `:noh`.
+    fn decorate(
+        &self,
+        ix: usize,
+        start: usize,
+        len: usize,
+        content: &SharedString,
+        p: &Palette,
+    ) -> (SharedString, Vec<Highlight>) {
+        let preview = self.vim.preview();
+        if let Some(preview) = preview.filter(|pv| !pv.substitutions.is_empty()) {
+            let subs = preview.substitutions_in(start..start + len);
+            if subs.is_empty() {
+                return (content.clone(), Vec::new());
+            }
+            let mut shown = String::with_capacity(content.len() + 16);
+            let mut highlights = Vec::with_capacity(subs.len());
+            let mut byte = 0;
+            for (range, replacement) in subs {
+                let from = char_to_byte(content, range.start - start);
+                let to = char_to_byte(content, range.end.min(start + len) - start);
+                shown.push_str(&content[byte.min(from)..from]);
+                let at = shown.len();
+                // A replacement that splits the line shows where it breaks.
+                shown.push_str(&replacement.replace('\n', "⏎"));
+                highlights.push(Highlight {
+                    bytes: at..shown.len(),
+                    background: Theme::color(p.insert_wash),
+                    color: Theme::color(p.insert),
+                    outline: (preview.current.as_ref() == Some(range))
+                        .then(|| Theme::color(p.insert)),
+                });
+                byte = to.max(byte);
+            }
+            shown.push_str(&content[byte..]);
+            return (shown.into(), highlights);
+        }
+
+        let (pattern, current) = match preview {
+            Some(pv) if pv.covers(ix) => (pv.pattern.as_ref(), pv.current.clone()),
+            Some(pv) if pv.pattern.is_some() => (None, None),
+            _ => (self.vim.highlight_pattern(), None),
+        };
+        let Some(pattern) = pattern else {
+            return (content.clone(), Vec::new());
+        };
+        let highlights = line_matches(pattern, content, start)
+            .filter(|m| !m.is_empty())
+            .map(|m| {
+                let next = current.as_ref() == Some(&m);
+                Highlight {
+                    bytes: char_to_byte(content, m.start - start)
+                        ..char_to_byte(content, m.end - start),
+                    background: Theme::color(if next { p.cursor } else { p.match_ }),
+                    color: Theme::color(if next { p.on_cursor } else { p.ink }),
+                    outline: None,
+                }
+            })
+            .collect();
+        (content.clone(), highlights)
     }
 
     /// The selected characters on line `ix` (relative to the line start). An
@@ -425,8 +574,47 @@ fn prose_font(style: crate::theme::TextStyle) -> Font {
     }
 }
 
+/// Modes whose caret is the blinking bar.
+fn has_bar_caret(mode: Mode) -> bool {
+    matches!(mode, Mode::Insert | Mode::Command)
+}
+
 fn char_to_byte(s: &str, chars: usize) -> usize {
     s.char_indices().nth(chars).map_or(s.len(), |(b, _)| b)
+}
+
+impl Editor {
+    /// What replaces the status line: the line being typed with its live
+    /// count, or the last command and its result. Empty means the status
+    /// line shows.
+    fn command_area(&self) -> Vec<AnyElement> {
+        if let Some(line) = self.vim.command_line() {
+            let mut bar = CommandLine::new(line.kind, line.text.clone()).caret(self.caret_on);
+            if let Some(info) = self.vim.preview().and_then(|p| p.info.clone()) {
+                bar = bar.info(info);
+            }
+            return vec![bar.into_any_element()];
+        }
+        let (text, error, line) = match (self.vim.message(), &self.reply) {
+            (Some(m), _) => (m.text.clone(), m.error, m.line.clone()),
+            (None, Some((text, error))) => (text.to_string(), *error, None),
+            (None, None) => return Vec::new(),
+        };
+        if text.contains('\n') {
+            let mut area = vec![MessagePanel::new(&text).into_any_element()];
+            if let Some(line) = line {
+                area.push(CommandLine::new(line.kind, line.text).into_any_element());
+            }
+            return area;
+        }
+        let bar = match line {
+            Some(line) => CommandLine::new(line.kind, line.text)
+                .info(text)
+                .error(error),
+            None => CommandLine::message(text, error),
+        };
+        vec![bar.into_any_element()]
+    }
 }
 
 impl Render for Editor {
@@ -477,6 +665,15 @@ impl Render for Editor {
                         .max_w(px(size::GUTTER_W + size::MEASURE + space::S8)),
                     ),
             )
-            .child(status)
+            // The command line takes the status line's place while it's
+            // typed, and while it shows the result.
+            .map(|editor| {
+                let command = self.command_area();
+                if command.is_empty() {
+                    editor.child(status)
+                } else {
+                    editor.children(command)
+                }
+            })
     }
 }

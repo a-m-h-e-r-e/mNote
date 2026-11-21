@@ -9,6 +9,7 @@ use mnote_core::Buffer;
 use ropey::Rope;
 
 use crate::Mode;
+use crate::ex::cmdline::CommandKind;
 use crate::keys::Key;
 use crate::motion::{Find, Motion, MotionKind, Target, repeat_find};
 use crate::registers::{Clipboard, Register, Registers, is_register_name};
@@ -127,6 +128,17 @@ pub struct Vim {
     /// Line anchors `:g` and `:normal` walk; edits keep them on their lines,
     /// and a deleted line's anchor becomes `None`.
     pub(crate) anchors: crate::anchors::Anchors,
+    /// The last search compiled, for `n`, `N` and highlighting.
+    pub(crate) search_pattern: Option<crate::ex::pattern::Pattern>,
+    /// Direction of the last `/` (true) or `?` search.
+    pub(crate) search_forward: bool,
+    /// The line being typed in command mode, and its live preview.
+    pub(crate) cmdline: Option<crate::ex::cmdline::CommandLine>,
+    pub(crate) preview: Option<crate::ex::cmdline::Preview>,
+    /// The last command's message, until the next key.
+    pub(crate) message: Option<crate::ex::cmdline::Message>,
+    /// An app command from the last command line, until the app takes it.
+    pub(crate) app_command: Option<crate::ex::AppCommand>,
     insert: Option<InsertSession>,
     /// Keys of the command being typed, and of the last change, for `.`.
     keys: Vec<Key>,
@@ -164,6 +176,12 @@ impl Default for Vim {
             search_highlight: false,
             last_substitute: None,
             anchors: crate::anchors::Anchors::default(),
+            search_pattern: None,
+            search_forward: true,
+            cmdline: None,
+            preview: None,
+            message: None,
+            app_command: None,
             insert: None,
             keys: Vec::new(),
             last_change: None,
@@ -255,15 +273,13 @@ impl Vim {
             self.command_revision = buf.revision();
         }
         self.keys.push(key);
+        self.message = None;
         match self.mode {
             Mode::Insert => self.insert_key(key, buf),
-            Mode::Command => match key {
-                Key::Esc => {
-                    self.enter(Mode::Normal, buf.text());
-                    Effect::Handled
-                }
-                _ => Effect::Unhandled(key),
-            },
+            Mode::Command => {
+                self.command_key(key, buf);
+                Effect::Handled
+            }
             Mode::Normal | Mode::Visual | Mode::VisualLine => self.normal_key(key, buf),
         }
     }
@@ -501,6 +517,16 @@ impl Vim {
             return self.arrive(target, false, buf);
         }
 
+        if c == 'n' || c == 'N' {
+            let count = self.take_count().unwrap_or(1);
+            self.search_next(c == 'N', count, buf);
+            if self.op.is_some() {
+                // The search failed; the operator goes with it.
+                self.cancel();
+            }
+            return Effect::Handled;
+        }
+
         // An operator typed twice applies to whole lines (`dd`, `guu`).
         if let Some(pending) = self.op
             && (pending.op.line_key() == c || Operator::from_key(c) == Some(pending.op))
@@ -584,9 +610,9 @@ impl Vim {
             'V' => {
                 self.enter(Mode::VisualLine, text);
             }
-            ':' => {
-                self.enter(Mode::Command, text);
-            }
+            ':' => self.open_command_line(CommandKind::Ex, "", buf),
+            '/' => self.open_command_line(CommandKind::Search { forward: true }, "", buf),
+            '?' => self.open_command_line(CommandKind::Search { forward: false }, "", buf),
             _ => {
                 self.cancel();
                 return Effect::Unhandled(Key::Char(c));
@@ -648,7 +674,7 @@ impl Vim {
             }
             (_, ':') => {
                 self.set_visual_marks(text);
-                self.enter(Mode::Command, text);
+                self.open_command_line(CommandKind::Ex, "'<,'>", buf);
             }
             _ => {
                 self.cancel();
@@ -715,7 +741,12 @@ impl Vim {
     }
 
     /// Finishes a motion: applies the pending operator, or moves the cursor.
-    fn arrive(&mut self, target: Option<Target>, jump: bool, buf: &mut Buffer) -> Effect {
+    pub(crate) fn arrive(
+        &mut self,
+        target: Option<Target>,
+        jump: bool,
+        buf: &mut Buffer,
+    ) -> Effect {
         let Some(target) = target else {
             self.cancel();
             return Effect::Handled;
