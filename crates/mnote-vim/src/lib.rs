@@ -8,6 +8,8 @@
 //!   undo and `.` repeat. The ex command parser arrives in AMI-160.
 //! - [`Motion`] computes where a motion lands and how operators treat it.
 
+mod anchors;
+pub mod ex;
 mod keys;
 mod motion;
 mod registers;

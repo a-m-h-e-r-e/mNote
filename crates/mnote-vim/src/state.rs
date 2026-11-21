@@ -106,19 +106,27 @@ struct InsertSession {
 
 /// Vim's state for one editor or text input.
 pub struct Vim {
-    mode: Mode,
-    cursor: usize,
+    pub(crate) mode: Mode,
+    pub(crate) cursor: usize,
     anchor: usize,
     want_col: Option<usize>,
     count: Option<usize>,
     pending: Pending,
     op: Option<OpPending>,
-    register: Option<char>,
+    pub(crate) register: Option<char>,
     last_find: Option<Find>,
-    registers: Registers,
-    marks: HashMap<char, usize>,
-    /// Spaces added or removed by `>` and `<`.
-    pub shiftwidth: usize,
+    pub(crate) registers: Registers,
+    pub(crate) marks: HashMap<char, usize>,
+    pub(crate) options: crate::ex::Options,
+    /// The last search pattern (`/`, `?`, `:s`, `:g`), for `n` and `:s//`.
+    pub(crate) last_search: Option<String>,
+    /// Whether matches of the last search are highlighted (`:noh` clears).
+    pub(crate) search_highlight: bool,
+    /// The last `:s` (pattern, replacement, flags), for `:s` and `:&`.
+    pub(crate) last_substitute: Option<(String, String, String)>,
+    /// Line anchors `:g` and `:normal` walk; edits keep them on their lines,
+    /// and a deleted line's anchor becomes `None`.
+    pub(crate) anchors: crate::anchors::Anchors,
     insert: Option<InsertSession>,
     /// Keys of the command being typed, and of the last change, for `.`.
     keys: Vec<Key>,
@@ -151,7 +159,11 @@ impl Default for Vim {
             last_find: None,
             registers: Registers::default(),
             marks: HashMap::new(),
-            shiftwidth: 2,
+            options: crate::ex::Options::default(),
+            last_search: None,
+            search_highlight: false,
+            last_substitute: None,
+            anchors: crate::anchors::Anchors::default(),
             insert: None,
             keys: Vec::new(),
             last_change: None,
@@ -770,7 +782,7 @@ impl Vim {
         Effect::Handled
     }
 
-    fn apply_operator(
+    pub(crate) fn apply_operator(
         &mut self,
         op: Operator,
         range: Range<usize>,
@@ -851,11 +863,11 @@ impl Vim {
                     let start = line_start(text, line);
                     if op == Operator::Indent {
                         if line_len(text, line) > 0 {
-                            let pad = " ".repeat(self.shiftwidth);
+                            let pad = " ".repeat(self.options.shiftwidth);
                             self.edit(buf, start..start, &pad);
                         }
                     } else {
-                        let strip = outdent_width(text, line, self.shiftwidth);
+                        let strip = outdent_width(text, line, self.options.shiftwidth);
                         self.edit(buf, start..start + strip, "");
                     }
                 }
@@ -893,7 +905,7 @@ impl Vim {
         self.done(buf, true);
     }
 
-    fn put(&mut self, reg: &Register, after: bool, buf: &mut Buffer, count: usize) {
+    pub(crate) fn put(&mut self, reg: &Register, after: bool, buf: &mut Buffer, count: usize) {
         let text = buf.text();
         let len = text.len_chars();
         let line = line_of(text, self.cursor);
@@ -948,10 +960,13 @@ impl Vim {
 
     // ---- helpers ----------------------------------------------------------
 
-    /// Applies an edit and keeps marks pointing at the same text.
-    fn edit(&mut self, buf: &mut Buffer, range: Range<usize>, text: &str) {
+    /// Applies an edit and keeps marks and line anchors pointing at the same
+    /// text.
+    pub(crate) fn edit(&mut self, buf: &mut Buffer, range: Range<usize>, text: &str) {
         let removed = range.len();
         let added = text.chars().count();
+        // A rope clone is O(1); anchors need the text as it was.
+        let before = (!self.anchors.is_empty()).then(|| buf.text().clone());
         if buf.edit(range.clone(), text, self.cursor).is_err() {
             return;
         }
@@ -962,11 +977,14 @@ impl Vim {
                 *pos = range.start;
             }
         }
+        if let Some(before) = before {
+            self.anchors.apply_edit(&before, range, added);
+        }
     }
 
     /// Ends the current command. A command that changed the text becomes the
     /// one `.` repeats (changes made from visual mode aren't repeatable).
-    fn done(&mut self, buf: &Buffer, may_repeat: bool) {
+    pub(crate) fn done(&mut self, buf: &Buffer, may_repeat: bool) {
         if may_repeat && buf.revision() != self.command_revision && !self.keys_start_visual() {
             self.last_change = Some(self.keys.clone());
         }
@@ -1013,7 +1031,7 @@ impl Vim {
         self.enter(Mode::Normal, text);
     }
 
-    fn enter(&mut self, mode: Mode, text: &Rope) {
+    pub(crate) fn enter(&mut self, mode: Mode, text: &Rope) {
         if mode.is_visual() && !self.mode.is_visual() {
             self.anchor = self.cursor;
         }
@@ -1073,7 +1091,7 @@ fn combine(a: Option<usize>, b: Option<usize>) -> Option<usize> {
 }
 
 /// Whole lines `first..=last`, including the last line's newline.
-fn line_range(text: &Rope, first: usize, last: usize) -> Range<usize> {
+pub(crate) fn line_range(text: &Rope, first: usize, last: usize) -> Range<usize> {
     let start = line_start(text, first);
     let end = if last < last_line(text) {
         line_start(text, last + 1)
@@ -1108,7 +1126,7 @@ fn ends_with_newline(text: &Rope, end: usize) -> bool {
 }
 
 /// The leading spaces and tabs of `line`.
-fn indent_of(text: &Rope, line: usize) -> String {
+pub(crate) fn indent_of(text: &Rope, line: usize) -> String {
     let start = line_start(text, line);
     (0..line_len(text, line))
         .map(|i| text.char(start + i))

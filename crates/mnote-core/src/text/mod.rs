@@ -60,6 +60,10 @@ pub struct Buffer {
     history: History,
     /// Changes of the Vim command in progress, committed as one undo step.
     pending: Option<Step>,
+    /// How many `begin_change` calls are open. Groups nest: only the
+    /// outermost `end_change` commits, so an ex command that runs Vim
+    /// commands (`:g`, `:normal`) is still one undo step.
+    depth: usize,
     syntax: Option<Syntax>,
     revision: u64,
     /// Lines touched since the last [`take_changed_lines`](Self::take_changed_lines).
@@ -83,6 +87,7 @@ impl Buffer {
             rope: Rope::from_str(text),
             history: History::new(),
             pending: None,
+            depth: 0,
             syntax: Syntax::markdown(),
             revision: 0,
             changed: None,
@@ -120,19 +125,37 @@ impl Buffer {
     }
 
     /// Starts one undo step that may span many edits, such as an insert-mode
-    /// session or a `:%s` substitution. `cursor` is restored on undo.
+    /// session or a `:%s` substitution. `cursor` is restored on undo. Calls
+    /// nest; the outermost [`end_change`](Self::end_change) commits.
     pub fn begin_change(&mut self, cursor: usize) {
-        if self.pending.is_none() {
+        if self.depth == 0 {
             self.pending = Some(Step {
                 cursor_before: cursor,
                 cursor_after: cursor,
                 ..Step::default()
             });
         }
+        self.depth += 1;
     }
 
     /// Ends the current undo step. `cursor` is restored on redo.
     pub fn end_change(&mut self, cursor: usize) {
+        if self.depth == 0 {
+            return;
+        }
+        self.depth -= 1;
+        if self.depth == 0 {
+            self.commit_pending(cursor);
+        }
+    }
+
+    /// Closes any open undo step at once, however deeply nested.
+    fn close_change(&mut self, cursor: usize) {
+        self.depth = 0;
+        self.commit_pending(cursor);
+    }
+
+    fn commit_pending(&mut self, cursor: usize) {
         if let Some(mut step) = self.pending.take()
             && !step.forward.is_empty()
         {
@@ -196,7 +219,7 @@ impl Buffer {
     /// Undoes the last step. Returns where the cursor should go, or `None`
     /// when there's nothing left to undo.
     pub fn undo(&mut self) -> Option<usize> {
-        self.end_change(0);
+        self.close_change(0);
         let step = self.history.undo()?.clone();
         for change in step.inverse.iter().rev() {
             self.apply(change);
@@ -206,7 +229,7 @@ impl Buffer {
 
     /// Redoes the most recently undone step on the current branch.
     pub fn redo(&mut self) -> Option<usize> {
-        self.end_change(0);
+        self.close_change(0);
         let step = self.history.redo()?.clone();
         for change in &step.forward {
             self.apply(change);
@@ -223,14 +246,17 @@ impl Buffer {
     /// (the part before the save is one undo step) and then continues, so an
     /// autosave in the middle of typing keeps grouping what follows.
     pub fn mark_saved(&mut self) {
-        let in_progress = self.pending.as_ref().map(|s| s.cursor_after);
-        if let Some(cursor) = in_progress {
-            self.end_change(cursor);
+        if let Some(cursor) = self.pending.as_ref().map(|s| s.cursor_after) {
+            // Commit what's done so far and keep the group open, at the same
+            // nesting depth, for what follows.
+            self.commit_pending(cursor);
+            self.pending = Some(Step {
+                cursor_before: cursor,
+                cursor_after: cursor,
+                ..Step::default()
+            });
         }
         self.history.mark_saved();
-        if let Some(cursor) = in_progress {
-            self.begin_change(cursor);
-        }
     }
 
     /// Writes the buffer to its note atomically and marks it saved.
@@ -524,6 +550,28 @@ mod tests {
         dirty.edit(4..4, "!", 4).expect("edit");
         assert_eq!(dirty.reload("theirs"), Reload::KeptLocalEdits);
         assert_eq!(dirty.to_string(), "mine!");
+    }
+
+    #[test]
+    fn nested_changes_are_one_undo_step() {
+        let mut b = Buffer::new("");
+        b.begin_change(0);
+        b.edit(0..0, "a", 0).expect("edit");
+        b.begin_change(1);
+        b.edit(1..1, "b", 1).expect("edit");
+        b.end_change(2);
+        b.edit(2..2, "c", 2).expect("edit");
+        b.end_change(3);
+        assert_eq!(b.undo_steps(), 1);
+        b.undo();
+        assert_eq!(b.to_string(), "");
+        b.end_change(0); // unbalanced extra end is harmless
+        b.edit(0..0, "x", 0).expect("edit");
+        assert_eq!(
+            b.undo_steps(),
+            2,
+            "edits after a balanced group stand alone"
+        );
     }
 
     #[test]

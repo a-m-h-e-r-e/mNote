@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 mnote-core.workspace = true
+regex.workspace = true
 ropey.workspace = true
 
 [lints]
