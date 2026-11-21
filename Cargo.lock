@@ -2752,7 +2752,6 @@ name = "mnote-app"
 version = "0.1.0"
 dependencies = [
  "gpui",
- "mnote-core",
  "mnote-vim",
 ]
 

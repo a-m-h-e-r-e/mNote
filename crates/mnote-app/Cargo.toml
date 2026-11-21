@@ -12,7 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 gpui.workspace = true
-mnote-core.workspace = true
 mnote-vim.workspace = true
 
 [lints]
