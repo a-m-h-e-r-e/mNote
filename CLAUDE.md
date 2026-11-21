@@ -33,7 +33,9 @@ Every dependency is a cost: build time, binary size, attack surface, maintenance
 - No async runtime (tokio, async-std). Use gpui's executor and std threads.
 - No `serde_json`-style heavy formats where a simple parser will do. `toml` for config is fine.
 - `mnote-core` and `mnote-vim` must not depend on gpui or any UI crate.
-- Don't add duplicate crate versions. gpui's own tree already carries about 50 (`cargo tree -d`, November 2026); a change must not raise that count, and when we pick a version of a crate gpui also uses, match gpui's.
+- Don't add duplicate crate versions. gpui's own tree already carries about 50. Check the `Cargo.lock` diff: a change may add new crates, but must not add a second version of a crate that's already locked, and when we pick a crate gpui also uses, match gpui's version. (`cargo tree -d` is a rough guide only; its count shifts with feature resolution even when the lockfile gains no new versions.)
+- Never run `cargo` with `--offline` to try out dependency changes: it re-resolves `Cargo.lock` against the local cache and silently downgrades unrelated crates. Pin new crates with `cargo update -p <crate> --precise <version>`.
+- Pick crate versions released at least two weeks ago; brand-new releases wait.
 - CI fails on unused dependencies (`cargo machete`).
 
 ## Code standards

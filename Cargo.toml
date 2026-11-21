@@ -13,6 +13,12 @@ mnote-core = { path = "crates/mnote-core" }
 mnote-vim = { path = "crates/mnote-vim" }
 # notify: the file watcher behind live reload of notes changed outside mNote (FSEvents on macOS).
 notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
+# ropey: the text buffer. O(log n) edits and line lookups on any note size.
+ropey = { version = "1.6.1", default-features = false, features = ["simd"] }
+# tree-sitter + tree-sitter-md: incremental Markdown parsing for structure (headings, lists,
+# code fences) and source-view highlighting. Grammars only, no bundled parser wrapper.
+tree-sitter = "0.27.1"
+tree-sitter-md = { version = "0.5.4", default-features = false }
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }
 
 [workspace.lints.rust]

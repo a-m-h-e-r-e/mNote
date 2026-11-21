@@ -1,4 +1,5 @@
-//! mNote's core: the vault of plain Markdown files, the note index and links.
+//! mNote's core: the vault of plain Markdown files, the text buffer of an open
+//! note, the note index and links.
 //!
 //! This crate has no UI dependencies, so it can be tested on its own and reused
 //! by a future CLI.
@@ -6,6 +7,7 @@
 mod error;
 pub mod frontmatter;
 mod note_path;
+pub mod text;
 mod vault;
 mod watch;
 
@@ -14,6 +16,7 @@ use std::path::Path;
 pub use error::{Result, VaultError};
 pub use frontmatter::Frontmatter;
 pub use note_path::NotePath;
+pub use text::{Autosave, Buffer, Reload};
 pub use vault::Vault;
 pub use watch::{VaultEvent, VaultWatcher};
 
