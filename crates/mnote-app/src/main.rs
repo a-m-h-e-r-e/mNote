@@ -1,11 +1,12 @@
 //! mNote desktop app entry point.
 //!
-//! Until first run and settings exist (AMI-177), the note comes from the
-//! command line:
+//! Settings come from `~/.config/mnote/config.toml` (`space ,` opens it).
+//! What opens:
 //!
 //! - `mnote ~/notes/ideas.md` opens that note, with its folder as the vault;
 //! - `mnote ~/notes` opens `inbox.md` in that vault (created on first save);
-//! - `mnote` alone opens a scratch note that isn't saved.
+//! - `mnote` alone opens `inbox.md` in the config's `vault`, or a scratch
+//!   note that isn't saved when there's none.
 
 use std::path::{Path, PathBuf};
 
@@ -20,6 +21,7 @@ use std::rc::Rc;
 use mnote_app::capture::{CaptureEvent, PANEL_H, QuickCapture};
 use mnote_app::editor::Editor;
 use mnote_app::theme::Theme;
+use mnote_core::config::Config;
 use mnote_core::{NotePath, Vault};
 
 /// What to open, worked out from the command line before the app starts.
@@ -28,11 +30,18 @@ enum Target {
     Note(Vault, NotePath),
 }
 
-fn target_from_args() -> Result<Target, String> {
-    let Some(arg) = std::env::args_os().nth(1) else {
-        return Ok(Target::Scratch);
+fn target_from_args(vault: Option<&Path>) -> Result<Target, String> {
+    let path = match (std::env::args_os().nth(1), vault) {
+        (Some(arg), _) => PathBuf::from(arg),
+        (None, Some(vault)) if vault.is_dir() => vault.to_path_buf(),
+        (None, Some(vault)) => {
+            return Err(format!(
+                "the vault in config.toml, {}, isn't a folder",
+                vault.display()
+            ));
+        }
+        (None, None) => return Ok(Target::Scratch),
     };
-    let path = PathBuf::from(arg);
     let (folder, file) = if path.is_dir() {
         (path.clone(), PathBuf::from("inbox.md"))
     } else {
@@ -52,16 +61,30 @@ fn target_from_args() -> Result<Target, String> {
 }
 
 fn main() {
-    let target = match target_from_args() {
+    // A mistake in config.toml shows in the window; the defaults are used.
+    let (config, mut problem) = match Config::path().map(|p| Config::load(&p)) {
+        Some(Ok(Some(config))) => (config, None),
+        Some(Ok(None)) | None => (Config::default(), None),
+        Some(Err(err)) => (Config::default(), Some(err.to_string())),
+    };
+    let from_args = std::env::args_os().nth(1).is_some();
+    let target = match target_from_args(config.vault.as_deref()) {
         Ok(target) => target,
-        Err(message) => {
+        Err(message) if from_args => {
             eprintln!("mnote: {message}");
             std::process::exit(2);
+        }
+        // A configured vault that's gone: start on a scratch note and say so.
+        Err(message) => {
+            problem = Some(message);
+            Target::Scratch
         }
     };
 
     Application::new().run(move |cx: &mut App| {
         Theme::init(cx);
+        Theme::set_choice(config.theme, cx);
+        let settings = config.clone();
         let bounds = Bounds::centered(None, size(px(1200.), px(720.)), cx);
         let opened = cx.open_window(
             WindowOptions {
@@ -75,9 +98,16 @@ fn main() {
                 ..Default::default()
             },
             move |window, cx| {
-                cx.new(|cx| match target {
-                    Target::Scratch => Editor::scratch(window, cx),
-                    Target::Note(vault, note) => Editor::open(vault, note, window, cx),
+                cx.new(|cx| {
+                    let mut editor = match target {
+                        Target::Scratch => Editor::scratch(window, cx),
+                        Target::Note(vault, note) => Editor::open(vault, note, window, cx),
+                    };
+                    editor.apply_config(settings, cx);
+                    if let Some(problem) = problem {
+                        editor.show_notice(problem, cx);
+                    }
+                    editor
                 })
             },
         );
@@ -89,7 +119,7 @@ fn main() {
                 return;
             }
         };
-        summon_setup(window, cx);
+        summon_setup(window, &config, cx);
         cx.activate(true);
     });
 }
@@ -98,14 +128,15 @@ fn main() {
 /// brings mNote forward, and `esc` in NORMAL hides it. `⌥M` opens quick
 /// capture over whatever app is in front (AMI-174).
 #[cfg(target_os = "macos")]
-fn summon_setup(window: gpui::WindowHandle<Editor>, cx: &mut App) {
+fn summon_setup(window: gpui::WindowHandle<Editor>, config: &Config, cx: &mut App) {
     use mnote_app::summon::{self, Hotkey};
 
     let _ = window.update(cx, |_, window, _| summon::join_all_spaces(window));
-    let presses = match summon::register_hotkeys() {
+    let presses = match summon::register_hotkeys(&config.summon, &config.capture) {
         Ok((presses, failed)) => {
-            for err in failed {
-                eprintln!("mnote: {err}");
+            if let Some(err) = failed.first() {
+                let notice = err.to_string();
+                let _ = window.update(cx, |editor, _, cx| editor.show_notice(notice, cx));
             }
             presses
         }
@@ -171,8 +202,9 @@ fn open_capture(
     if !was_front {
         let _ = main.update(cx, |_, window, _| summon::order_out(window));
     }
-    let (year, month, day) = summon::today();
-    let target = mnote_core::capture::daily_note(year, month, day);
+    let Ok(target) = main.update(cx, |editor, _, _| editor.daily_note()) else {
+        return;
+    };
 
     let panel = size(px(mnote_app::theme::size::CAPTURE_W), px(PANEL_H));
     let mut bounds = Bounds::centered(None, panel, cx);
@@ -251,4 +283,4 @@ fn leave(main: gpui::WindowHandle<Editor>, was_front: bool, open: bool, cx: &mut
 }
 
 #[cfg(not(target_os = "macos"))]
-fn summon_setup(_: gpui::WindowHandle<Editor>, _: &mut App) {}
+fn summon_setup(_: gpui::WindowHandle<Editor>, _: &Config, _: &mut App) {}

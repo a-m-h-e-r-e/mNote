@@ -42,6 +42,15 @@ impl View {
         }
     }
 
+    /// The view config.toml names.
+    pub fn from_config(view: mnote_core::config::ViewChoice) -> Self {
+        match view {
+            mnote_core::config::ViewChoice::Styled => View::Styled,
+            mnote_core::config::ViewChoice::Source => View::Source,
+            mnote_core::config::ViewChoice::Plain => View::Plain,
+        }
+    }
+
     pub fn from_name(name: &str) -> Option<Self> {
         [View::Styled, View::Source, View::Plain]
             .into_iter()

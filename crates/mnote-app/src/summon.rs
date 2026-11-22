@@ -1,5 +1,5 @@
-//! Summoning mNote from anywhere on macOS: the global `⌥N` (summon) and
-//! `⌥M` (quick capture) hotkeys, a window
+//! Summoning mNote from anywhere on macOS: the global summon and quick
+//! capture keys (`⌥N` and `⌥M` unless config.toml says otherwise), a window
 //! that joins every Space (full-screen apps' Spaces included), and today's
 //! local date for quick capture's daily note.
 //!
@@ -15,9 +15,10 @@
 
 use std::ffi::c_void;
 use std::fmt;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use gpui::Window;
+use mnote_core::config::KeySpec;
 use objc::runtime::Object;
 use objc::{msg_send, sel, sel_impl};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -54,6 +55,7 @@ unsafe extern "C" {
         user_data: *mut c_void,
         out_ref: *mut EventHandlerRef,
     ) -> OsStatus;
+    fn UnregisterEventHotKey(hot_key: EventHotKeyRef) -> OsStatus;
     fn RegisterEventHotKey(
         key_code: u32,
         modifiers: u32,
@@ -81,38 +83,25 @@ const DIRECT_OBJECT: u32 = u32::from_be_bytes(*b"----");
 const HOT_KEY_ID_TYPE: u32 = u32::from_be_bytes(*b"hkid");
 /// Our hotkeys' signature.
 const SIGNATURE: u32 = u32::from_be_bytes(*b"mNte");
-/// Carbon's `optionKey`.
+/// Carbon's `cmdKey`, `shiftKey`, `optionKey` and `controlKey`.
+const COMMAND: u32 = 1 << 8;
+const SHIFT: u32 = 1 << 9;
 const OPTION: u32 = 1 << 11;
+const CONTROL: u32 = 1 << 12;
 /// `eventHotKeyExistsErr`: another app has the key.
 const HOT_KEY_TAKEN: OsStatus = -9878;
 
 /// mNote's global keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hotkey {
-    /// `⌥N`: bring the mNote window forward.
+    /// `summon` (`⌥N`): bring the mNote window forward.
     Summon,
-    /// `⌥M`: open the quick capture panel.
+    /// `capture` (`⌥M`): open the quick capture panel.
     Capture,
 }
 
 impl Hotkey {
     const ALL: [Hotkey; 2] = [Hotkey::Summon, Hotkey::Capture];
-
-    /// The key as shown in hints.
-    pub fn label(self) -> &'static str {
-        match self {
-            Hotkey::Summon => "⌥N",
-            Hotkey::Capture => "⌥M",
-        }
-    }
-
-    /// `kVK_ANSI_N` and `kVK_ANSI_M`.
-    fn key_code(self) -> u32 {
-        match self {
-            Hotkey::Summon => 0x2D,
-            Hotkey::Capture => 0x2E,
-        }
-    }
 
     fn id(self) -> u32 {
         match self {
@@ -120,30 +109,110 @@ impl Hotkey {
             Hotkey::Capture => 2,
         }
     }
+
+    /// The setting's name in config.toml.
+    fn setting(self) -> &'static str {
+        match self {
+            Hotkey::Summon => "summon",
+            Hotkey::Capture => "capture",
+        }
+    }
+}
+
+/// The ANSI virtual key code for a config key (`n`, `;`, `space`).
+fn key_code(key: &str) -> Option<u32> {
+    let code = match key {
+        "a" => 0x00,
+        "s" => 0x01,
+        "d" => 0x02,
+        "f" => 0x03,
+        "h" => 0x04,
+        "g" => 0x05,
+        "z" => 0x06,
+        "x" => 0x07,
+        "c" => 0x08,
+        "v" => 0x09,
+        "b" => 0x0B,
+        "q" => 0x0C,
+        "w" => 0x0D,
+        "e" => 0x0E,
+        "r" => 0x0F,
+        "y" => 0x10,
+        "t" => 0x11,
+        "1" => 0x12,
+        "2" => 0x13,
+        "3" => 0x14,
+        "4" => 0x15,
+        "6" => 0x16,
+        "5" => 0x17,
+        "=" => 0x18,
+        "9" => 0x19,
+        "7" => 0x1A,
+        "-" => 0x1B,
+        "8" => 0x1C,
+        "0" => 0x1D,
+        "]" => 0x1E,
+        "o" => 0x1F,
+        "u" => 0x20,
+        "[" => 0x21,
+        "i" => 0x22,
+        "p" => 0x23,
+        "l" => 0x25,
+        "j" => 0x26,
+        "'" => 0x27,
+        "k" => 0x28,
+        ";" => 0x29,
+        "\\" => 0x2A,
+        "," => 0x2B,
+        "/" => 0x2C,
+        "n" => 0x2D,
+        "m" => 0x2E,
+        "." => 0x2F,
+        "space" => 0x31,
+        "`" => 0x32,
+        _ => return None,
+    };
+    Some(code)
+}
+
+fn modifiers(spec: &KeySpec) -> u32 {
+    [
+        (spec.command, COMMAND),
+        (spec.shift, SHIFT),
+        (spec.option, OPTION),
+        (spec.control, CONTROL),
+    ]
+    .into_iter()
+    .filter(|(on, _)| *on)
+    .fold(0, |all, (_, bit)| all | bit)
 }
 
 /// Where hotkey presses go. Bounded: presses while the app is busy collapse.
 static PRESSES: OnceLock<async_channel::Sender<Hotkey>> = OnceLock::new();
+/// The registered keys (as addresses), so a config change can unregister
+/// them.
+static REGISTERED: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
 /// Why a hotkey couldn't be registered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HotkeyError {
     /// Another app already has the key.
-    Taken(Hotkey),
+    Taken(String),
+    /// A key mNote can't register (not on the ANSI layout's map).
+    Unknown(String),
     /// The keys were registered once already.
     AlreadyRegistered,
     /// Carbon returned this status.
-    Os(Hotkey, i32),
+    Os(String, i32),
 }
 
 impl fmt::Display for HotkeyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            HotkeyError::Taken(key) => write!(f, "another app is using {}", key.label()),
+            HotkeyError::Taken(key) => write!(f, "another app is using {key}"),
+            HotkeyError::Unknown(key) => write!(f, "{key} can't be a global key"),
             HotkeyError::AlreadyRegistered => write!(f, "the global keys are already registered"),
-            HotkeyError::Os(key, status) => {
-                write!(f, "macOS refused {} (status {status})", key.label())
-            }
+            HotkeyError::Os(key, status) => write!(f, "macOS refused {key} (status {status})"),
         }
     }
 }
@@ -178,11 +247,14 @@ extern "C" fn on_hot_key(_: EventHandlerCallRef, event: EventRef, _: *mut c_void
     0
 }
 
-/// Registers `⌥N` and `⌥M` for the whole system. Presses arrive on the
-/// returned channel, on the main thread's run loop; a key another app holds
-/// is reported and skipped. Call once, after the app starts.
-pub fn register_hotkeys() -> Result<(async_channel::Receiver<Hotkey>, Vec<HotkeyError>), HotkeyError>
-{
+/// Starts listening for global keys and registers `summon` and `capture`.
+/// Presses arrive on the returned channel, on the main thread's run loop; a
+/// key another app holds is reported and skipped. Call once, after the app
+/// starts.
+pub fn register_hotkeys(
+    summon: &KeySpec,
+    capture: &KeySpec,
+) -> Result<(async_channel::Receiver<Hotkey>, Vec<HotkeyError>), HotkeyError> {
     let (send, receive) = async_channel::bounded(2);
     PRESSES
         .set(send)
@@ -194,12 +266,11 @@ pub fn register_hotkeys() -> Result<(async_channel::Receiver<Hotkey>, Vec<Hotkey
     let mut handler: EventHandlerRef = std::ptr::null_mut();
     // SAFETY: plain Carbon calls with valid pointers to locals; `spec` is
     // read during the call only. The handler is a `'static` function that
-    // touches only the `PRESSES` static, and the refs are kept for the life
-    // of the app (never unregistered), so nothing dangles.
-    let target = unsafe { GetApplicationEventTarget() };
+    // touches only the `PRESSES` static, and stays installed for the life of
+    // the app, so nothing dangles.
     let status = unsafe {
         InstallEventHandler(
-            target,
+            GetApplicationEventTarget(),
             on_hot_key,
             1,
             &spec,
@@ -208,25 +279,53 @@ pub fn register_hotkeys() -> Result<(async_channel::Receiver<Hotkey>, Vec<Hotkey
         )
     };
     if status != 0 {
-        return Err(HotkeyError::Os(Hotkey::Summon, status));
+        return Err(HotkeyError::Os("the global keys".into(), status));
+    }
+    Ok((receive, set_hotkeys(summon, capture)))
+}
+
+/// Replaces the global keys (after config.toml changed). Returns the keys
+/// that couldn't be registered.
+pub fn set_hotkeys(summon: &KeySpec, capture: &KeySpec) -> Vec<HotkeyError> {
+    let Ok(mut registered) = REGISTERED.lock() else {
+        return vec![HotkeyError::AlreadyRegistered];
+    };
+    for hot_key in registered.drain(..) {
+        // SAFETY: each address is a ref RegisterEventHotKey gave us and that
+        // hasn't been unregistered yet (we drain it from the list).
+        unsafe { UnregisterEventHotKey(hot_key as EventHotKeyRef) };
     }
     let mut failed = Vec::new();
-    for key in Hotkey::ALL {
+    for (key, spec) in [(Hotkey::Summon, summon), (Hotkey::Capture, capture)] {
+        let label = format!("{} ({})", spec.label(), key.setting());
+        let Some(code) = key_code(&spec.key) else {
+            failed.push(HotkeyError::Unknown(label));
+            continue;
+        };
         let id = EventHotKeyId {
             signature: SIGNATURE,
             id: key.id(),
         };
         let mut hot_key: EventHotKeyRef = std::ptr::null_mut();
-        // SAFETY: as above; `hot_key` is a local the call fills.
-        let status =
-            unsafe { RegisterEventHotKey(key.key_code(), OPTION, id, target, 0, &mut hot_key) };
+        // SAFETY: Carbon fills `hot_key`, a local; the target is the app's
+        // own, alive for the life of the app.
+        let status = unsafe {
+            RegisterEventHotKey(
+                code,
+                modifiers(spec),
+                id,
+                GetApplicationEventTarget(),
+                0,
+                &mut hot_key,
+            )
+        };
         match status {
-            0 => {}
-            HOT_KEY_TAKEN => failed.push(HotkeyError::Taken(key)),
-            status => failed.push(HotkeyError::Os(key, status)),
+            0 => registered.push(hot_key as usize),
+            HOT_KEY_TAKEN => failed.push(HotkeyError::Taken(label)),
+            status => failed.push(HotkeyError::Os(label, status)),
         }
     }
-    Ok((receive, failed))
+    failed
 }
 
 /// libc's `struct tm` on macOS.

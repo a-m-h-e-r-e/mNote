@@ -19,17 +19,39 @@ use super::{CodeLines, TableLayout};
 /// Where a note lives. A scratch note isn't saved.
 pub(super) enum Source {
     Scratch,
-    Note { vault: Vault, note: NotePath },
+    Note {
+        vault: Vault,
+        note: NotePath,
+    },
+    /// mNote's own `config.toml` (`space ,`), outside the vault.
+    Config(std::path::PathBuf),
 }
 
 impl Source {
-    /// Which note this is, for telling docs apart (`None`: scratch).
+    /// The note, if this is one of the vault's.
     pub(super) fn key(&self) -> Option<&NotePath> {
         match self {
-            Source::Scratch => None,
             Source::Note { note, .. } => Some(note),
+            Source::Scratch | Source::Config(_) => None,
         }
     }
+
+    /// Which document this is, for telling docs apart.
+    pub(super) fn doc_key(&self) -> DocKey {
+        match self {
+            Source::Scratch => DocKey::Scratch,
+            Source::Note { note, .. } => DocKey::Note(note.clone()),
+            Source::Config(_) => DocKey::Config,
+        }
+    }
+}
+
+/// A document's identity: two panes with equal keys share one [`Doc`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum DocKey {
+    Scratch,
+    Note(NotePath),
+    Config,
 }
 
 /// An open note that isn't the focused pane's: everything the editor keeps
@@ -73,7 +95,7 @@ pub(super) struct PaneLocal {
 /// A pane: its note, and its state while it isn't focused.
 pub(super) struct PaneSlot {
     pub id: PaneId,
-    pub note: Option<NotePath>,
+    pub note: DocKey,
     /// `None` for the focused pane, whose state is the editor's.
     pub local: Option<PaneLocal>,
 }
@@ -279,15 +301,15 @@ impl Editor {
         self.panes.iter().position(|p| p.id == id)
     }
 
-    fn parked_index(&self, note: Option<&NotePath>) -> Option<usize> {
-        self.parked.iter().position(|d| d.source.key() == note)
+    fn parked_index(&self, key: &DocKey) -> Option<usize> {
+        self.parked.iter().position(|d| d.source.doc_key() == *key)
     }
 
     /// Whether a pane other than the focused one shows `note`.
-    fn shown_elsewhere(&self, note: Option<&NotePath>) -> bool {
+    fn shown_elsewhere(&self, key: &DocKey) -> bool {
         self.panes
             .iter()
-            .any(|p| p.id != self.focused && p.note.as_ref() == note)
+            .any(|p| p.id != self.focused && p.note == *key)
     }
 
     /// A new doc for `buffer`, redrawing when its background parse lands.
@@ -301,7 +323,7 @@ impl Editor {
 
     /// Records the focused pane's note (after it opened another).
     pub(super) fn set_pane_note(&mut self) {
-        let note = self.source.key().cloned();
+        let note = self.source.doc_key();
         if let Some(i) = self.slot(self.focused) {
             self.panes[i].note = note;
         }
@@ -310,15 +332,15 @@ impl Editor {
     /// The focused pane's note goes away (it opens another): keep its doc
     /// if another pane still shows it.
     pub(super) fn park_or_drop(&mut self, mut old: Doc) {
-        if self.shown_elsewhere(old.source.key()) {
+        if self.shown_elsewhere(&old.source.doc_key()) {
             old.autosave_task = None;
             self.parked.push(old);
         }
     }
 
     /// Takes the open doc for `note` out of the parked ones, if there is one.
-    pub(super) fn unpark(&mut self, note: &NotePath) -> Option<Doc> {
-        let i = self.parked_index(Some(note))?;
+    pub(super) fn unpark(&mut self, key: &DocKey) -> Option<Doc> {
+        let i = self.parked_index(key)?;
         Some(self.parked.swap_remove(i))
     }
 
@@ -334,10 +356,10 @@ impl Editor {
             return;
         };
         let note = self.panes[ti].note.clone();
-        if note.as_ref() != self.source.key() {
+        if note != self.source.doc_key() {
             self.save_now(cx);
             self.autosave_task = None;
-            if let Some(i) = self.parked_index(note.as_ref()) {
+            if let Some(i) = self.parked_index(&note) {
                 let mut doc = self.parked.swap_remove(i);
                 self.swap_doc(&mut doc);
                 self.parked.push(doc);
@@ -361,7 +383,7 @@ impl Editor {
         lines.scroll_to(self.lines.logical_scroll_top());
         self.panes.push(PaneSlot {
             id,
-            note: self.source.key().cloned(),
+            note: self.source.doc_key(),
             local: Some(PaneLocal {
                 lines,
                 view: self.view,
@@ -387,9 +409,9 @@ impl Editor {
         if let Some(i) = self.slot(closing) {
             let slot = self.panes.remove(i);
             // Its note's doc goes if no pane shows it any more.
-            let still_shown = slot.note.as_ref() == self.source.key()
+            let still_shown = slot.note == self.source.doc_key()
                 || self.panes.iter().any(|p| p.note == slot.note);
-            if !still_shown && let Some(d) = self.parked_index(slot.note.as_ref()) {
+            if !still_shown && let Some(d) = self.parked_index(&slot.note) {
                 self.parked.swap_remove(d);
             }
         }
@@ -458,7 +480,7 @@ impl Editor {
     /// After edits to the focused note: the same lines change in other
     /// panes on it.
     pub(super) fn splice_other_panes(&mut self, range: std::ops::Range<usize>, count: usize) {
-        let note = self.source.key().cloned();
+        let note = self.source.doc_key();
         for slot in &mut self.panes {
             if slot.note == note
                 && let Some(local) = &mut slot.local
@@ -469,9 +491,9 @@ impl Editor {
     }
 
     /// After a parked note's text was replaced: its panes measure again.
-    fn reset_panes_on(&mut self, note: Option<&NotePath>, lines: usize) {
+    fn reset_panes_on(&mut self, key: &DocKey, lines: usize) {
         for slot in &mut self.panes {
-            if slot.note.as_ref() == note
+            if slot.note == *key
                 && let Some(local) = &mut slot.local
             {
                 local.lines.reset(lines);
@@ -487,7 +509,8 @@ impl Editor {
         note: &NotePath,
         f: impl FnOnce(&mut Self) -> R,
     ) -> Option<R> {
-        let i = self.parked_index(Some(note))?;
+        let key = DocKey::Note(note.clone());
+        let i = self.parked_index(&key)?;
         let mut doc = self.parked.swap_remove(i);
         self.swap_doc(&mut doc);
         let cursor = self.vim.cursor();
@@ -498,7 +521,7 @@ impl Editor {
         let lines = self.buffer.text().len_lines();
         self.swap_doc(&mut doc);
         self.parked.push(doc);
-        self.reset_panes_on(Some(note), lines);
+        self.reset_panes_on(&key, lines);
         Some(out)
     }
 
@@ -533,8 +556,8 @@ impl Editor {
             return blank();
         };
         let note = self.panes[si].note.clone();
-        let mut doc = match note.as_ref() != self.source.key() {
-            true => match self.parked_index(note.as_ref()) {
+        let mut doc = match note != self.source.doc_key() {
+            true => match self.parked_index(&note) {
                 Some(i) => Some(self.parked.swap_remove(i)),
                 None => {
                     self.panes[si].local = Some(local);
@@ -567,8 +590,9 @@ impl Editor {
             .filter(|&id| id != self.focused)
             .filter_map(|id| self.slot(id))
             .map(|i| match &self.panes[i].note {
-                Some(note) => note.file_name().to_owned(),
-                None => "scratch".to_owned(),
+                DocKey::Note(note) => note.file_name().to_owned(),
+                DocKey::Scratch => "scratch".to_owned(),
+                DocKey::Config => "config.toml".to_owned(),
             })
             .collect()
     }

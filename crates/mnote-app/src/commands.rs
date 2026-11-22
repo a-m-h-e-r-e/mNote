@@ -127,6 +127,20 @@ pub const COMMANDS: &[Command] = &[
         Run::Keys(" m"),
     ),
     cmd(
+        "Open today's note",
+        None,
+        Some("daily"),
+        "The daily note (daily_note in settings), made if it doesn't exist yet.",
+        Run::Ex("daily"),
+    ),
+    cmd(
+        "Open settings",
+        Some("space ,"),
+        None,
+        "config.toml in mNote: vault, keys, theme, view and more. Saving applies it.",
+        Run::Keys(" ,"),
+    ),
+    cmd(
         "Save note",
         None,
         Some("w"),

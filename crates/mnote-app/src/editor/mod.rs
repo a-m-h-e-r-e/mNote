@@ -25,6 +25,7 @@ use gpui::{
     Window, div, font, list, prelude::*, px,
 };
 use mnote_core::code::CodeStyle;
+use mnote_core::config::Config;
 use mnote_core::files::FileOp;
 use mnote_core::folder_edit::{Change, FolderEntry};
 use mnote_core::links::{LinkMove, count_relinks, relink_vault};
@@ -59,7 +60,7 @@ const TRAFFIC_LIGHT_INSET: f32 = 76.;
 /// Half a blink cycle of the insert-mode bar caret (about 1 Hz).
 const BLINK: Duration = Duration::from_millis(530);
 
-use panes::{Axis, Doc, Layout, PaneId, PaneSlot, Source};
+use panes::{Axis, Doc, DocKey, Layout, PaneId, PaneSlot, Source};
 
 /// Bridges Vim's synchronous clipboard to gpui's: the editor fills `read`
 /// just before a `"+p`, and flushes `write` after each key.
@@ -155,6 +156,11 @@ pub struct Editor {
     drawing_other: bool,
     /// `⌃w` was pressed: the next key is a pane command.
     pane_key: bool,
+    /// The notes folder, whatever the focused pane shows.
+    vault: Option<Vault>,
+    /// The settings in use, and where they're kept.
+    config: Config,
+    config_path: Option<std::path::PathBuf>,
     /// Changes by other apps. Boxed: the watcher is large, and a scratch
     /// note has none.
     _watcher: Option<Box<VaultWatcher>>,
@@ -188,7 +194,9 @@ impl Editor {
             })
             .ok();
         let paths = VaultPaths(vault.clone());
+        let kept = vault.clone();
         let mut editor = Self::build(buffer, Source::Note { vault, note }, window, cx);
+        editor.vault = Some(kept);
         editor._watcher = watcher.map(Box::new);
         editor.notice = notice;
         editor.vim.set_completer(Box::new(paths));
@@ -245,7 +253,7 @@ impl Editor {
             }),
         ];
 
-        let first_note = source.key().cloned();
+        let first_note = source.doc_key();
         Editor {
             lines: ListState::new(buffer.text().len_lines(), ListAlignment::Top, px(400.)),
             buffer,
@@ -286,6 +294,9 @@ impl Editor {
             parked: Vec::new(),
             drawing_other: false,
             pane_key: false,
+            vault: None,
+            config: Config::default(),
+            config_path: Config::path(),
             _watcher: None,
             _tasks: vec![redraw],
             _subscriptions: subscriptions,
@@ -427,6 +438,9 @@ impl Editor {
         if key == mnote_vim::Key::Char('b') {
             return self.open_backlinks(cx);
         }
+        if key == mnote_vim::Key::Char(',') {
+            return self.open_config(cx);
+        }
         let query = match key {
             mnote_vim::Key::Char('f') => "",
             mnote_vim::Key::Char('/') => "/",
@@ -479,16 +493,10 @@ impl Editor {
     /// Opens the finder with `query` already typed.
     fn open_finder(&mut self, query: &str, cx: &mut Context<Self>) {
         let current = CurrentNote {
-            path: match &self.source {
-                Source::Note { note, .. } => Some(note.clone()),
-                Source::Scratch => None,
-            },
+            path: self.source.key().cloned(),
             text: self.buffer.to_string(),
         };
-        let vault = match &self.source {
-            Source::Note { vault, .. } => Some(vault.clone()),
-            Source::Scratch => None,
-        };
+        let vault = self.vault.clone();
         let mut picker = Picker::new(Box::new(Finder::new(self.index.clone(), current, vault)));
         if !query.is_empty() {
             picker.set_query(query);
@@ -839,7 +847,7 @@ impl Editor {
                         }
                     }
                     for slot in &mut self.panes {
-                        if let Some(note) = &mut slot.note {
+                        if let DocKey::Note(note) = &mut slot.note {
                             follow(note);
                         }
                     }
@@ -1108,15 +1116,14 @@ impl Editor {
     /// current one first. Registers, history and options carry over. A note
     /// another pane shows keeps its buffer, shared.
     fn switch_to(&mut self, target: NotePath, cx: &mut Context<Self>) {
-        self.save_now(cx);
-        let Source::Note { vault, note } = &self.source else {
-            return;
-        };
-        if *note == target {
+        if self.source.key() == Some(&target) {
             return;
         }
-        let vault = vault.clone();
-        let mut next = match self.unpark(&target) {
+        let Some(vault) = self.vault.clone() else {
+            return;
+        };
+        self.save_now(cx);
+        let next = match self.unpark(&DocKey::Note(target.clone())) {
             Some(doc) => doc,
             None => match Buffer::open(&vault, &target) {
                 Ok(buffer) => self.new_doc(
@@ -1132,6 +1139,54 @@ impl Editor {
                 }
             },
         };
+        self.show_doc(next);
+    }
+
+    /// `space ,`: mNote's own config.toml in the focused pane (made from the
+    /// current settings if there's none yet). Saving it applies it.
+    fn open_config(&mut self, cx: &mut Context<Self>) {
+        if self.source.doc_key() == DocKey::Config {
+            return;
+        }
+        let Some(path) = self.config_path.clone() else {
+            self.reply = Some(("No home folder for config.toml".into(), true));
+            return;
+        };
+        self.save_now(cx);
+        let next = match self.unpark(&DocKey::Config) {
+            Some(doc) => doc,
+            None => {
+                let text = match std::fs::read_to_string(&path) {
+                    Ok(text) => text,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        let text = self.config.template();
+                        if let Err(err) = mnote_core::config::write_file(&path, &text) {
+                            self.reply = Some((
+                                format!("Couldn't create {}: {err}", path.display()).into(),
+                                true,
+                            ));
+                            return;
+                        }
+                        text
+                    }
+                    Err(err) => {
+                        self.reply = Some((
+                            format!("Couldn't open {}: {err}", path.display()).into(),
+                            true,
+                        ));
+                        return;
+                    }
+                };
+                self.new_doc(Buffer::new(&text), Source::Config(path))
+            }
+        };
+        self.show_doc(next);
+        cx.notify();
+    }
+
+    /// Puts `next` in the focused pane; the doc it replaces stays open if
+    /// another pane shows it.
+    fn show_doc(&mut self, mut next: Doc) {
         std::mem::swap(&mut self.buffer, &mut next.buffer);
         std::mem::swap(&mut self.source, &mut next.source);
         std::mem::swap(&mut self.autosave, &mut next.autosave);
@@ -1145,6 +1200,53 @@ impl Editor {
         self.park_or_drop(next);
         self.vim.set_cursor(0);
         self.lines.reset(self.buffer.text().len_lines());
+    }
+
+    /// `:daily`: today's note (from `daily_note` in config.toml), made if it
+    /// doesn't exist yet.
+    fn open_daily(&mut self, cx: &mut Context<Self>) {
+        let Some(vault) = &self.vault else {
+            self.reply = Some(("A scratch note has no vault for a daily note".into(), true));
+            return;
+        };
+        let note = self.daily_note();
+        if vault.path_of(&note).exists() {
+            self.switch_to(note, cx);
+        } else {
+            self.picker_action(PickerAction::CreateNote(note), cx);
+        }
+    }
+
+    /// Today's note, as config.toml names it.
+    pub fn daily_note(&self) -> NotePath {
+        let (year, month, day) = crate::today();
+        self.config.daily_note(year, month, day)
+    }
+
+    /// Takes settings into use: the view and line numbers here, the theme,
+    /// and (on macOS) the global keys. At startup and when config.toml is
+    /// saved.
+    pub fn apply_config(&mut self, config: Config, cx: &mut Context<Self>) {
+        // Only a changed setting moves the view, so `space m` choices stay.
+        if config.view != self.config.view {
+            self.view = styled::View::from_config(config.view);
+        }
+        let set = if config.relative_numbers {
+            "set relativenumber"
+        } else {
+            "set norelativenumber"
+        };
+        let _ = self.vim.execute(set, &mut self.buffer);
+        crate::theme::Theme::set_choice(config.theme, cx);
+        self.config = config;
+        cx.notify();
+    }
+
+    /// The global keys couldn't all be registered, or config.toml has a
+    /// mistake: say so in the status line.
+    pub fn show_notice(&mut self, notice: String, cx: &mut Context<Self>) {
+        self.notice = Some(notice.into());
+        cx.notify();
     }
 
     /// Reads the whole vault into the index on a background thread.
@@ -1198,7 +1300,7 @@ impl Editor {
             },
             AppCommand::Explore(folder) => self.open_explorer(folder, cx),
             AppCommand::Find(_) => self.not_yet(":find"),
-            AppCommand::Daily => self.not_yet(":daily"),
+            AppCommand::Daily => self.open_daily(cx),
             AppCommand::ListNext => self.list_step(1, cx),
             AppCommand::ListPrevious => self.list_step(-1, cx),
             AppCommand::FollowLink => self.follow_link(cx),
@@ -1285,7 +1387,7 @@ impl Editor {
                 Err("E37: No write since last change (add ! to override)".to_owned())
             }
             Source::Scratch => Ok(()),
-            Source::Note { .. } => self.write(cx),
+            Source::Note { .. } | Source::Config(_) => self.write(cx),
         };
         match result {
             Ok(()) => cx.quit(),
@@ -1350,6 +1452,10 @@ impl Editor {
 
     fn save_now(&mut self, cx: &mut Context<Self>) {
         self.autosave_task = None;
+        if let Source::Config(path) = &self.source {
+            let path = path.clone();
+            return self.save_config(&path, cx);
+        }
         let Source::Note { vault, note, .. } = &self.source else {
             return;
         };
@@ -1367,6 +1473,36 @@ impl Editor {
             Err(err) => {
                 self.notice = Some(format!("Couldn't save. {err}").into());
             }
+        }
+        cx.notify();
+    }
+
+    /// Saves config.toml and applies it; a mistake is shown, with its line,
+    /// and the settings in use stay.
+    fn save_config(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        if !self.buffer.is_dirty() {
+            return;
+        }
+        let text = self.buffer.to_string();
+        if let Err(err) = mnote_core::config::write_file(path, &text) {
+            self.notice = Some(format!("Couldn't save. {err}").into());
+            return cx.notify();
+        }
+        self.buffer.mark_saved();
+        self.autosave.saved();
+        match Config::parse(&text) {
+            Ok(config) => {
+                #[cfg(target_os = "macos")]
+                let failed = crate::summon::set_hotkeys(&config.summon, &config.capture);
+                #[cfg(not(target_os = "macos"))]
+                let failed: Vec<String> = Vec::new();
+                self.notice = failed.first().map(|err| err.to_string().into());
+                self.apply_config(config, cx);
+                if self.notice.is_none() {
+                    self.reply = Some(("Settings applied".into(), false));
+                }
+            }
+            Err(err) => self.notice = Some(err.to_string().into()),
         }
         cx.notify();
     }
@@ -1456,8 +1592,10 @@ impl Editor {
 
         // Source and plain views show every line as typed: no hidden
         // markers, no collapsed frontmatter, tables or images.
-        let styled_view = self.view == styled::View::Styled;
-        let plain_view = self.view == styled::View::Plain;
+        // config.toml shows as typed, its `#` comments not headings.
+        let config = matches!(self.source, Source::Config(_));
+        let styled_view = self.view == styled::View::Styled && !config;
+        let plain_view = self.view == styled::View::Plain || config;
 
         // Frontmatter collapses to its tags unless the cursor is inside it.
         if let LineKind::Frontmatter { first } = kind
@@ -2142,6 +2280,10 @@ impl Editor {
     fn path_segments(&self) -> Vec<SharedString> {
         match &self.source {
             Source::Scratch => vec![SharedString::new_static("scratch")],
+            Source::Config(_) => vec![
+                SharedString::new_static("settings"),
+                SharedString::new_static("config.toml"),
+            ],
             Source::Note { note, .. } => note.segments().map(|s| s.to_owned().into()).collect(),
         }
     }
@@ -2400,6 +2542,7 @@ impl Render for Editor {
         let column = cursor - line_start(rope, line);
         let file = match &self.source {
             Source::Scratch => SharedString::new_static("scratch (not saved)"),
+            Source::Config(_) => SharedString::new_static("config.toml"),
             Source::Note { note, .. } => note.file_name().to_owned().into(),
         };
         let view = cx.entity();

@@ -2808,6 +2808,7 @@ dependencies = [
  "nucleo-matcher",
  "regex",
  "ropey",
+ "toml 1.2.2+spec-1.1.0",
  "tree-sitter",
  "tree-sitter-bash",
  "tree-sitter-javascript",

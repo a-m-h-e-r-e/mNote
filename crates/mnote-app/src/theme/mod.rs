@@ -32,6 +32,12 @@ impl From<WindowAppearance> for Appearance {
     }
 }
 
+/// The appearance `config.toml` fixes, if it does (`theme = "dark"`).
+#[derive(Debug, Clone, Copy, Default)]
+struct FixedAppearance(Option<Appearance>);
+
+impl Global for FixedAppearance {}
+
 /// The active theme, stored as a gpui global.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Theme {
@@ -65,9 +71,31 @@ impl Theme {
         cx.set_global(Self::new(cx.window_appearance().into()));
     }
 
-    /// Switches the theme when the window's appearance changed. Returns true when
-    /// it did, so the caller can re-render.
+    /// Follows the config's `theme`: the system's appearance, or always dark
+    /// or light.
+    pub fn set_choice(choice: mnote_core::config::ThemeChoice, cx: &mut App) {
+        use mnote_core::config::ThemeChoice;
+        let fixed = match choice {
+            ThemeChoice::System => None,
+            ThemeChoice::Dark => Some(Appearance::Dark),
+            ThemeChoice::Light => Some(Appearance::Light),
+        };
+        cx.set_global(FixedAppearance(fixed));
+        let appearance = fixed.unwrap_or_else(|| cx.window_appearance().into());
+        if cx.theme().appearance != appearance {
+            cx.set_global(Self::new(appearance));
+        }
+    }
+
+    /// Switches the theme when the window's appearance changed (unless the
+    /// config fixes it). Returns true when it did, so the caller can re-render.
     pub fn sync_with(window: &Window, cx: &mut App) -> bool {
+        if cx
+            .try_global::<FixedAppearance>()
+            .is_some_and(|f| f.0.is_some())
+        {
+            return false;
+        }
         let appearance = Appearance::from(window.appearance());
         if cx.theme().appearance == appearance {
             return false;

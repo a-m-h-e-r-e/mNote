@@ -37,6 +37,9 @@ tree-sitter-json = { version = "=0.24.8", default-features = false }
 regex = { version = "1.13.2", default-features = false, features = ["std", "perf", "unicode"] }
 # nucleo-matcher: the fuzzy matcher of nucleo (Helix), for the finder and pickers.
 # Only the matcher: nucleo's own threading isn't needed. Needs memchr, already locked.
+# toml: reads ~/.config/mnote/config.toml (parse only, into a Table; no
+# serde derive). Already in gpui's tree at this version.
+toml = { version = "=1.2.2", default-features = false, features = ["std", "parse", "serde"] }
 nucleo-matcher = { version = "0.3.1", default-features = false, features = ["unicode-normalization", "unicode-casefold"] }
 # async-channel: carries file-watcher events to the UI thread. Already in gpui's tree.
 async-channel = "2.5.0"

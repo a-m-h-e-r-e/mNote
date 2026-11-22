@@ -6,6 +6,7 @@
 
 pub mod capture;
 pub mod code;
+pub mod config;
 pub mod content;
 mod error;
 pub mod files;
