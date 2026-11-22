@@ -700,7 +700,7 @@ impl Picker {
             .bg(Theme::color(p.overlay))
             .border_1()
             .border_color(Theme::color(p.line_strong))
-            .rounded(px(radius::LG))
+            .rounded(crate::theme::panel_radius(radius::LG))
             .overflow_hidden()
             .text_color(Theme::color(p.ink))
             .children(self.delegate.title().map(|(title, sub)| {

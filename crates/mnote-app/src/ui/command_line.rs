@@ -191,7 +191,7 @@ impl RenderOnce for CompletionPopup {
             .bg(Theme::color(p.overlay))
             .border_1()
             .border_color(Theme::color(p.line_strong))
-            .rounded(px(radius::MD))
+            .rounded(crate::theme::panel_radius(radius::MD))
             .shadow(theme.modal_shadow())
             .children(self.rows.into_iter().map(|(name, detail, selected)| {
                 let (fill, ink, quiet) = if selected {

@@ -401,7 +401,7 @@ impl Render for QuickCapture {
             .bg(Theme::color(p.overlay))
             .border_1()
             .border_color(Theme::color(p.line_strong))
-            .rounded(px(radius::MD))
+            .rounded(crate::theme::panel_radius(radius::MD))
             .shadow(shadow)
             .overflow_hidden()
             .text_color(Theme::color(p.ink))

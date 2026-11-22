@@ -65,6 +65,38 @@ thread_local! {
     static FONTS: RefCell<Fonts> = RefCell::new(Fonts::default());
 }
 
+/// How panels (pickers, modals, the capture panel, the command line and
+/// toasts) are drawn: config.toml's `panel_radius` and `panel_shadow`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Panels {
+    /// Overrides every panel's radius; `None` keeps the tokens.
+    pub radius: Option<f32>,
+    pub shadow: bool,
+}
+
+impl Default for Panels {
+    fn default() -> Self {
+        Panels {
+            radius: None,
+            shadow: true,
+        }
+    }
+}
+
+thread_local! {
+    static PANELS: std::cell::Cell<Panels> = std::cell::Cell::new(Panels::default());
+}
+
+/// Puts `panels` in use. Returns whether anything changed.
+pub fn set_panels(panels: Panels) -> bool {
+    PANELS.with(|current| current.replace(panels) != panels)
+}
+
+/// A panel's corner radius: config.toml's `panel_radius`, else `token`.
+pub fn panel_radius(token: f32) -> gpui::Pixels {
+    px(PANELS.with(|p| p.get().radius).unwrap_or(token))
+}
+
 /// Puts `fonts` in use. Returns whether anything changed (lines then need
 /// measuring again).
 pub fn set_fonts(fonts: Fonts) -> bool {
@@ -183,7 +215,11 @@ impl Theme {
     }
 
     /// The shadow every modal and toast carries. It's the only shadow in mNote.
+    /// Nothing when config.toml has `panel_shadow = false`.
     pub fn modal_shadow(&self) -> Vec<BoxShadow> {
+        if !PANELS.with(|p| p.get().shadow) {
+            return Vec::new();
+        }
         self.modal_shadow
             .iter()
             .map(|l| BoxShadow {
@@ -340,6 +376,19 @@ mod tests {
     fn modal_shadow_has_its_layers() {
         assert_eq!(Theme::new(Appearance::Dark).modal_shadow().len(), 2);
         assert_eq!(Theme::new(Appearance::Light).modal_shadow().len(), 2);
+        // config.toml's panel_shadow and panel_radius.
+        assert_eq!(panel_radius(radius::LG), px(radius::LG));
+        set_panels(Panels {
+            radius: Some(0.0),
+            shadow: false,
+        });
+        assert!(Theme::new(Appearance::Dark).modal_shadow().is_empty());
+        assert_eq!(panel_radius(radius::LG), px(0.0));
+        assert!(!set_panels(Panels {
+            radius: Some(0.0),
+            shadow: false,
+        }));
+        set_panels(Panels::default());
     }
 }
 

@@ -144,7 +144,18 @@ pub struct Config {
     /// Vim mappings (`"nnoremap j gj"`), run at start and on save; they
     /// replace the built-in `jk` → `<Esc>`. `None` keeps the built-in.
     pub mappings: Option<Vec<String>>,
+    /// The corner radius of pickers, modals, the capture panel, the command
+    /// line and toasts, in pixels. `None` keeps the design's radii.
+    pub panel_radius: Option<u32>,
+    /// Pickers, modals and toasts carry their shadow.
+    pub panel_shadow: bool,
+    /// Notes save a moment after typing stops. Off, they save on `:w` and
+    /// `⌘S`, and still whenever you leave a note, the window or mNote.
+    pub autosave: bool,
 }
+
+/// The radii `panel_radius` accepts.
+pub const PANEL_RADII: std::ops::RangeInclusive<u32> = 0..=24;
 
 /// The commands `mappings` accepts.
 pub const MAPPING_COMMANDS: &[&str] = &[
@@ -186,6 +197,9 @@ impl Default for Config {
             system_clipboard: true,
             wrap_motion: false,
             mappings: None,
+            panel_radius: None,
+            panel_shadow: true,
+            autosave: true,
         }
     }
 }
@@ -333,6 +347,21 @@ impl Config {
                         })?;
                     config.mappings = Some(lines);
                 }
+                "panel_radius" => {
+                    config.panel_radius = Some(
+                        value
+                            .as_integer()
+                            .and_then(|n| u32::try_from(n).ok())
+                            .filter(|n| PANEL_RADII.contains(n))
+                            .ok_or_else(|| wrong("a whole number from 0 to 24"))?,
+                    );
+                }
+                "panel_shadow" => {
+                    config.panel_shadow = value.as_bool().ok_or_else(|| wrong("true or false"))?;
+                }
+                "autosave" => {
+                    config.autosave = value.as_bool().ok_or_else(|| wrong("true or false"))?;
+                }
                 "wrap_motion" => {
                     config.wrap_motion = value.as_bool().ok_or_else(|| wrong("true or false"))?;
                 }
@@ -432,6 +461,17 @@ impl Config {
              # j and k move by screen row through wrapped lines (as gj and gk).\n\
              wrap_motion = {wrap_motion}\n\
              \n\
+             # Notes save a moment after you stop typing. With false, they save\n\
+             # on :w and ⌘S, and still when you leave a note, the window or mNote.\n\
+             autosave = {autosave}\n\
+             \n\
+             # Corner radius of pickers, modals and toasts in pixels, 0 to 24\n\
+             # (0 is square); without it they keep mNote's own.\n\
+             {panel_radius}\n\
+             \n\
+             # The shadow under pickers, modals and toasts.\n\
+             panel_shadow = {panel_shadow}\n\
+             \n\
              # Vim mappings, like in a vimrc (map, noremap, nmap, nnoremap, vmap,\n\
              # vnoremap, imap, inoremap and the unmap commands).\n\
              mappings = [{mappings}]\n",
@@ -451,6 +491,12 @@ impl Config {
                 "vim"
             },
             wrap_motion = self.wrap_motion,
+            autosave = self.autosave,
+            panel_radius = match self.panel_radius {
+                Some(r) => format!("panel_radius = {r}"),
+                None => "# panel_radius = 10".to_owned(),
+            },
+            panel_shadow = self.panel_shadow,
             mappings = self
                 .mappings
                 .clone()
@@ -571,6 +617,9 @@ mod tests {
             leader: ',',
             system_clipboard: false,
             wrap_motion: true,
+            panel_radius: Some(0),
+            panel_shadow: false,
+            autosave: false,
             mappings: Some(vec!["nnoremap j gj".into(), "inoremap jk <Esc>".into()]),
             ..Config::default()
         };
@@ -621,6 +670,16 @@ mod tests {
         assert_eq!(
             Config::parse("mappings = [\"nnoremap j gj\"]").map(|c| c.mappings),
             Ok(Some(vec!["nnoremap j gj".to_owned()]))
+        );
+        let err = Config::parse("panel_radius = 30").expect_err("too round");
+        assert!(err.message.contains("0 to 24"));
+        let err = Config::parse("autosave = \"no\"").expect_err("not a bool");
+        assert!(err.message.contains("true or false"));
+        let config = Config::parse("panel_radius = 4\npanel_shadow = false\nautosave = false")
+            .expect("valid");
+        assert_eq!(
+            (config.panel_radius, config.panel_shadow, config.autosave),
+            (Some(4), false, false)
         );
         let err = Config::parse("view = ").expect_err("not toml");
         assert_eq!(err.line, Some(1));

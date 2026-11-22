@@ -416,6 +416,24 @@ impl Editor {
             cx.stop_propagation();
             return self.open_picker(Picker::new(Box::new(CommandPalette::default())), cx);
         }
+        // ⌘S saves, as `:w` does.
+        if stroke.modifiers.platform
+            && stroke.key == "s"
+            && !stroke.modifiers.shift
+            && self.picker.is_none()
+            && self.folder_edit.is_none()
+            && self.first_run.is_none()
+        {
+            cx.stop_propagation();
+            self.run_app_command(
+                AppCommand::Write {
+                    path: None,
+                    force: false,
+                },
+                cx,
+            );
+            return cx.notify();
+        }
         if stroke.modifiers.platform
             && !stroke.modifiers.control
             && !stroke.modifiers.alt
@@ -1441,6 +1459,16 @@ impl Editor {
             note_size: config.font_size as f32,
             ui_size: config.ui_font_size as f32,
         };
+        let panels = crate::theme::Panels {
+            radius: config.panel_radius.map(|r| r as f32),
+            shadow: config.panel_shadow,
+        };
+        if crate::theme::set_panels(panels) {
+            cx.refresh_windows();
+        }
+        if !config.autosave {
+            self.autosave_task = None;
+        }
         if crate::theme::set_fonts(fonts) {
             self.remeasure_all();
             cx.refresh_windows();
@@ -1931,7 +1959,8 @@ impl Editor {
     // ---- saving and reloading ----------------------------------------------
 
     fn schedule_autosave(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.source, Source::Scratch) {
+        // With `autosave = false` notes save on `:w` / `⌘S` and when left.
+        if matches!(self.source, Source::Scratch) || !self.config.autosave {
             return;
         }
         self.autosave.edited(Instant::now());

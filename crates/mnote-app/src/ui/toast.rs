@@ -41,7 +41,7 @@ impl RenderOnce for Toast {
             .bg(Theme::color(p.overlay))
             .border_1()
             .border_color(Theme::color(p.line_strong))
-            .rounded(px(radius::MD))
+            .rounded(crate::theme::panel_radius(radius::MD))
             .shadow(theme.modal_shadow())
             .text_style(text::UI)
             .text_color(Theme::color(p.ink))
