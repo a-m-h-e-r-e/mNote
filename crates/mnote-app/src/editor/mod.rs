@@ -54,6 +54,9 @@ use line::{Caret, Highlight, LineText};
 /// A table's column widths and alignments, shared by its rows.
 type TableLayout = Rc<(Vec<usize>, Vec<mnote_core::styled::Align>)>;
 
+/// Each measured key's (total, frame wait) in milliseconds.
+type LatencyLog = Rc<RefCell<Vec<(f32, f32)>>>;
+
 /// A code block's colours, line by line: byte ranges and their style.
 type CodeLines = Vec<Vec<(std::ops::Range<usize>, CodeStyle)>>;
 
@@ -174,9 +177,11 @@ pub struct Editor {
     blame: Option<(DocKey, usize, Option<SharedString>)>,
     blame_task: Option<Task<()>>,
     /// Keystroke-to-pixels timing (`MNOTE_LATENCY=1`): when the last key
-    /// arrived, and the times measured so far.
+    /// arrived, how long it waited for the display's next frame to start
+    /// drawing, and each key's (total, wait) in milliseconds.
     key_at: Option<Instant>,
-    latency: Option<Rc<RefCell<Vec<f32>>>>,
+    frame_wait: Option<f32>,
+    latency: Option<LatencyLog>,
     /// The first-run screen, until a notes folder is chosen.
     first_run: Option<first_run::FirstRun>,
     /// Text the input system is still composing (an accent, Chinese or
@@ -346,6 +351,7 @@ impl Editor {
             blame: None,
             blame_task: None,
             key_at: None,
+            frame_wait: None,
             latency: std::env::var_os("MNOTE_LATENCY").map(|_| Rc::default()),
             config: Config::default(),
             config_path: Config::path(),
@@ -1405,8 +1411,10 @@ impl Editor {
     }
 
     /// `MNOTE_LATENCY_BENCH=n`: types `n` characters into this window, one
-    /// per frame or so, and prints keystroke-to-pixels times (with
-    /// `MNOTE_LATENCY`), then quits.
+    /// every 25 ms, then prints keystroke-to-pixels times and quits. The
+    /// time splits into mNote's work (handling, render, layout, paint),
+    /// which the 8 ms budget is for, and the wait for the display's next
+    /// frame, which every app has (up to one refresh, 8.3 ms at 120 Hz).
     pub fn run_latency_bench(&mut self, keys: usize, cx: &mut Context<Self>) {
         let log = self.latency.get_or_insert_with(Rc::default).clone();
         self._tasks.push(cx.spawn(async move |this, cx| {
@@ -1424,19 +1432,19 @@ impl Editor {
                 cx.background_executor().timer(Duration::from_millis(25)).await;
             }
             cx.background_executor().timer(Duration::from_millis(200)).await;
-            let raw = log.borrow().clone();
-            if std::env::var_os("MNOTE_LATENCY_RAW").is_some() {
-                eprintln!("mnote latency raw: {raw:?}");
-            }
-            let mut times = raw;
-            times.sort_by(f32::total_cmp);
-            let at = |q: f32| times.get(((times.len() as f32 - 1.) * q) as usize).copied().unwrap_or(0.);
+            // The first keys warm caches up; they aren't typing.
+            let samples: Vec<(f32, f32)> = log.borrow().iter().skip(10).copied().collect();
+            let stats = |mut xs: Vec<f32>| {
+                xs.sort_by(f32::total_cmp);
+                let at = |q: f32| xs.get(((xs.len() as f32 - 1.) * q) as usize).copied().unwrap_or(0.);
+                format!("p50 {:.2} ms, p95 {:.2} ms, max {:.2} ms", at(0.5), at(0.95), xs.last().copied().unwrap_or(0.))
+            };
             eprintln!(
-                "mnote latency: {} keys, keystroke to painted frame: p50 {:.2} ms, p95 {:.2} ms, max {:.2} ms",
-                times.len(),
-                at(0.5),
-                at(0.95),
-                times.last().copied().unwrap_or(0.)
+                "mnote latency over {} keys\n  mNote's work (key to painted frame, less the wait): {}\n  waiting for the display's next frame:               {}\n  keystroke to painted frame:                        {}",
+                samples.len(),
+                stats(samples.iter().map(|(t, w)| t - w).collect()),
+                stats(samples.iter().map(|(_, w)| *w).collect()),
+                stats(samples.iter().map(|(t, _)| *t).collect()),
             );
             let _ = this.update(cx, |_, cx| cx.quit());
         }));
@@ -2805,6 +2813,10 @@ impl Editor {
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The frame has started drawing: the key's wait for it ends here.
+        if let Some(at) = self.key_at {
+            self.frame_wait = Some(at.elapsed().as_secs_f32() * 1000.);
+        }
         if let Some(first_run) = self.render_first_run(cx) {
             return div()
                 .size_full()
@@ -2953,11 +2965,13 @@ impl Render for Editor {
                 // Painted last: the time from the key to here is the key's
                 // handling, render, layout and paint.
                 let key_at = self.key_at.take();
+                let wait = self.frame_wait.take().unwrap_or(0.);
                 gpui::canvas(
                     |_, _, _| (),
                     move |_, _, _, _| {
                         if let Some(at) = key_at {
-                            log.borrow_mut().push(at.elapsed().as_secs_f32() * 1000.);
+                            log.borrow_mut()
+                                .push((at.elapsed().as_secs_f32() * 1000., wait));
                         }
                     },
                 )

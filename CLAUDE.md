@@ -8,7 +8,7 @@ Measured on an Apple Silicon Mac, release build. A change that breaks a budget i
 
 | What | Budget |
 | --- | --- |
-| Keystroke to pixels on screen | < 8 ms (one frame at 120 Hz) |
+| Keystroke to pixels on screen: mNote's work for a key (handling, render, layout, paint), so it shows on the next refresh | < 8 ms (one frame at 120 Hz) |
 | Summon key to window visible (app already running) | < 50 ms |
 | Cold start to an editable note | < 200 ms |
 | Opening any picker (finder, explorer, palette) | < 16 ms to first frame |
@@ -80,7 +80,7 @@ A shareable `mNote.app` and `.dmg` in `dist/` (see the script for universal buil
 tools/package-macos.sh
 ```
 
-Keystroke-to-pixels in the real window (types into a note, prints p50/p95/max):
+Keystroke-to-pixels in the real window (types into a note, then prints p50/p95/max of mNote's work, of the wait for the display's next frame, which no app controls, and of the two together):
 
 ```bash
 MNOTE_LATENCY=1 MNOTE_LATENCY_BENCH=300 target/release/mnote ~/notes/some-note.md
