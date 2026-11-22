@@ -185,6 +185,10 @@ pub struct Editor {
     /// Where the focused pane's visible lines wrap (characters each screen
     /// row starts at, by line), for `gj` / `gk`; filled as lines paint.
     wraps: Rc<RefCell<std::collections::HashMap<usize, Vec<usize>>>>,
+    /// With `nowrap`, how far the focused pane's text is scrolled sideways;
+    /// every row shares it, and the cursor line moves it to keep the caret
+    /// in view as it's laid out.
+    scroll_x: Rc<std::cell::Cell<gpui::Pixels>>,
     /// The notes folder, whatever the focused pane shows.
     vault: Option<Vault>,
     /// The focused note's word count, for the status line: its document and
@@ -369,6 +373,7 @@ impl Editor {
             drag_anchor: None,
             map_task: None,
             wraps,
+            scroll_x: Rc::default(),
             vault: None,
             first_run: None,
             marked: None,
@@ -1380,6 +1385,7 @@ impl Editor {
         self.set_pane_note();
         self.park_or_drop(next);
         self.wraps.borrow_mut().clear();
+        self.scroll_x.set(px(0.));
         self.vim.set_cursor(0);
         self.lines.reset(self.buffer.text().len_lines());
     }
@@ -1419,6 +1425,12 @@ impl Editor {
             "set norelativenumber"
         };
         let _ = self.vim.execute(set, &mut self.buffer);
+        let wrap = if config.wrap {
+            "set wrap"
+        } else {
+            "set nowrap"
+        };
+        let _ = self.vim.execute(wrap, &mut self.buffer);
         crate::theme::Theme::set_choice(config.theme, cx);
         crate::commands::set_leader(config.leader);
         self.vim.share_clipboard(config.system_clipboard);
@@ -2239,6 +2251,9 @@ impl Editor {
         )
         .styling(styling)
         .highlights(highlights);
+        if !self.vim.options().wrap {
+            line = line.nowrap(self.scroll_x.clone());
+        }
 
         // The mouse: the byte under the pointer back to the note's
         // character, then a click, drag or selection in this pane.

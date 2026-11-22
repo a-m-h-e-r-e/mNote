@@ -7,19 +7,24 @@
 //! The bar caret, highlight outlines and the "newline is selected" cell are
 //! quads at positions from the shaped line.
 //!
+//! With [`LineText::nowrap`] the line is one row however long, drawn
+//! shifted by an offset every row shares and clipped to its box; the line
+//! with the caret moves the offset as it's laid out, so the caret stays in
+//! view and every row paints at the new offset in the same frame.
+//!
 //! With [`LineText::on_mouse`], a press or drag over the text reports the
 //! byte under the pointer (in the shown text), for the editor to map back
 //! to the note.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    App, AvailableSpace, Bounds, DispatchPhase, Element, ElementId, Font, GlobalElementId, Hsla,
-    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
-    SharedString, Style, TextAlign, TextRun, Window, WrappedLine, fill, outline, point, px,
-    relative, size,
+    App, AvailableSpace, Bounds, ContentMask, DispatchPhase, Element, ElementId, Font,
+    GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Pixels, SharedString, Style, TextAlign, TextRun, Window, WrappedLine, fill,
+    outline, point, px, relative, size,
 };
 use mnote_vim::CaretShape;
 
@@ -95,6 +100,24 @@ pub struct LineText {
     shaped: Rc<RefCell<Option<Shaped>>>,
     on_mouse: Option<MouseHandler>,
     on_wraps: Option<WrapHandler>,
+    /// `nowrap`: the sideways offset every row shares.
+    scroll_x: Option<Rc<Cell<Pixels>>>,
+}
+
+/// Columns kept visible beside the caret when the note scrolls sideways.
+const SCROLL_MARGIN_CELLS: f32 = 4.;
+
+/// The sideways offset that shows the caret at `x` (a cell wide) in `width`,
+/// moving `offset` as little as possible and keeping a margin beside it.
+pub fn follow_caret(offset: Pixels, x: Pixels, cell: Pixels, width: Pixels) -> Pixels {
+    let margin = (cell * SCROLL_MARGIN_CELLS).min(width / 4.);
+    if x - margin < offset {
+        (x - margin).max(px(0.))
+    } else if x + cell + margin > offset + width {
+        x + cell + margin - width
+    } else {
+        offset
+    }
 }
 
 struct Shaped {
@@ -123,7 +146,15 @@ impl LineText {
             shaped: Rc::default(),
             on_mouse: None,
             on_wraps: None,
+            scroll_x: None,
         }
+    }
+
+    /// One row however long, scrolled sideways by `offset` (shared by every
+    /// row); the line with the caret moves it to keep the caret in view.
+    pub fn nowrap(mut self, offset: Rc<Cell<Pixels>>) -> Self {
+        self.scroll_x = Some(offset);
+        self
     }
 
     /// Reports where the line wraps to `handler` each time it's painted.
@@ -302,17 +333,19 @@ impl Element for LineText {
         let text = self.text.clone();
         let shaped = self.shaped.clone();
         let (font_size, line_height) = (self.font_size, self.line_height);
+        let wraps = self.scroll_x.is_none();
         let layout_id =
             window.request_measured_layout(style, move |known, available, window, _cx| {
-                let wrap_width = known.width.or(match available.width {
+                let width = known.width.or(match available.width {
                     AvailableSpace::Definite(width) => Some(width),
                     _ => None,
                 });
+                let wrap_width = width.filter(|_| wraps);
                 shape(&shaped, &text, &runs, font_size, wrap_width, window);
                 let height = shaped.borrow().as_ref().map_or(line_height, |s| {
                     s.line.size(line_height).height.max(line_height)
                 });
-                size(wrap_width.unwrap_or(px(0.)), height)
+                size(width.unwrap_or(px(0.)), height)
             });
         (layout_id, ())
     }
@@ -321,11 +354,34 @@ impl Element for LineText {
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _: &mut (),
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut App,
     ) {
+        // The caret's line moves the shared offset before any row paints.
+        let (Some(offset), Some(caret)) = (&self.scroll_x, self.caret) else {
+            return;
+        };
+        let runs = self.runs();
+        shape(
+            &self.shaped,
+            &self.text,
+            &runs,
+            self.font_size,
+            None,
+            window,
+        );
+        let shaped = self.shaped.borrow();
+        let Some(Shaped { line, .. }) = shaped.as_ref() else {
+            return;
+        };
+        let x = line
+            .position_for_index(caret.byte.min(self.text.len()), self.line_height)
+            .unwrap_or_default()
+            .x;
+        let cell = self.font_size * 0.55;
+        offset.set(follow_caret(offset.get(), x, cell, bounds.size.width));
     }
 
     fn paint(
@@ -339,19 +395,39 @@ impl Element for LineText {
         cx: &mut App,
     ) {
         let runs = self.runs();
+        let wrap_width = self.scroll_x.is_none().then_some(bounds.size.width);
         shape(
             &self.shaped,
             &self.text,
             &runs,
             self.font_size,
-            Some(bounds.size.width),
+            wrap_width,
             window,
         );
         let shaped = self.shaped.borrow();
         let Some(Shaped { line, .. }) = shaped.as_ref() else {
             return;
         };
-        let (origin, lh) = (bounds.origin, self.line_height);
+        // `nowrap`: drawn shifted left by the shared offset, clipped to the
+        // line's box.
+        let shift = self.scroll_x.as_ref().map_or(px(0.), |o| o.get());
+        let (origin, lh) = (bounds.origin - point(shift, px(0.)), self.line_height);
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            self.paint_shaped(line, bounds, origin, lh, window, cx);
+        });
+    }
+}
+
+impl LineText {
+    fn paint_shaped(
+        &self,
+        line: &WrappedLine,
+        bounds: Bounds<Pixels>,
+        origin: gpui::Point<Pixels>,
+        lh: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let len = self.text.len();
         if let Some(on_wraps) = &self.on_wraps {
             let starts = line
@@ -456,5 +532,24 @@ impl Element for LineText {
                 ));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_offset_follows_the_caret_with_a_margin() {
+        let (cell, width) = (px(10.), px(400.));
+        // In view: nothing moves.
+        assert_eq!(follow_caret(px(0.), px(100.), cell, width), px(0.));
+        // Past the right edge: just far enough to show it and 4 cells more.
+        assert_eq!(follow_caret(px(0.), px(500.), cell, width), px(150.));
+        // Back left of the view: 4 cells before it, never below 0.
+        assert_eq!(follow_caret(px(300.), px(200.), cell, width), px(160.));
+        assert_eq!(follow_caret(px(300.), px(20.), cell, width), px(0.));
+        // A narrow pane keeps a quarter of its width as the margin.
+        assert_eq!(follow_caret(px(0.), px(100.), cell, px(80.)), px(50.));
     }
 }

@@ -141,6 +141,8 @@ pub struct Config {
     pub system_clipboard: bool,
     /// `j` / `k` move by screen row through wrapped lines, as `gj` / `gk`.
     pub wrap_motion: bool,
+    /// Long lines wrap (`:set wrap`); off, the note scrolls sideways.
+    pub wrap: bool,
     /// Vim mappings (`"nnoremap j gj"`), run at start and on save; they
     /// replace the built-in `jk` → `<Esc>`. `None` keeps the built-in.
     pub mappings: Option<Vec<String>>,
@@ -196,6 +198,7 @@ impl Default for Config {
             leader: ' ',
             system_clipboard: true,
             wrap_motion: false,
+            wrap: true,
             mappings: None,
             panel_radius: None,
             panel_shadow: true,
@@ -362,6 +365,9 @@ impl Config {
                 "autosave" => {
                     config.autosave = value.as_bool().ok_or_else(|| wrong("true or false"))?;
                 }
+                "wrap" => {
+                    config.wrap = value.as_bool().ok_or_else(|| wrong("true or false"))?;
+                }
                 "wrap_motion" => {
                     config.wrap_motion = value.as_bool().ok_or_else(|| wrong("true or false"))?;
                 }
@@ -458,6 +464,10 @@ impl Config {
              # \"vim\": they keep to Vim's registers; \"+ reaches the clipboard.\n\
              clipboard = \"{clipboard}\"\n\
              \n\
+             # Long lines wrap; with false each line is one row and the note\n\
+             # scrolls sideways (:set wrap / :set nowrap).\n\
+             wrap = {wrap}\n\
+             \n\
              # j and k move by screen row through wrapped lines (as gj and gk).\n\
              wrap_motion = {wrap_motion}\n\
              \n\
@@ -491,6 +501,7 @@ impl Config {
                 "vim"
             },
             wrap_motion = self.wrap_motion,
+            wrap = self.wrap,
             autosave = self.autosave,
             panel_radius = match self.panel_radius {
                 Some(r) => format!("panel_radius = {r}"),
@@ -617,6 +628,7 @@ mod tests {
             leader: ',',
             system_clipboard: false,
             wrap_motion: true,
+            wrap: false,
             panel_radius: Some(0),
             panel_shadow: false,
             autosave: false,

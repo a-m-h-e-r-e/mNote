@@ -151,9 +151,11 @@ fn option_candidates(word: &str, options: &Options) -> Vec<Candidate> {
         ("ignorecase", on_off(options.ignorecase)),
         ("smartcase", on_off(options.smartcase)),
         ("relativenumber", on_off(options.relativenumber)),
+        ("wrap", on_off(options.wrap)),
         ("noignorecase", "match case".to_owned()),
         ("nosmartcase", "ignore case even with capitals".to_owned()),
         ("norelativenumber", "absolute line numbers".to_owned()),
+        ("nowrap", "one row per line, scroll sideways".to_owned()),
     ];
     all.into_iter()
         // `no…` only shows once it's being typed.
@@ -221,7 +223,7 @@ mod tests {
         assert_eq!(names("set ig"), ["ignorecase"]);
         assert_eq!(
             names("set no"),
-            ["noignorecase", "nosmartcase", "norelativenumber"]
+            ["noignorecase", "nosmartcase", "norelativenumber", "nowrap"]
         );
         assert_eq!(names("se sw=4 rel"), ["relativenumber"]);
         assert_eq!(names("view s"), ["styled", "source"]);

@@ -90,6 +90,8 @@ pub(super) struct PaneLocal {
     pub view: View,
     /// Vim's cursor in this pane.
     pub cursor: usize,
+    /// How far it's scrolled sideways (`nowrap`).
+    pub scroll_x: Rc<std::cell::Cell<gpui::Pixels>>,
 }
 
 /// A pane: its note, and its state while it isn't focused.
@@ -292,6 +294,7 @@ impl Editor {
     fn swap_local(&mut self, local: &mut PaneLocal) {
         std::mem::swap(&mut self.lines, &mut local.lines);
         std::mem::swap(&mut self.view, &mut local.view);
+        std::mem::swap(&mut self.scroll_x, &mut local.scroll_x);
         let cursor = self.vim.cursor();
         self.vim.set_cursor(local.cursor);
         local.cursor = cursor;
@@ -389,6 +392,7 @@ impl Editor {
                 lines,
                 view: self.view,
                 cursor: self.vim.cursor(),
+                scroll_x: Rc::new(std::cell::Cell::new(self.scroll_x.get())),
             }),
         });
         self.layout.split(self.focused, id, axis);

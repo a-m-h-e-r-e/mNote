@@ -149,6 +149,9 @@ pub struct Options {
     pub smartcase: bool,
     /// `relativenumber`/`rnu`: the gutter counts from the cursor.
     pub relativenumber: bool,
+    /// `wrap`: long lines wrap onto more rows; off, each line is one row
+    /// and the note scrolls sideways.
+    pub wrap: bool,
 }
 
 impl Default for Options {
@@ -158,6 +161,7 @@ impl Default for Options {
             ignorecase: true,
             smartcase: true,
             relativenumber: true,
+            wrap: true,
         }
     }
 }
@@ -966,11 +970,12 @@ impl Vim {
         let o = &self.options;
         let on = |b: bool, name: &str| format!("{}{name}", if b { "" } else { "no" });
         format!(
-            "shiftwidth={}  {}  {}  {}",
+            "shiftwidth={}  {}  {}  {}  {}",
             o.shiftwidth,
             on(o.ignorecase, "ignorecase"),
             on(o.smartcase, "smartcase"),
-            on(o.relativenumber, "relativenumber")
+            on(o.relativenumber, "relativenumber"),
+            on(o.wrap, "wrap")
         )
     }
 
@@ -1008,6 +1013,7 @@ fn flag<'a>(options: &'a mut Options, name: &str) -> Option<&'a mut bool> {
         "ignorecase" | "ic" => &mut options.ignorecase,
         "smartcase" | "scs" => &mut options.smartcase,
         "relativenumber" | "rnu" => &mut options.relativenumber,
+        "wrap" => &mut options.wrap,
         _ => return None,
     })
 }
@@ -1264,6 +1270,13 @@ mod tests {
         assert_eq!(msg.as_deref(), Some("relativenumber  shiftwidth=4"));
         vim.execute("set rnu!", &mut buf).expect("ok");
         assert!(!vim.options().relativenumber);
+        assert!(vim.options().wrap);
+        vim.execute("set nowrap", &mut buf).expect("ok");
+        assert!(!vim.options().wrap);
+        let msg = vim.execute("set wrap?", &mut buf).expect("ok").message;
+        assert_eq!(msg.as_deref(), Some("nowrap"));
+        vim.execute("set wrap!", &mut buf).expect("ok");
+        assert!(vim.options().wrap);
         assert_eq!(
             vim.execute("set bogus", &mut buf)
                 .expect_err("unknown")
