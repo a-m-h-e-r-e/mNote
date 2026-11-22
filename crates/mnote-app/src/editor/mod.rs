@@ -91,6 +91,15 @@ impl Clipboard for SharedClipboard {
     }
 }
 
+/// Where the focused pane's lines wrap, as Vim asks for `gj` / `gk`.
+struct WrapRows(Rc<RefCell<std::collections::HashMap<usize, Vec<usize>>>>);
+
+impl mnote_vim::ScreenRows for WrapRows {
+    fn row_starts(&self, line: usize) -> Vec<usize> {
+        self.0.borrow().get(&line).cloned().unwrap_or_default()
+    }
+}
+
 /// Note paths for `⇥` on the command line, read from the vault when asked.
 struct VaultPaths(Vault);
 
@@ -169,6 +178,9 @@ pub struct Editor {
     drawing_pane: PaneId,
     /// Where a mouse drag started (a character), while the button is down.
     drag_anchor: Option<usize>,
+    /// Where the focused pane's visible lines wrap (characters each screen
+    /// row starts at, by line), for `gj` / `gk`; filled as lines paint.
+    wraps: Rc<RefCell<std::collections::HashMap<usize, Vec<usize>>>>,
     /// The notes folder, whatever the focused pane shows.
     vault: Option<Vault>,
     /// The focused note's word count, for the status line: its document and
@@ -307,6 +319,8 @@ impl Editor {
         ];
 
         let first_note = source.doc_key();
+        let wraps: Rc<RefCell<std::collections::HashMap<usize, Vec<usize>>>> = Rc::default();
+        vim.set_screen_rows(Box::new(WrapRows(wraps.clone())));
         Editor {
             lines: ListState::new(buffer.text().len_lines(), ListAlignment::Top, px(400.)),
             buffer,
@@ -349,6 +363,7 @@ impl Editor {
             pane_key: false,
             drawing_pane: PaneId(0),
             drag_anchor: None,
+            wraps,
             vault: None,
             first_run: None,
             marked: None,
@@ -1315,6 +1330,7 @@ impl Editor {
         std::mem::swap(&mut self.image_paths, &mut next.image_paths);
         self.set_pane_note();
         self.park_or_drop(next);
+        self.wraps.borrow_mut().clear();
         self.vim.set_cursor(0);
         self.lines.reset(self.buffer.text().len_lines());
     }
@@ -1357,6 +1373,7 @@ impl Editor {
         crate::theme::Theme::set_choice(config.theme, cx);
         crate::commands::set_leader(config.leader);
         self.vim.share_clipboard(config.system_clipboard);
+        self.vim.set_wrap_motion(config.wrap_motion);
         // Fonts: an installed one, else the bundled default (and say so).
         let installed = cx.text_system().all_font_names();
         let mut missing = Vec::new();
@@ -2154,9 +2171,10 @@ impl Editor {
             };
             let view = cx.entity().downgrade();
             let map = Rc::new((content.clone(), look.shown.clone(), substituted));
-            line = line.on_mouse(Rc::new(move |byte, hit, _window, cx| {
+            // A byte of the shown text to a character of the note's line.
+            let to_char = move |byte: usize| {
                 let (content, shown, substituted) = &*map;
-                let ch = if *substituted {
+                if *substituted {
                     let mut b = byte.min(content.len());
                     while !content.is_char_boundary(b) {
                         b -= 1;
@@ -2167,7 +2185,19 @@ impl Editor {
                         .take_while(|&c| shown.display_byte(c) <= byte)
                         .last()
                         .unwrap_or(0)
-                };
+                }
+            };
+            // Where this line wraps, for `gj` / `gk` (the focused pane's).
+            if !self.drawing_other {
+                let wraps = self.wraps.clone();
+                let to_char = to_char.clone();
+                line = line.on_wraps(Rc::new(move |bytes| {
+                    let starts = bytes.into_iter().map(&to_char).collect();
+                    wraps.borrow_mut().insert(ix, starts);
+                }));
+            }
+            line = line.on_mouse(Rc::new(move |byte, hit, _window, cx| {
+                let ch = to_char(byte);
                 let _ = view.update(cx, |this, cx| this.mouse_on_line(pane, ix, ch, hit, cx));
             }));
         }

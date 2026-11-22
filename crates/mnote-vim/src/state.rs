@@ -107,6 +107,13 @@ struct InsertSession {
     broken: bool,
 }
 
+/// Where long lines wrap on screen, supplied by the app for `gj` / `gk`.
+pub trait ScreenRows {
+    /// The characters of line `line` (from 0 in the line) where each screen
+    /// row after the first starts; empty when the line fits on one row.
+    fn row_starts(&self, line: usize) -> Vec<usize>;
+}
+
 /// Vim's state for one editor or text input.
 pub struct Vim {
     pub(crate) mode: Mode,
@@ -136,6 +143,10 @@ pub struct Vim {
     /// Lines in a page, for Page Up/Down and `⌃f` `⌃b` `⌃d` `⌃u` (the app
     /// sets it from the window).
     page: usize,
+    /// Where long lines wrap on screen, for `gj` / `gk` (the app supplies it).
+    screen_rows: Option<Box<dyn ScreenRows>>,
+    /// Plain `j` / `k` move by screen row (config.toml's `wrap_motion`).
+    wrap_motion: bool,
     /// Keys typed in insert mode that start a mapping; they're already in
     /// the text and come out again if the mapping completes.
     imap_pending: Vec<Key>,
@@ -195,6 +206,8 @@ impl Default for Vim {
             last_substitute: None,
             anchors: crate::anchors::Anchors::default(),
             page: 20,
+            screen_rows: None,
+            wrap_motion: false,
             imaps: vec![(vec![Key::Char('j'), Key::Char('k')], vec![Key::Esc])],
             imap_pending: Vec::new(),
             in_mapping: false,
@@ -541,6 +554,136 @@ impl Vim {
         self.want_col = None;
     }
 
+    /// Plugs in where long lines wrap on screen, for `gj` / `gk`.
+    pub fn set_screen_rows(&mut self, rows: Box<dyn ScreenRows>) {
+        self.screen_rows = Some(rows);
+    }
+
+    /// Plain `j` / `k` (and the arrows) move by screen row, or by line.
+    pub fn set_wrap_motion(&mut self, on: bool) {
+        self.wrap_motion = on;
+    }
+
+    /// Joins `lines` lines (at least two) from line `first` into one, as
+    /// one undo step. With `spaces` (`J`), the joined lines lose their
+    /// leading whitespace and one space separates them, except after an
+    /// empty line or a trailing space, or before `)`; without (`gJ`), they
+    /// join as they are. The cursor ends at the last join.
+    fn join_lines(&mut self, first: usize, lines: usize, spaces: bool, buf: &mut Buffer) {
+        buf.begin_change(self.cursor);
+        let mut at = self.cursor;
+        for _ in 1..lines.max(2) {
+            let text = buf.text();
+            if first >= last_line(text) {
+                break;
+            }
+            let end = line_start(text, first) + line_len(text, first);
+            let next = end + 1;
+            let next_text: String = text
+                .slice(next..next + line_len(text, first + 1))
+                .to_string();
+            let (cut, sep) = if spaces {
+                let blank = next_text
+                    .chars()
+                    .take_while(|c| matches!(c, ' ' | '\t'))
+                    .count();
+                let rest = &next_text[next_text
+                    .char_indices()
+                    .nth(blank)
+                    .map_or(next_text.len(), |(b, _)| b)..];
+                let last = (line_len(text, first) > 0).then(|| text.char(end - 1));
+                let no_space = rest.is_empty()
+                    || rest.starts_with(')')
+                    || last.is_none_or(|c| matches!(c, ' ' | '\t'));
+                (blank, if no_space { "" } else { " " })
+            } else {
+                (0, "")
+            };
+            self.edit(buf, end..next + cut, sep);
+            at = end;
+        }
+        self.cursor = clamp_normal(buf.text(), at);
+        buf.end_change(self.cursor);
+        self.done(buf, true);
+    }
+
+    /// `J` / `gJ` in VISUAL: joins the selected lines (at least two).
+    fn join_selection(&mut self, spaces: bool, buf: &mut Buffer) -> Effect {
+        let text = buf.text();
+        let (a, b) = (self.anchor.min(self.cursor), self.anchor.max(self.cursor));
+        let (first, last) = (line_of(text, a), line_of(text, b));
+        self.leave_visual(text);
+        self.join_lines(first, last - first + 1, spaces, buf);
+        Effect::Handled
+    }
+
+    /// `gj` / `gk` (and `j` / `k` with `wrap_motion`): moves `count` screen
+    /// rows, keeping the column within the row. Without wrap information
+    /// it moves by line, as `j` / `k` do.
+    fn screen_motion(&mut self, down: bool, buf: &mut Buffer) -> Effect {
+        let count = self.count.take().unwrap_or(1);
+        if self.screen_rows.is_none() {
+            self.count = Some(count);
+            let motion = if down { Motion::Down } else { Motion::Up };
+            return self.run_motion(motion, buf);
+        }
+        let text = buf.text();
+        for _ in 0..count {
+            self.cursor = self.screen_step(down, text);
+        }
+        if self.mode == Mode::Normal {
+            self.cursor = clamp_normal(text, self.cursor);
+        }
+        self.want_col = None;
+        self.done(buf, false);
+        Effect::Handled
+    }
+
+    /// The position one screen row down or up from the cursor.
+    fn screen_step(&self, down: bool, text: &Rope) -> usize {
+        let rows = |line: usize| {
+            self.screen_rows
+                .as_ref()
+                .map(|r| r.row_starts(line))
+                .unwrap_or_default()
+        };
+        let line = line_of(text, self.cursor);
+        let start = line_start(text, line);
+        let len = line_len(text, line);
+        let col = self.cursor - start;
+        let starts = rows(line);
+        // This row, and the column within it.
+        let row = starts.iter().filter(|&&s| s <= col).count();
+        let row_start = if row == 0 { 0 } else { starts[row - 1] };
+        let in_row = col - row_start;
+        // A position `in_row` along the row from `from` to `to` (exclusive).
+        let place = |base: usize, from: usize, to: usize| {
+            base + (from + in_row).min(to.saturating_sub(1).max(from))
+        };
+        if down {
+            if row < starts.len() {
+                let to = starts.get(row + 1).copied().unwrap_or(len);
+                return place(start, starts[row], to);
+            }
+            if line < last_line(text) {
+                let next = line + 1;
+                let to = rows(next).first().copied().unwrap_or(line_len(text, next));
+                return place(line_start(text, next), 0, to);
+            }
+        } else {
+            if row > 0 {
+                let from = if row >= 2 { starts[row - 2] } else { 0 };
+                return place(start, from, starts[row - 1]);
+            }
+            if line > 0 {
+                let prev = line - 1;
+                let from = rows(prev).last().copied().unwrap_or(0);
+                return place(line_start(text, prev), from, line_len(text, prev));
+            }
+        }
+        self.cursor
+    }
+
     /// Sets how many lines Page Up/Down and `⌃f` `⌃b` move (`⌃d` `⌃u` move
     /// half).
     pub fn set_page_lines(&mut self, lines: usize) {
@@ -621,6 +764,22 @@ impl Vim {
                 Motion::Find(find)
             }
             (Pending::G, Key::Char('g')) => Motion::FirstLine,
+            // `gJ` joins lines as they are, with no spaces added or removed.
+            (Pending::G, Key::Char('J')) if self.op.is_none() => {
+                self.pending = Pending::None;
+                if self.mode.is_visual() {
+                    return self.join_selection(false, buf);
+                }
+                let lines = self.count.take().unwrap_or(2).max(2);
+                let first = line_of(buf.text(), self.cursor);
+                self.join_lines(first, lines, false, buf);
+                return Effect::Handled;
+            }
+            // `gj` / `gk`: one screen row of a wrapped line.
+            (Pending::G, Key::Char(c @ ('j' | 'k'))) if self.op.is_none() => {
+                self.pending = Pending::None;
+                return self.screen_motion(c == 'j', buf);
+            }
             // `gd` follows the link under the cursor: the app does that.
             (Pending::G, Key::Char('d')) => {
                 self.cancel();
@@ -715,6 +874,10 @@ impl Vim {
             return Effect::Handled;
         }
 
+        // With `wrap_motion`, plain `j` / `k` move by screen row too.
+        if self.wrap_motion && self.op.is_none() && matches!(c, 'j' | 'k') {
+            return self.screen_motion(c == 'j', buf);
+        }
         if let Some(motion) = motion_for(c) {
             return self.run_motion(motion, buf);
         }
@@ -844,6 +1007,11 @@ impl Vim {
                 return self.operate_on_lines(buf);
             }
             'p' | 'P' => self.paste(c == 'p', buf),
+            'J' => {
+                let lines = self.count.take().unwrap_or(2).max(2);
+                let first = line_of(text, self.cursor);
+                self.join_lines(first, lines, true, buf);
+            }
             'u' => {
                 for _ in 0..self.count.take().unwrap_or(1) {
                     if let Some(pos) = buf.undo() {
@@ -888,6 +1056,9 @@ impl Vim {
             self.leave_visual(text);
             self.apply_operator(op, range, linewise, buf);
             return Effect::Handled;
+        }
+        if c == 'J' {
+            return self.join_selection(true, buf);
         }
         match (self.mode, c) {
             (_, 'p' | 'P') => {

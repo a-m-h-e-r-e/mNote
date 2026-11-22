@@ -75,6 +75,10 @@ pub enum MouseHit {
 /// mouse did.
 pub type MouseHandler = Rc<dyn Fn(usize, MouseHit, &mut Window, &mut App)>;
 
+/// Called as the line is painted with the bytes (in the shown text) where
+/// each screen row after the first starts.
+pub type WrapHandler = Rc<dyn Fn(Vec<usize>)>;
+
 /// One rendered line of the note.
 pub struct LineText {
     text: SharedString,
@@ -90,6 +94,7 @@ pub struct LineText {
     styling: Vec<Styling>,
     shaped: Rc<RefCell<Option<Shaped>>>,
     on_mouse: Option<MouseHandler>,
+    on_wraps: Option<WrapHandler>,
 }
 
 struct Shaped {
@@ -117,7 +122,14 @@ impl LineText {
             styling: Vec::new(),
             shaped: Rc::default(),
             on_mouse: None,
+            on_wraps: None,
         }
+    }
+
+    /// Reports where the line wraps to `handler` each time it's painted.
+    pub fn on_wraps(mut self, handler: WrapHandler) -> Self {
+        self.on_wraps = Some(handler);
+        self
     }
 
     /// Reports presses and drags over the text to `handler`.
@@ -341,6 +353,15 @@ impl Element for LineText {
         };
         let (origin, lh) = (bounds.origin, self.line_height);
         let len = self.text.len();
+        if let Some(on_wraps) = &self.on_wraps {
+            let starts = line
+                .wrap_boundaries()
+                .iter()
+                .filter_map(|b| line.runs().get(b.run_ix)?.glyphs.get(b.glyph_ix))
+                .map(|glyph| glyph.index)
+                .collect();
+            on_wraps(starts);
+        }
         if let Some(handler) = self.on_mouse.clone() {
             // The byte nearest the pointer; past the last row, the end.
             let hit_line = line.clone();

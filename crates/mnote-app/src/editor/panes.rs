@@ -368,6 +368,7 @@ impl Editor {
         self.swap_local(&mut local);
         self.panes[fi].local = Some(local);
         self.focused = target;
+        self.wraps.borrow_mut().clear();
         let cursor = clamp_normal(self.buffer.text(), self.vim.cursor());
         self.vim.set_cursor(cursor);
         self.restart_blink(cx);

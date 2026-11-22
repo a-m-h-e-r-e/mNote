@@ -1513,6 +1513,58 @@ mod mapping_tests {
     }
 
     #[test]
+    fn j_joins_lines_like_vim() {
+        check("o|ne\n   two\nthree\n", "J", "one| two\nthree\n");
+        check("o|ne\ntwo\nthree\n", "3J", "one two| three\n");
+        check("|\ntwo\n", "J", "|two\n");
+        check("o|ne \ntwo\n", "J", "one |two\n");
+        check("f|(x\n)\n", "J", "f(x|)\n");
+        check("o|ne\n  two\n", "gJ", "one|  two\n");
+        check(
+            "o|ne\ntwo\nthree\nfour\n",
+            "Vj<esc>gvJ",
+            "one| two\nthree\nfour\n",
+        );
+        check("o|ne\ntwo\nthree\n", "Ju", "o|ne\ntwo\nthree\n");
+        check("o|ne\ntwo\nthree\nfour\n", "J.", "one two| three\nfour\n");
+    }
+
+    #[test]
+    fn gj_and_gk_move_by_screen_row() {
+        struct Rows;
+        impl crate::ScreenRows for Rows {
+            // Line 0 wraps after 4 and 8 characters; others fit on a row.
+            fn row_starts(&self, line: usize) -> Vec<usize> {
+                if line == 0 { vec![4, 8] } else { Vec::new() }
+            }
+        }
+        let mut buf = mnote_core::Buffer::new("abcdefghijkl\nxy\n");
+        let mut vim = crate::Vim::new();
+        let keys = |vim: &mut crate::Vim, buf: &mut mnote_core::Buffer, k: &str| {
+            for key in crate::parse_keys(k) {
+                vim.handle_key(key, buf);
+            }
+        };
+        keys(&mut vim, &mut buf, "lgj");
+        assert_eq!(vim.cursor(), 14, "without wrap information gj is j");
+        vim.set_screen_rows(Box::new(Rows));
+        vim.set_cursor(1);
+        keys(&mut vim, &mut buf, "gj");
+        assert_eq!(vim.cursor(), 5, "row 2, same column");
+        keys(&mut vim, &mut buf, "gj");
+        assert_eq!(vim.cursor(), 9);
+        keys(&mut vim, &mut buf, "gj");
+        assert_eq!(vim.cursor(), 14, "next line, column 1");
+        keys(&mut vim, &mut buf, "gk");
+        assert_eq!(vim.cursor(), 9, "back to the last row of line 0");
+        keys(&mut vim, &mut buf, "2gk");
+        assert_eq!(vim.cursor(), 1);
+        vim.set_wrap_motion(true);
+        keys(&mut vim, &mut buf, "j");
+        assert_eq!(vim.cursor(), 5, "plain j by screen row");
+    }
+
+    #[test]
     fn pages_move_by_the_window_height() {
         let text: String = (0..60).map(|i| format!("{i}\n")).collect();
         let mut buf = mnote_core::Buffer::new(&text);

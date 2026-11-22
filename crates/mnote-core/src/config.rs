@@ -139,6 +139,8 @@ pub struct Config {
     /// `y`, `d` and `p` use the system clipboard (`clipboard = "system"`),
     /// or keep to Vim's registers (`"vim"`; only `"+` reaches it).
     pub system_clipboard: bool,
+    /// `j` / `k` move by screen row through wrapped lines, as `gj` / `gk`.
+    pub wrap_motion: bool,
 }
 
 /// The interface sizes `ui_font_size` accepts.
@@ -173,6 +175,7 @@ impl Default for Config {
             ui_font_size: 15,
             leader: ' ',
             system_clipboard: true,
+            wrap_motion: false,
         }
     }
 }
@@ -306,6 +309,9 @@ impl Config {
                         _ => return Err(wrong("\"system\" or \"vim\"")),
                     }
                 }
+                "wrap_motion" => {
+                    config.wrap_motion = value.as_bool().ok_or_else(|| wrong("true or false"))?;
+                }
                 "git_blame" => {
                     config.git_blame = value.as_bool().ok_or_else(|| wrong("true or false"))?;
                 }
@@ -397,7 +403,10 @@ impl Config {
              \n\
              # \"system\": y, d and p use the system clipboard (and ⌘C ⌘V).\n\
              # \"vim\": they keep to Vim's registers; \"+ reaches the clipboard.\n\
-             clipboard = \"{clipboard}\"\n",
+             clipboard = \"{clipboard}\"\n\
+             \n\
+             # j and k move by screen row through wrapped lines (as gj and gk).\n\
+             wrap_motion = {wrap_motion}\n",
             summon = key_words(&self.summon),
             capture = key_words(&self.capture),
             rnu = self.relative_numbers,
@@ -413,6 +422,7 @@ impl Config {
             } else {
                 "vim"
             },
+            wrap_motion = self.wrap_motion,
         )
     }
 }
@@ -524,6 +534,7 @@ mod tests {
             ui_font_size: 17,
             leader: ',',
             system_clipboard: false,
+            wrap_motion: true,
             ..Config::default()
         };
         assert_eq!(Config::parse(&config.template()), Ok(config));
