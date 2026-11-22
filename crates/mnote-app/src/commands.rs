@@ -106,6 +106,13 @@ pub const COMMANDS: &[Command] = &[
         Run::Keys(" x"),
     ),
     cmd(
+        "Cycle view",
+        Some("space m"),
+        Some("view"),
+        "Styled, source (every marker, syntax colours) or plain; :view source picks one.",
+        Run::Keys(" m"),
+    ),
+    cmd(
         "Save note",
         None,
         Some("w"),

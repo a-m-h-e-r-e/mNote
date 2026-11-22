@@ -13,6 +13,42 @@ use mnote_core::styled::{Inline, LineKind, StyledLine, style_inline};
 use super::line::Styling;
 use crate::theme::{Palette, TextStyle, Theme, text};
 
+/// How notes are shown, cycled with `space m`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum View {
+    /// Formatting shown, markers hidden off the cursor line.
+    #[default]
+    Styled,
+    /// Every marker shown, in syntax colours.
+    Source,
+    /// Every marker shown, no colour.
+    Plain,
+}
+
+impl View {
+    pub fn name(self) -> &'static str {
+        match self {
+            View::Styled => "styled",
+            View::Source => "source",
+            View::Plain => "plain",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            View::Styled => View::Source,
+            View::Source => View::Plain,
+            View::Plain => View::Styled,
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        [View::Styled, View::Source, View::Plain]
+            .into_iter()
+            .find(|v| v.name().starts_with(name) && !name.is_empty())
+    }
+}
+
 /// Width of one character of note text (IBM Plex Mono at 16px).
 pub const CHAR_W: f32 = 9.6;
 
@@ -284,6 +320,95 @@ pub fn look(kind: &LineKind, content: &str, raw: bool, p: &Palette) -> Look {
     }
 }
 
+/// A line in the source view (every marker shown, syntax colours) or, with
+/// `plain`, the plain view (no colour at all).
+pub fn source_look(kind: &LineKind, content: &str, plain: bool, p: &Palette) -> Look {
+    let shown = style_inline(content, true, 0);
+    let mut look = Look::new(shown, text::NOTE_BODY, Theme::color(p.ink));
+    if plain {
+        return look;
+    }
+    let colour = |c: u32| Some(Theme::color(c));
+    // Markers take the colour of what they mark: `**` with the bold text.
+    let spans = &look.shown.spans;
+    let style_colour = |style: Inline| match style {
+        Inline::Bold => colour(p.syn_strong),
+        Inline::Italic => colour(p.ink_2),
+        Inline::Code => colour(p.syn_code),
+        Inline::Strike => colour(p.ink_3),
+        Inline::Link | Inline::Tag => colour(p.syn_link),
+        Inline::Url => colour(p.syn_url),
+        Inline::Marker => colour(p.syn_marker),
+    };
+    let mut styling: Vec<Styling> = spans
+        .iter()
+        .enumerate()
+        .map(|(i, span)| {
+            let style = if span.style == Inline::Marker {
+                // The marked span next to it, if they touch.
+                let next = spans
+                    .get(i + 1)
+                    .filter(|n| n.range.start == span.range.end && n.style != Inline::Marker);
+                let prev = i
+                    .checked_sub(1)
+                    .and_then(|k| spans.get(k))
+                    .filter(|p| p.range.end == span.range.start && p.style != Inline::Marker);
+                next.or(prev).map_or(Inline::Marker, |s| s.style)
+            } else {
+                span.style
+            };
+            Styling {
+                bytes: span.range.clone(),
+                color: style_colour(style),
+                weight: (style == Inline::Bold).then_some(FontWeight::SEMIBOLD),
+                ..Styling::default()
+            }
+        })
+        .collect();
+    let whole = |c: u32| Styling {
+        bytes: 0..content.len(),
+        color: colour(c),
+        ..Styling::default()
+    };
+    let lead = |chars: usize| {
+        let end = content
+            .char_indices()
+            .nth(chars)
+            .map_or(content.len(), |(b, _)| b);
+        Styling {
+            bytes: 0..end,
+            color: colour(p.syn_marker),
+            ..Styling::default()
+        }
+    };
+    match kind {
+        LineKind::Heading { .. } => styling = vec![whole(p.syn_heading)],
+        LineKind::Bullet { marker, .. }
+        | LineKind::Task { marker, .. }
+        | LineKind::Quote { marker }
+        | LineKind::Callout { marker }
+        | LineKind::CalloutHead { marker, .. } => styling.insert(0, lead(*marker)),
+        LineKind::FenceOpen { .. } | LineKind::FenceClose => styling = vec![whole(p.ink_3)],
+        LineKind::Frontmatter { .. } => styling = vec![whole(p.ink_2)],
+        LineKind::Rule => styling = vec![whole(p.syn_marker)],
+        LineKind::Table { .. } => {
+            styling = content
+                .char_indices()
+                .filter(|(_, c)| *c == '|')
+                .map(|(b, _)| Styling {
+                    bytes: b..b + 1,
+                    color: colour(p.syn_marker),
+                    ..Styling::default()
+                })
+                .collect();
+        }
+        LineKind::Code { .. } => styling.clear(),
+        LineKind::Image { .. } | LineKind::Text => {}
+    }
+    look.styling = styling;
+    look
+}
+
 /// Code colours for one line of a block, from the block's highlights.
 pub fn code_styling(spans: &[(std::ops::Range<usize>, CodeStyle)], p: &Palette) -> Vec<Styling> {
     spans
@@ -300,6 +425,35 @@ pub fn code_styling(spans: &[(std::ops::Range<usize>, CodeStyle)], p: &Palette) 
 mod tests {
     use super::*;
     use crate::theme::{Appearance, Theme};
+
+    #[test]
+    fn views_cycle_and_parse() {
+        assert_eq!(View::Styled.next().next().next(), View::Styled);
+        assert_eq!(View::from_name("so"), Some(View::Source));
+        assert_eq!(View::from_name("plain"), Some(View::Plain));
+        assert_eq!(View::from_name("x"), None);
+    }
+
+    #[test]
+    fn source_shows_markers_in_colour_plain_in_none() {
+        let p = Theme::new(Appearance::Dark).palette;
+        let heading = LineKind::Heading {
+            level: 2,
+            marker: 3,
+        };
+        let source = source_look(&heading, "## Principles", false, p);
+        assert_eq!(source.shown.text, "## Principles");
+        assert_eq!(source.styling[0].color, Some(Theme::color(p.syn_heading)));
+        let bold = source_look(&LineKind::Text, "a **b** c", false, p);
+        assert!(
+            bold.styling
+                .iter()
+                .all(|s| s.color == Some(Theme::color(p.syn_strong))),
+            "markers share the bold colour"
+        );
+        let plain = source_look(&heading, "## Principles", true, p);
+        assert!(plain.styling.is_empty());
+    }
 
     #[test]
     fn markers_hide_off_the_cursor_line() {

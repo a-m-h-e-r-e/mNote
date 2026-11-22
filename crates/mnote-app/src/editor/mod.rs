@@ -134,6 +134,8 @@ pub struct Editor {
     /// offers `u undo`. It goes after a few seconds.
     toast: Option<(SharedString, bool)>,
     toast_task: Option<Task<()>>,
+    /// Styled, source or plain (`space m`).
+    view: styled::View,
     /// The Markdown tree for this frame (cheap to clone), for line kinds.
     tree: Option<mnote_core::SyntaxTree>,
     /// Code block colours by the block's first row, for one text revision.
@@ -262,6 +264,7 @@ impl Editor {
             file_history: FileHistory::default(),
             toast: None,
             toast_task: None,
+            view: styled::View::default(),
             tree: None,
             code_cache: std::collections::HashMap::new(),
             table_cache: std::collections::HashMap::new(),
@@ -374,6 +377,9 @@ impl Editor {
         if key == mnote_vim::Key::Char('x') {
             return self.toggle_task(cx);
         }
+        if key == mnote_vim::Key::Char('m') {
+            return self.set_view(self.view.next(), cx);
+        }
         let query = match key {
             mnote_vim::Key::Char('f') => "",
             mnote_vim::Key::Char('/') => "/",
@@ -382,6 +388,13 @@ impl Editor {
             _ => return,
         };
         self.open_finder(query, cx);
+    }
+
+    /// Switches the view and says which it is.
+    fn set_view(&mut self, view: styled::View, cx: &mut Context<Self>) {
+        self.view = view;
+        self.reply = Some((format!("{} view", view.name()).into(), false));
+        cx.notify();
     }
 
     /// `space x`: checks or unchecks the task on the cursor line.
@@ -944,7 +957,19 @@ impl Editor {
             AppCommand::Quit { force } => self.quit(false, force, cx),
             AppCommand::WriteQuit { force } => self.quit(true, force, cx),
             AppCommand::Edit { .. } => self.not_yet(":edit"),
-            AppCommand::View(_) => self.not_yet(":view"),
+            AppCommand::View(name) => match name.as_deref().map(str::trim) {
+                None | Some("") => self.set_view(self.view.next(), cx),
+                Some(name) => match styled::View::from_name(name) {
+                    Some(view) => self.set_view(view, cx),
+                    None => {
+                        self.reply = Some((
+                            format!("E475: Invalid argument: {name} (styled, source or plain)")
+                                .into(),
+                            true,
+                        ))
+                    }
+                },
+            },
             AppCommand::Explore(folder) => self.open_explorer(folder, cx),
             AppCommand::Find(_) => self.not_yet(":find"),
             AppCommand::Daily => self.not_yet(":daily"),
@@ -1144,8 +1169,14 @@ impl Editor {
         let raw = current || substituted;
         let gutter_number = SharedString::from(number.to_string());
 
+        // Source and plain views show every line as typed: no hidden
+        // markers, no collapsed frontmatter, tables or images.
+        let styled_view = self.view == styled::View::Styled;
+        let plain_view = self.view == styled::View::Plain;
+
         // Frontmatter collapses to its tags unless the cursor is inside it.
         if let LineKind::Frontmatter { first } = kind
+            && styled_view
             && !in_frontmatter(cursor_line)
         {
             if !first {
@@ -1157,24 +1188,32 @@ impl Editor {
         }
 
         if let LineKind::Image { src, alt } = &kind
+            && styled_view
             && !raw
         {
             return self.image_row(gutter_number, current, src, alt, p);
         }
 
         if let LineKind::Table { block, delimiter } = &kind
+            && styled_view
             && !raw
         {
             let block = self.table_block(block.clone(), ix);
             return self.table_row(ix, block, *delimiter, &content, gutter_number, current, p);
         }
 
-        let mut look = styled::look(&kind, if substituted { &shown } else { &content }, raw, p);
+        let text = if substituted { &shown } else { &content };
+        let mut look = if styled_view {
+            styled::look(&kind, text, raw, p)
+        } else {
+            styled::source_look(&kind, text, plain_view, p)
+        };
         if substituted {
             look.shown = StyledLine::plain(&shown);
             look.styling.clear();
         }
         if let LineKind::Code { lang, block } = &kind
+            && !plain_view
             && let Some(spans) = self.code_spans(lang, block.clone(), ix)
         {
             look.styling = styled::code_styling(&spans, p);
@@ -1989,6 +2028,9 @@ impl Render for Editor {
         let view = cx.entity();
 
         let mut status = StatusLine::new(self.vim.mode()).file(file);
+        if self.view != styled::View::Styled {
+            status = status.item(format!("{} view", self.view.name()));
+        }
         if let Some(notice) = &self.notice {
             status = status.item(notice.clone());
         }
@@ -2010,7 +2052,11 @@ impl Render for Editor {
                     .leading_inset(px(TRAFFIC_LIGHT_INSET))
                     .when(self.vim.command_line().is_some(), |bar| {
                         bar.hint("⇥ complete · ↑ history · ⌃f edit")
-                    }),
+                    })
+                    .when(
+                        self.vim.command_line().is_none() && self.view != styled::View::Styled,
+                        |bar| bar.hint(format!("space m view: {}", self.view.next().name())),
+                    ),
             )
             .child(
                 div()
