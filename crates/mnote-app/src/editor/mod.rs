@@ -47,7 +47,7 @@ use crate::picker::finder::{CurrentNote, Finder};
 use crate::picker::list::ListPicker;
 use crate::picker::palette::CommandPalette;
 use crate::picker::{Job, JobResult, ListEntry, Picker, PickerAction, PickerEffect, PickerOutcome};
-use crate::theme::{ActiveTheme, Palette, StyledExt, Theme, family, radius, size, space, text};
+use crate::theme::{ActiveTheme, Palette, StyledExt, Theme, radius, size, space, text};
 use crate::ui::{CommandLine, CompletionPopup, MessagePanel, StatusLine, Toast, TopBar};
 use line::{Caret, Highlight, LineText};
 
@@ -1317,6 +1317,30 @@ impl Editor {
         };
         let _ = self.vim.execute(set, &mut self.buffer);
         crate::theme::Theme::set_choice(config.theme, cx);
+        // Fonts: an installed one, else the bundled default (and say so).
+        let installed = cx.text_system().all_font_names();
+        let mut missing = Vec::new();
+        let mut pick = |want: &str, default: &'static str| {
+            if installed.iter().any(|n| n.eq_ignore_ascii_case(want)) {
+                SharedString::from(want.to_owned())
+            } else {
+                missing.push(want.to_owned());
+                SharedString::new_static(default)
+            }
+        };
+        let fonts = crate::theme::Fonts {
+            mono: pick(&config.font, crate::theme::family::MONO),
+            prose: pick(&config.ui_font, crate::theme::family::PROSE),
+            note_size: config.font_size as f32,
+        };
+        if crate::theme::set_fonts(fonts) {
+            self.remeasure_all();
+            cx.refresh_windows();
+        }
+        if !missing.is_empty() {
+            self.notice =
+                Some(format!("{} isn't installed; using IBM Plex", missing.join(" and ")).into());
+        }
         self.config = config;
         cx.notify();
     }
@@ -1951,7 +1975,7 @@ impl Editor {
             styled::Prefix::Bullet => Some(
                 div()
                     .flex_none()
-                    .w(px(2. * styled::CHAR_W))
+                    .w(px(2. * styled::char_w()))
                     .text_style(text::NOTE_BODY)
                     .text_color(Theme::color(p.ink_3))
                     .child(SharedString::new_static("•"))
@@ -1960,7 +1984,7 @@ impl Editor {
             styled::Prefix::Checkbox { checked } => Some(
                 div()
                     .flex_none()
-                    .w(px(2. * styled::CHAR_W))
+                    .w(px(2. * styled::char_w()))
                     .h(line_height)
                     .flex()
                     .items_center()
@@ -2662,7 +2686,7 @@ impl Editor {
         let code = text::CODE;
         let mono = Font {
             weight: code.font_weight(),
-            ..font(family::MONO)
+            ..font(crate::theme::mono())
         };
         let rows = (first..=last).map(|ix| {
             let start = line_start(rope, ix);

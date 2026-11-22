@@ -15,7 +15,7 @@ use mnote_vim::text::{line_count, line_len, line_of, line_start};
 use mnote_vim::{Key, Mode, Vim};
 
 use crate::editor::line::{Caret, LineText};
-use crate::theme::{Palette, StyledExt, Theme, family, radius, size, space, text};
+use crate::theme::{Palette, StyledExt, Theme, radius, size, space, text};
 use crate::ui::{Hint, HintBar};
 
 /// Height of the two panes.
@@ -384,7 +384,7 @@ impl FolderEditor {
         let code = text::CODE;
         let mono = Font {
             weight: code.font_weight(),
-            ..font(family::MONO)
+            ..font(crate::theme::mono())
         };
         let mode = self.vim.mode();
         div()

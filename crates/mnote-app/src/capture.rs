@@ -23,9 +23,7 @@ use mnote_vim::{InputAction, Key, Mode, VimInput};
 
 use crate::editor::keys;
 use crate::editor::line::{Caret, LineText};
-use crate::theme::{
-    ActiveTheme, Palette, StyledExt, TextStyle, Theme, family, radius, size, space, text,
-};
+use crate::theme::{ActiveTheme, Palette, StyledExt, TextStyle, Theme, radius, size, space, text};
 use crate::ui::{Hint, HintBar, ModePill};
 
 /// Notes listed while choosing one.
@@ -251,7 +249,7 @@ fn field(input: &VimInput, style: TextStyle, p: &Palette) -> LineText {
     };
     let mono = Font {
         weight: style.font_weight(),
-        ..font(family::MONO)
+        ..font(crate::theme::mono())
     };
     let mut line = LineText::new(
         text.clone(),
@@ -412,7 +410,7 @@ impl Render for QuickCapture {
                     .gap(px(8.))
                     .px(px(14.))
                     .pb(px(10.))
-                    .font_family(family::MONO)
+                    .font_family(crate::theme::mono())
                     .text_size(px(11.))
                     .text_color(Theme::color(p.ink_3))
                     .children(target),

@@ -582,6 +582,37 @@ impl Editor {
         element
     }
 
+    /// Every pane measures its lines again (the fonts changed), keeping
+    /// the cursor in view.
+    pub(super) fn remeasure_all(&mut self) {
+        self.lines.reset(self.buffer.text().len_lines());
+        let line = mnote_vim::text::line_of(self.buffer.text(), self.vim.cursor());
+        self.lines.scroll_to_reveal_item(line);
+        let live = self.source.doc_key();
+        let live_lines = self.buffer.text().len_lines();
+        let counts: Vec<(DocKey, usize)> = self
+            .parked
+            .iter()
+            .map(|d| (d.source.doc_key(), d.buffer.text().len_lines()))
+            .collect();
+        for slot in &mut self.panes {
+            let Some(local) = &mut slot.local else {
+                continue;
+            };
+            let lines = if slot.note == live {
+                Some(live_lines)
+            } else {
+                counts
+                    .iter()
+                    .find(|(k, _)| *k == slot.note)
+                    .map(|(_, n)| *n)
+            };
+            if let Some(lines) = lines {
+                local.lines.reset(lines);
+            }
+        }
+    }
+
     /// The other panes' file names, for the status line.
     pub(super) fn other_pane_files(&self) -> Vec<String> {
         self.layout

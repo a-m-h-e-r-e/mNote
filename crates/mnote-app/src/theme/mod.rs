@@ -10,6 +10,8 @@ mod tokens;
 
 pub use tokens::{Family, Palette, ShadowLayer, TextStyle, family, radius, size, space, text};
 
+use std::cell::RefCell;
+
 use gpui::{
     App, BoxShadow, FontWeight, Global, Hsla, Pixels, SharedString, Window, WindowAppearance,
     point, px, rgba,
@@ -30,6 +32,59 @@ impl From<WindowAppearance> for Appearance {
             WindowAppearance::Light | WindowAppearance::VibrantLight => Appearance::Light,
         }
     }
+}
+
+/// The fonts in use: config.toml's `font`, `ui_font` and `font_size` over
+/// the tokens' defaults.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fonts {
+    /// For mono styles: note text, code, inputs, the status line.
+    pub mono: SharedString,
+    /// For prose styles: headings and the interface.
+    pub prose: SharedString,
+    /// The note body's size; the other note styles scale with it.
+    pub note_size: f32,
+}
+
+impl Default for Fonts {
+    fn default() -> Self {
+        Fonts {
+            mono: SharedString::new_static(family::MONO),
+            prose: SharedString::new_static(family::PROSE),
+            note_size: text::NOTE_BODY.size,
+        }
+    }
+}
+
+thread_local! {
+    // Read by every text style as it's drawn, so a cell on the UI thread
+    // rather than a lock.
+    static FONTS: RefCell<Fonts> = RefCell::new(Fonts::default());
+}
+
+/// Puts `fonts` in use. Returns whether anything changed (lines then need
+/// measuring again).
+pub fn set_fonts(fonts: Fonts) -> bool {
+    FONTS.with(|current| {
+        let changed = *current.borrow() != fonts;
+        *current.borrow_mut() = fonts;
+        changed
+    })
+}
+
+/// The mono family in use.
+pub fn mono() -> SharedString {
+    FONTS.with(|f| f.borrow().mono.clone())
+}
+
+/// The prose family in use.
+pub fn prose() -> SharedString {
+    FONTS.with(|f| f.borrow().prose.clone())
+}
+
+/// How much bigger than the design the note text is (`font_size` / 16).
+pub fn note_scale() -> f32 {
+    FONTS.with(|f| f.borrow().note_size / text::NOTE_BODY.size)
 }
 
 /// The appearance `config.toml` fixes, if it does (`theme = "dark"`).
@@ -125,10 +180,27 @@ impl Theme {
 
 impl TextStyle {
     pub fn font_family(&self) -> SharedString {
-        SharedString::new_static(match self.family {
-            Family::Prose => family::PROSE,
-            Family::Mono => family::MONO,
-        })
+        match self.family {
+            Family::Prose => prose(),
+            Family::Mono => mono(),
+        }
+    }
+
+    /// The note's own styles, which `font_size` scales; the interface's
+    /// stay as designed.
+    fn is_note(&self) -> bool {
+        [
+            text::NOTE_TITLE,
+            text::NOTE_H2,
+            text::NOTE_H3,
+            text::NOTE_BODY,
+            text::CODE,
+        ]
+        .contains(self)
+    }
+
+    fn scale(&self) -> f32 {
+        if self.is_note() { note_scale() } else { 1. }
     }
 
     pub fn font_weight(&self) -> FontWeight {
@@ -136,11 +208,12 @@ impl TextStyle {
     }
 
     pub fn size(&self) -> Pixels {
-        px(self.size)
+        px(self.size * self.scale())
     }
 
+    /// Rounded to whole pixels, so scaled lines stay crisp.
     pub fn line_height(&self) -> Pixels {
-        px(self.line_height)
+        px((self.line_height * self.scale()).round())
     }
 }
 
@@ -245,5 +318,34 @@ mod tests {
     fn modal_shadow_has_its_layers() {
         assert_eq!(Theme::new(Appearance::Dark).modal_shadow().len(), 2);
         assert_eq!(Theme::new(Appearance::Light).modal_shadow().len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod font_tests {
+    use super::*;
+
+    #[test]
+    fn font_size_scales_note_styles_only() {
+        assert!(
+            !set_fonts(Fonts::default()),
+            "the defaults are already in use"
+        );
+        assert!(set_fonts(Fonts {
+            note_size: 20.,
+            mono: "Menlo".into(),
+            ..Fonts::default()
+        }));
+        assert_eq!(text::NOTE_BODY.size(), px(20.));
+        assert_eq!(text::NOTE_BODY.line_height(), px(33.), "26 × 1.25, rounded");
+        assert_eq!(text::NOTE_TITLE.size(), px(35.));
+        assert_eq!(
+            text::UI.size(),
+            px(text::UI.size),
+            "the interface keeps its size"
+        );
+        assert_eq!(text::NOTE_BODY.font_family().as_ref(), "Menlo");
+        assert_eq!(text::UI.font_family().as_ref(), family::PROSE);
+        set_fonts(Fonts::default());
     }
 }

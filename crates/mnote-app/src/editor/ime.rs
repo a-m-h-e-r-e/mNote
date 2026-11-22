@@ -156,10 +156,10 @@ impl EntityInputHandler for Editor {
         let line = line_of(rope, self.vim.cursor());
         let column = self.vim.cursor() - rope.line_to_char(line);
         let row = self.lines.bounds_for_item(line).unwrap_or(element_bounds);
-        let x = row.origin.x + px(crate::theme::size::GUTTER_W + column as f32 * styled::CHAR_W);
+        let x = row.origin.x + px(crate::theme::size::GUTTER_W + column as f32 * styled::char_w());
         Some(Bounds::new(
             point(x, row.origin.y),
-            size(px(styled::CHAR_W), row.size.height),
+            size(px(styled::char_w()), row.size.height),
         ))
     }
 

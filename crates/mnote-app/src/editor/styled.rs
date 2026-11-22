@@ -58,8 +58,11 @@ impl View {
     }
 }
 
-/// Width of one character of note text (IBM Plex Mono at 16px).
-pub const CHAR_W: f32 = 9.6;
+/// Width of one character of note text: IBM Plex Mono's 0.6 em, at the
+/// note's size (other mono fonts are close).
+pub fn char_w() -> f32 {
+    9.6 * crate::theme::note_scale()
+}
 
 /// What's drawn before a line's text.
 #[derive(Debug, Clone, PartialEq)]
@@ -224,7 +227,7 @@ pub fn look(kind: &LineKind, content: &str, raw: bool, p: &Palette) -> Look {
             }
             let mut look = plain(body, ink, *marker);
             look.prefix = Prefix::Bullet;
-            look.indent = *indent as f32 * CHAR_W;
+            look.indent = *indent as f32 * char_w();
             look
         }
         LineKind::Task {
@@ -246,13 +249,13 @@ pub fn look(kind: &LineKind, content: &str, raw: bool, p: &Palette) -> Look {
                 });
             }
             look.prefix = Prefix::Checkbox { checked: *checked };
-            look.indent = *indent as f32 * CHAR_W;
+            look.indent = *indent as f32 * char_w();
             look
         }
         LineKind::Quote { marker } => {
             let mut look = plain(body, Theme::color(p.ink_2), *marker);
             if !raw {
-                look.indent = 2. * CHAR_W;
+                look.indent = 2. * char_w();
             }
             look
         }

@@ -24,7 +24,7 @@ use mnote_core::content::FileHits;
 use mnote_vim::{InputAction, Key, Mode, VimInput};
 
 use crate::editor::line::{Caret, LineText};
-use crate::theme::{Palette, StyledExt, Theme, family, radius, size, space, text};
+use crate::theme::{Palette, StyledExt, Theme, radius, size, space, text};
 use crate::ui::{Hint, HintBar};
 
 /// Below this window width the preview moves under the list.
@@ -658,7 +658,7 @@ impl Picker {
         };
         let mono = Font {
             weight: style.font_weight(),
-            ..font(family::MONO)
+            ..font(crate::theme::mono())
         };
         let mut line = LineText::new(
             query.clone(),
@@ -761,7 +761,7 @@ fn render_field(
     let style = text::CODE;
     let mono = Font {
         weight: style.font_weight(),
-        ..font(family::MONO)
+        ..font(crate::theme::mono())
     };
     let mut line = LineText::new(
         row.label.clone(),

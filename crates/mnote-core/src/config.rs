@@ -126,7 +126,16 @@ pub struct Config {
     pub daily_note: String,
     /// Who last changed the cursor line, and when, from git.
     pub git_blame: bool,
+    /// The note's text font (and the code, inputs and status line).
+    pub font: String,
+    /// Headings and the interface.
+    pub ui_font: String,
+    /// The note text's size in pixels; headings and code scale with it.
+    pub font_size: u32,
 }
+
+/// The font sizes `font_size` accepts.
+pub const FONT_SIZES: std::ops::RangeInclusive<u32> = 10..=32;
 
 impl Default for Config {
     fn default() -> Self {
@@ -139,6 +148,9 @@ impl Default for Config {
             relative_numbers: true,
             daily_note: "journal/{date}.md".into(),
             git_blame: false,
+            font: "IBM Plex Mono".into(),
+            ui_font: "IBM Plex Sans".into(),
+            font_size: 16,
         }
     }
 }
@@ -230,6 +242,25 @@ impl Config {
                         _ => return Err(wrong("\"styled\", \"source\" or \"plain\"")),
                     }
                 }
+                "font" | "ui_font" => {
+                    let name = value
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|n| !n.is_empty())
+                        .ok_or_else(|| wrong("a font name in quotes"))?;
+                    if key == "font" {
+                        config.font = name.to_owned();
+                    } else {
+                        config.ui_font = name.to_owned();
+                    }
+                }
+                "font_size" => {
+                    config.font_size = value
+                        .as_integer()
+                        .and_then(|n| u32::try_from(n).ok())
+                        .filter(|n| FONT_SIZES.contains(n))
+                        .ok_or_else(|| wrong("a whole number from 10 to 32"))?;
+                }
                 "git_blame" => {
                     config.git_blame = value.as_bool().ok_or_else(|| wrong("true or false"))?;
                 }
@@ -303,12 +334,23 @@ impl Config {
              daily_note = \"{daily}\"\n\
              \n\
              # Who last changed the cursor line, and when, if the vault is in git.\n\
-             git_blame = {blame}\n",
+             git_blame = {blame}\n\
+             \n\
+             # The note's font, and the font for headings and the interface\n\
+             # (any installed font; IBM Plex comes with mNote).\n\
+             font = \"{font}\"\n\
+             ui_font = \"{ui_font}\"\n\
+             \n\
+             # Note text size in pixels, 10 to 32; headings and code follow.\n\
+             font_size = {font_size}\n",
             summon = key_words(&self.summon),
             capture = key_words(&self.capture),
             rnu = self.relative_numbers,
             daily = self.daily_note,
             blame = self.git_blame,
+            font = self.font,
+            ui_font = self.ui_font,
+            font_size = self.font_size,
         )
     }
 }
@@ -415,6 +457,8 @@ mod tests {
             view: ViewChoice::Source,
             relative_numbers: false,
             git_blame: true,
+            font: "Menlo".into(),
+            font_size: 18,
             ..Config::default()
         };
         assert_eq!(Config::parse(&config.template()), Ok(config));
@@ -446,6 +490,10 @@ mod tests {
         let err = Config::parse("summon = \"n\"").expect_err("no modifier");
         assert!(err.message.contains("option"));
         let err = Config::parse("daily_note = \"../out.md\"").expect_err("leaves the vault");
+        assert_eq!(err.line, Some(1));
+        let err = Config::parse("font_size = 64").expect_err("too big");
+        assert!(err.message.contains("10 to 32"));
+        let err = Config::parse("font = \"\"").expect_err("no name");
         assert_eq!(err.line, Some(1));
         let err = Config::parse("view = ").expect_err("not toml");
         assert_eq!(err.line, Some(1));

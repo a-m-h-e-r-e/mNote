@@ -239,7 +239,7 @@ impl Editor {
                     }))
                     .child(
                         div()
-                            .font_family(crate::theme::family::MONO)
+                            .font_family(crate::theme::mono())
                             .text_size(px(11.))
                             .text_color(Theme::color(if changing { p.cursor } else { p.ink_3 }))
                             .child(if changing {
@@ -336,7 +336,7 @@ impl Editor {
             }))
             .child(
                 div()
-                    .font_family(crate::theme::family::MONO)
+                    .font_family(crate::theme::mono())
                     .text_size(px(11.))
                     .text_color(Theme::color(p.ink_3))
                     .child(SharedString::new_static(
