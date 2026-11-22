@@ -46,6 +46,9 @@ use crate::theme::{ActiveTheme, Palette, StyledExt, Theme, family, radius, size,
 use crate::ui::{CommandLine, CompletionPopup, MessagePanel, StatusLine, Toast, TopBar};
 use line::{Caret, Highlight, LineText};
 
+/// A table's column widths and alignments, shared by its rows.
+type TableLayout = Rc<(Vec<usize>, Vec<mnote_core::styled::Align>)>;
+
 /// A code block's colours, line by line: byte ranges and their style.
 type CodeLines = Vec<Vec<(std::ops::Range<usize>, CodeStyle)>>;
 
@@ -135,6 +138,11 @@ pub struct Editor {
     tree: Option<mnote_core::SyntaxTree>,
     /// Code block colours by the block's first row, for one text revision.
     code_cache: std::collections::HashMap<usize, (u64, Rc<CodeLines>)>,
+    /// Where each image path of the open note points, so drawing doesn't
+    /// check the disk every frame.
+    image_paths: RefCell<std::collections::HashMap<String, Option<std::path::PathBuf>>>,
+    /// Table column layouts by the table's first row, for one revision.
+    table_cache: std::collections::HashMap<usize, (u64, TableLayout)>,
     /// Wakes the editor when a background parse lands.
     syntax_ready: async_channel::Sender<()>,
     _tasks: Vec<Task<()>>,
@@ -256,6 +264,8 @@ impl Editor {
             toast_task: None,
             tree: None,
             code_cache: std::collections::HashMap::new(),
+            table_cache: std::collections::HashMap::new(),
+            image_paths: RefCell::default(),
             syntax_ready,
             _tasks: vec![redraw],
             _subscriptions: subscriptions,
@@ -891,6 +901,8 @@ impl Editor {
             let _ = tx.try_send(());
         });
         self.code_cache.clear();
+        self.table_cache.clear();
+        self.image_paths.borrow_mut().clear();
         self.vim.set_cursor(0);
         self.autosave_task = None;
         self.notice = None;
@@ -1144,6 +1156,19 @@ impl Editor {
             return self.frontmatter_row(gutter_number, current, &fm.tags, p);
         }
 
+        if let LineKind::Image { src, alt } = &kind
+            && !raw
+        {
+            return self.image_row(gutter_number, current, src, alt, p);
+        }
+
+        if let LineKind::Table { block, delimiter } = &kind
+            && !raw
+        {
+            let block = self.table_block(block.clone(), ix);
+            return self.table_row(ix, block, *delimiter, &content, gutter_number, current, p);
+        }
+
         let mut look = styled::look(&kind, if substituted { &shown } else { &content }, raw, p);
         if substituted {
             look.shown = StyledLine::plain(&shown);
@@ -1262,7 +1287,7 @@ impl Editor {
 
         let body: AnyElement = if look.rule {
             div()
-                .h(line_height)
+                .h(look.height.unwrap_or(line_height))
                 .flex()
                 .items_center()
                 .child(div().w_full().h(px(1.)).bg(Theme::color(p.line)))
@@ -1322,6 +1347,242 @@ impl Editor {
                     .child(body),
             )
             .into_any_element()
+    }
+
+    /// One row of a table as cells side by side. Each cell wraps its own
+    /// text; column widths come from the longest cell in each column, so
+    /// every row of the table lines up. The `|---|` row isn't drawn.
+    #[allow(clippy::too_many_arguments)]
+    fn table_row(
+        &mut self,
+        ix: usize,
+        block: std::ops::Range<usize>,
+        delimiter: bool,
+        content: &str,
+        number: SharedString,
+        current: bool,
+        p: &Palette,
+    ) -> AnyElement {
+        if delimiter {
+            return div().h(px(0.)).into_any_element();
+        }
+        let layout = self.table_layout(block.clone());
+        // Each column's share of the width: its longest cell, within limits
+        // so a short column stays readable and a long one doesn't take all.
+        let weights: Vec<f32> = layout.0.iter().map(|&w| w.clamp(6, 60) as f32).collect();
+        let total = weights.iter().sum::<f32>().max(1.);
+        let cells = mnote_core::styled::table_cells(content);
+        let columns = weights.len().max(cells.len()).max(1);
+        let header = ix == block.start;
+        let last = ix + 1 >= block.end;
+        let body = text::NOTE_BODY;
+        let line = Theme::color(p.line_strong);
+        let row = div()
+            .flex()
+            .w_full()
+            .border_l_1()
+            .border_r_1()
+            .border_b_1()
+            .border_color(line)
+            .when(header, |row| row.border_t_1().rounded_t(px(radius::MD)))
+            .when(last, |row| row.rounded_b(px(radius::MD)))
+            .children((0..columns).map(|c| {
+                let cell = cells.get(c).cloned().unwrap_or_default();
+                let shown = mnote_core::styled::style_inline(&cell, false, 0);
+                let mut styling = styled::inline_styling(&shown, p);
+                if header {
+                    styling.insert(
+                        0,
+                        line::Styling {
+                            bytes: 0..shown.text.len(),
+                            weight: Some(gpui::FontWeight::SEMIBOLD),
+                            ..line::Styling::default()
+                        },
+                    );
+                }
+                let share = weights.get(c).copied().unwrap_or(6.) / total;
+                div()
+                    .w(gpui::relative(share))
+                    .min_w_0()
+                    .px(px(space::S3))
+                    .py(px(6.))
+                    .when(c + 1 < columns, |cell| cell.border_r_1().border_color(line))
+                    .child(
+                        LineText::new(
+                            shown.text.clone().into(),
+                            Font {
+                                weight: body.font_weight(),
+                                ..font(body.font_family())
+                            },
+                            body.size(),
+                            body.line_height(),
+                            Theme::color(p.ink),
+                        )
+                        .styling(styling),
+                    )
+            }));
+        div()
+            .flex()
+            .w_full()
+            .when(current, |r| r.bg(Theme::color(p.well)))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(size::GUTTER_W))
+                    .pr(px(space::S8))
+                    .pt(px(6.))
+                    .text_right()
+                    .text_style(body)
+                    .text_color(Theme::color(if current { p.ink } else { p.ink_3 }))
+                    .child(number),
+            )
+            .child(div().flex_1().min_w_0().max_w(px(size::MEASURE)).child(row))
+            .into_any_element()
+    }
+
+    /// The rows of the table around line `ix`: from the tree when it has
+    /// them, else the `|` lines next to it.
+    fn table_block(&self, block: std::ops::Range<usize>, ix: usize) -> std::ops::Range<usize> {
+        if block.contains(&ix) {
+            return block;
+        }
+        let rope = self.buffer.text();
+        let is_row =
+            |line: usize| rope.line(line).chars().find(|c| !c.is_whitespace()) == Some('|');
+        let mut start = ix;
+        while start > 0 && is_row(start - 1) {
+            start -= 1;
+        }
+        let mut end = ix + 1;
+        while end < line_count(rope) && is_row(end) {
+            end += 1;
+        }
+        start..end
+    }
+
+    /// Column widths and alignments of the table on rows `block`, once per
+    /// table and text revision.
+    fn table_layout(&mut self, block: std::ops::Range<usize>) -> TableLayout {
+        let revision = self.buffer.revision();
+        if let Some((rev, layout)) = self.table_cache.get(&block.start)
+            && *rev == revision
+        {
+            return layout.clone();
+        }
+        let rope = self.buffer.text();
+        let first = block.start;
+        let rows: Vec<String> = block
+            .map(|row| {
+                let start = line_start(rope, row);
+                rope.slice(start..start + line_len(rope, row)).to_string()
+            })
+            .collect();
+        let layout = Rc::new(mnote_core::styled::table_layout(&rows));
+        if self.table_cache.len() > 64 {
+            self.table_cache.retain(|_, (rev, _)| *rev == revision);
+        }
+        self.table_cache.insert(first, (revision, layout.clone()));
+        layout
+    }
+
+    /// An image on its own line: the picture, or a quiet note when it
+    /// can't be shown.
+    fn image_row(
+        &self,
+        number: SharedString,
+        current: bool,
+        src: &str,
+        alt: &str,
+        p: &Palette,
+    ) -> AnyElement {
+        let gutter = div()
+            .flex_none()
+            .w(px(size::GUTTER_W))
+            .pr(px(space::S8))
+            .text_right()
+            .text_style(text::NOTE_BODY)
+            .text_color(Theme::color(if current { p.ink } else { p.ink_3 }))
+            .child(number);
+        let note_text = |message: String| {
+            div()
+                .text_style(text::STATUS)
+                .line_height(text::NOTE_BODY.line_height())
+                .text_color(Theme::color(p.ink_3))
+                .child(SharedString::from(message))
+        };
+        let shown: AnyElement = match self.image_path(src) {
+            Some(path) => {
+                let missing = format!("image not found: {src}");
+                gpui::img(path)
+                    .max_w(px(size::MEASURE))
+                    .max_h(px(480.))
+                    .rounded(px(radius::MD))
+                    .object_fit(gpui::ObjectFit::Contain)
+                    .with_fallback(move || {
+                        div()
+                            .text_style(text::STATUS)
+                            .child(SharedString::from(missing.clone()))
+                            .into_any_element()
+                    })
+                    .into_any_element()
+            }
+            None if src.starts_with("http://") || src.starts_with("https://") => {
+                note_text(format!("web image, not loaded: {src}")).into_any_element()
+            }
+            None => note_text(format!("image not found: {src}")).into_any_element(),
+        };
+        div()
+            .flex()
+            .w_full()
+            .py(px(space::S1))
+            .when(current, |row| row.bg(Theme::color(p.well)))
+            .child(gutter)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .max_w(px(size::MEASURE))
+                    .child(shown)
+                    .when(!alt.is_empty(), |col| {
+                        col.child(
+                            div()
+                                .text_style(text::STATUS)
+                                .text_color(Theme::color(p.ink_3))
+                                .child(SharedString::from(alt.to_owned())),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// Where an image path points: next to the note first, then from the
+    /// vault's top folder. Web images aren't loaded.
+    fn image_path(&self, src: &str) -> Option<std::path::PathBuf> {
+        if src.contains("://") {
+            return None;
+        }
+        if let Some(found) = self.image_paths.borrow().get(src) {
+            return found.clone();
+        }
+        let found = self.find_image(src);
+        self.image_paths
+            .borrow_mut()
+            .insert(src.to_owned(), found.clone());
+        found
+    }
+
+    fn find_image(&self, src: &str) -> Option<std::path::PathBuf> {
+        let Source::Note { vault, note, .. } = &self.source else {
+            return None;
+        };
+        let src = src.replace("%20", " ");
+        let beside = vault.path_of(note).parent().map(|dir| dir.join(&src));
+        let from_root = vault.root().join(src.trim_start_matches('/'));
+        [beside, Some(from_root)]
+            .into_iter()
+            .flatten()
+            .find(|p| p.starts_with(vault.root()) && p.is_file())
     }
 
     /// The frontmatter's first line, collapsed to its tags.

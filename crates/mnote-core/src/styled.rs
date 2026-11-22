@@ -320,8 +320,17 @@ pub enum LineKind {
     },
     /// `---`, `***` on their own.
     Rule,
-    /// A `|` table row (rendered in a later step).
-    Table,
+    /// A row of a `|` table. `block` is the table's rows; the delimiter
+    /// row (`|---|`) draws as a rule.
+    Table {
+        block: Range<usize>,
+        delimiter: bool,
+    },
+    /// A line that is only an image: `![alt](path)` or `![[path]]`.
+    Image {
+        src: String,
+        alt: String,
+    },
 }
 
 /// The kind of `line` (0-based). `tree` is the buffer's Markdown tree, if
@@ -385,7 +394,18 @@ fn block_kind(tree: &Tree, rope: &Rope, line: usize, text: &str) -> Option<LineK
                     None => LineKind::Quote { marker },
                 });
             }
-            "pipe_table" => return Some(LineKind::Table),
+            "pipe_table" => {
+                let (start, end) = (n.start_position().row, n.end_position().row);
+                let end = if n.end_position().column == 0 {
+                    end
+                } else {
+                    end + 1
+                };
+                return Some(LineKind::Table {
+                    block: start..end.max(start + 1),
+                    delimiter: is_delimiter_row(text),
+                });
+            }
             _ => {}
         }
         at = n.parent();
@@ -499,10 +519,129 @@ fn local_kind(text: &str) -> LineKind {
             },
         };
     }
+    if let Some((src, alt)) = image_line(trimmed) {
+        return LineKind::Image { src, alt };
+    }
     if trimmed.starts_with('|') {
-        return LineKind::Table;
+        return LineKind::Table {
+            block: 0..0,
+            delimiter: is_delimiter_row(text),
+        };
     }
     LineKind::Text
+}
+
+/// `![alt](path "title")` or `![[path|size]]` alone on a line.
+fn image_line(text: &str) -> Option<(String, String)> {
+    let text = text.trim();
+    if let Some(inner) = text.strip_prefix("![[").and_then(|r| r.strip_suffix("]]")) {
+        let src = inner.split('|').next().unwrap_or(inner).trim();
+        return (!src.is_empty()).then(|| (src.to_owned(), String::new()));
+    }
+    let rest = text.strip_prefix("![")?;
+    let mid = rest.find("](")?;
+    let alt = &rest[..mid];
+    let target = rest[mid + 2..].strip_suffix(')')?;
+    let src = target.split(" \"").next().unwrap_or(target).trim();
+    let src = src.trim_start_matches('<').trim_end_matches('>');
+    (!src.is_empty() && !src.contains(' ')).then(|| (src.to_owned(), alt.to_owned()))
+}
+
+/// `|---|:--:|` and the like.
+fn is_delimiter_row(text: &str) -> bool {
+    let t = text.trim();
+    t.contains('-')
+        && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t'))
+        && t.contains('|')
+}
+
+/// How a table column lines up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Align {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+/// The cells of a table row: character ranges of each cell's trimmed text.
+fn cell_ranges(line: &str) -> Vec<Range<usize>> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut cells = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    let mut code = false;
+    while i <= chars.len() {
+        let end_cell =
+            i == chars.len() || (chars[i] == '|' && !code && (i == 0 || chars[i - 1] != '\\'));
+        if i < chars.len() && chars[i] == '`' {
+            code = !code;
+        }
+        if end_cell {
+            let (mut a, mut b) = (start, i);
+            while a < b && chars[a].is_whitespace() {
+                a += 1;
+            }
+            while b > a && chars[b - 1].is_whitespace() {
+                b -= 1;
+            }
+            cells.push(a..b);
+            start = i + 1;
+        }
+        i += 1;
+    }
+    // A leading and a trailing pipe leave empty cells at the ends.
+    let trimmed = line.trim();
+    if trimmed.starts_with('|') && cells.first().is_some_and(|c| c.is_empty()) {
+        cells.remove(0);
+    }
+    if trimmed.ends_with('|') && trimmed.len() > 1 && cells.last().is_some_and(|c| c.is_empty()) {
+        cells.pop();
+    }
+    cells
+}
+
+/// The text of each cell of a table row, trimmed, pipes removed.
+pub fn table_cells(line: &str) -> Vec<String> {
+    let chars: Vec<char> = line.chars().collect();
+    cell_ranges(line)
+        .into_iter()
+        .map(|r| chars[r].iter().collect())
+        .collect()
+}
+
+/// Column widths (in characters, as displayed) and alignments of a table
+/// whose rows are `rows`.
+pub fn table_layout(rows: &[String]) -> (Vec<usize>, Vec<Align>) {
+    let mut widths: Vec<usize> = Vec::new();
+    let mut aligns: Vec<Align> = Vec::new();
+    for row in rows {
+        let chars: Vec<char> = row.chars().collect();
+        let cells = cell_ranges(row);
+        if is_delimiter_row(row) {
+            aligns = cells
+                .iter()
+                .map(|r| {
+                    let cell: String = chars[r.clone()].iter().collect();
+                    match (cell.starts_with(':'), cell.ends_with(':')) {
+                        (true, true) => Align::Center,
+                        (false, true) => Align::Right,
+                        _ => Align::Left,
+                    }
+                })
+                .collect();
+            continue;
+        }
+        for (c, r) in cells.iter().enumerate() {
+            let cell: String = chars[r.clone()].iter().collect();
+            let shown = style_inline(&cell, false, 0).text.chars().count();
+            if c >= widths.len() {
+                widths.resize(c + 1, 0);
+            }
+            widths[c] = widths[c].max(shown);
+        }
+    }
+    (widths, aligns)
 }
 
 fn heading_level(text: &str) -> Option<usize> {
@@ -622,6 +761,58 @@ mod tests {
         assert_eq!(local_kind("---"), LineKind::Rule);
         assert_eq!(local_kind("#tag text"), LineKind::Text);
         assert_eq!(local_kind("> quoted"), LineKind::Quote { marker: 2 });
+    }
+
+    #[test]
+    fn tables_line_up_in_columns() {
+        let rows: Vec<String> = [
+            "| Key | Opens |",
+            "|---|--:|",
+            "| `space f` | Finder |",
+            "| e | **Explorer** |",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let (widths, aligns) = table_layout(&rows);
+        assert_eq!(
+            widths,
+            [7, 8],
+            "widths count shown characters, markers hidden"
+        );
+        assert_eq!(aligns, [Align::Left, Align::Right]);
+        assert_eq!(
+            local_kind("|---|:-:|"),
+            LineKind::Table {
+                block: 0..0,
+                delimiter: true
+            }
+        );
+    }
+
+    #[test]
+    fn cells_of_a_row() {
+        assert_eq!(table_cells("| a | `b|c` | d |"), ["a", "`b|c`", "d"]);
+        assert_eq!(table_cells("a | b"), ["a", "b"]);
+    }
+
+    #[test]
+    fn image_lines() {
+        assert_eq!(
+            local_kind("![The explorer](assets/explorer.png)"),
+            LineKind::Image {
+                src: "assets/explorer.png".into(),
+                alt: "The explorer".into()
+            }
+        );
+        assert_eq!(
+            local_kind("![[diagram.png|300]]"),
+            LineKind::Image {
+                src: "diagram.png".into(),
+                alt: String::new()
+            }
+        );
+        assert_eq!(local_kind("text ![a](b.png)"), LineKind::Text);
     }
 
     #[test]

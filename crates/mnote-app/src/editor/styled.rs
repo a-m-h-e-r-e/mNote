@@ -91,7 +91,7 @@ fn heading_style(level: u8) -> TextStyle {
 }
 
 /// Inline formatting as styling runs.
-fn inline_styling(shown: &StyledLine, p: &Palette) -> Vec<Styling> {
+pub fn inline_styling(shown: &StyledLine, p: &Palette) -> Vec<Styling> {
     shown
         .spans
         .iter()
@@ -280,7 +280,7 @@ pub fn look(kind: &LineKind, content: &str, raw: bool, p: &Palette) -> Look {
             }
             look
         }
-        LineKind::Table | LineKind::Text => plain(body, ink, 0),
+        LineKind::Table { .. } | LineKind::Image { .. } | LineKind::Text => plain(body, ink, 0),
     }
 }
 
