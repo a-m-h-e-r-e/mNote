@@ -30,13 +30,13 @@ use mnote_vim::text::{clamp_normal, line_count, line_len, line_of, line_start};
 use mnote_vim::{Clipboard, Effect, Mode, Vim};
 
 use crate::commands::{COMMANDS, Run};
-use crate::picker::explorer::Explorer;
+use crate::picker::explorer::{Explorer, FileHistory};
 use crate::picker::finder::{CurrentNote, Finder};
 use crate::picker::list::ListPicker;
 use crate::picker::palette::CommandPalette;
-use crate::picker::{ListEntry, Picker, PickerAction, PickerOutcome};
+use crate::picker::{Job, JobResult, ListEntry, Picker, PickerAction, PickerEffect, PickerOutcome};
 use crate::theme::{ActiveTheme, Palette, StyledExt, Theme, family, size, space, text};
-use crate::ui::{CommandLine, CompletionPopup, MessagePanel, StatusLine, TopBar};
+use crate::ui::{CommandLine, CompletionPopup, MessagePanel, StatusLine, Toast, TopBar};
 use line::{Caret, Highlight, LineText};
 
 /// Width left for the macOS traffic-light buttons in the top bar.
@@ -50,7 +50,8 @@ enum Source {
     Note {
         vault: Vault,
         note: NotePath,
-        _watcher: Option<VaultWatcher>,
+        /// Boxed: the watcher is large, and a scratch note has none.
+        _watcher: Option<Box<VaultWatcher>>,
     },
 }
 
@@ -112,6 +113,12 @@ pub struct Editor {
     /// The results list (`⌃q` in content search) and where `:cnext` is.
     list: Vec<ListEntry>,
     list_pos: usize,
+    /// File operations from the explorer, for `u` there.
+    file_history: FileHistory,
+    /// A message near the bottom after a file operation, and whether it
+    /// offers `u undo`. It goes after a few seconds.
+    toast: Option<(SharedString, bool)>,
+    toast_task: Option<Task<()>>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -147,7 +154,7 @@ impl Editor {
             Source::Note {
                 vault,
                 note,
-                _watcher: watcher,
+                _watcher: watcher.map(Box::new),
             },
             window,
             cx,
@@ -207,6 +214,9 @@ impl Editor {
             leader: false,
             list: Vec::new(),
             list_pos: 0,
+            file_history: FileHistory::default(),
+            toast: None,
+            toast_task: None,
             _tasks: Vec::new(),
             _subscriptions: subscriptions,
         }
@@ -336,6 +346,8 @@ impl Editor {
 
     /// Opens the explorer on the open note's folder, or on `folder`.
     fn open_explorer(&mut self, folder: Option<String>, cx: &mut Context<Self>) {
+        // File operations read and rewrite notes on disk: save first.
+        self.save_now(cx);
         let Source::Note { vault, note, .. } = &self.source else {
             self.reply = Some(("A scratch note isn't in a vault to explore".into(), true));
             return;
@@ -344,11 +356,19 @@ impl Editor {
         let picker = match folder {
             Some(folder) => Picker::new(Box::new(Explorer::at_folder(
                 self.index.clone(),
+                vault.clone(),
+                self.file_history.clone(),
                 name,
                 &folder,
             ))),
             None => {
-                let (explorer, select) = Explorer::new(self.index.clone(), name, Some(note));
+                let (explorer, select) = Explorer::new(
+                    self.index.clone(),
+                    vault.clone(),
+                    self.file_history.clone(),
+                    name,
+                    Some(note),
+                );
                 let mut picker = Picker::new(Box::new(explorer));
                 picker.select(select);
                 picker
@@ -385,7 +405,11 @@ impl Editor {
             return;
         };
         let mode_before = picker.mode();
-        match picker.handle_key(key) {
+        let outcome = picker.handle_key(key);
+        // Effects and background work outlive the picker if it closes.
+        let effects = picker.take_effects();
+        let job = picker.take_job();
+        match outcome {
             PickerOutcome::Open => {
                 if picker.mode() != mode_before || picker.mode() == Mode::Insert {
                     self.restart_blink(cx);
@@ -401,28 +425,111 @@ impl Editor {
                 self.restart_blink(cx);
             }
         }
-        self.run_picker_job(cx);
+        self.apply_effects(effects, cx);
+        if let Some(job) = job {
+            self.spawn_job(job, cx);
+        }
         cx.notify();
     }
 
     /// Runs the picker's background work (a content search) off the UI
-    /// thread and hands the result back, if the picker is still open.
+    /// thread.
     fn run_picker_job(&mut self, cx: &mut Context<Self>) {
-        let Some(job) = self.picker.as_mut().and_then(Picker::take_job) else {
-            return;
-        };
+        if let Some(job) = self.picker.as_mut().and_then(Picker::take_job) {
+            self.spawn_job(job, cx);
+        }
+    }
+
+    /// Runs `job` off the UI thread and hands its result to the picker, or,
+    /// if the picker closed meanwhile, applies what still matters (rewritten
+    /// links).
+    fn spawn_job(&mut self, job: Job, cx: &mut Context<Self>) {
         let task = cx.background_executor().spawn(async move { job() });
         cx.spawn(async move |this, cx| {
-            if let Some(result) = task.await {
-                let _ = this.update(cx, |this, cx| {
-                    if let Some(picker) = this.picker.as_mut() {
-                        picker.job_done(result);
-                        cx.notify();
+            let Some(result) = task.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                if let Some(picker) = this.picker.as_mut() {
+                    picker.job_done(result);
+                    let effects = picker.take_effects();
+                    this.apply_effects(effects, cx);
+                    this.run_picker_job(cx);
+                } else if let JobResult::Relinked {
+                    done,
+                    message,
+                    undo,
+                } = result
+                {
+                    let links: usize = done.iter().map(|r| r.links).sum();
+                    let text = if links == 0 {
+                        message
+                    } else {
+                        format!("{message} · {links} wikilinks updated")
+                    };
+                    {
+                        let mut index = this.index.borrow_mut();
+                        for relinked in &done {
+                            index.note_saved(relinked.note.clone(), &relinked.text);
+                        }
                     }
-                });
-            }
+                    this.apply_effects(
+                        vec![
+                            PickerEffect::Relinked(done),
+                            PickerEffect::Toast { text, undo },
+                        ],
+                        cx,
+                    );
+                }
+                cx.notify();
+            });
         })
         .detach();
+    }
+
+    /// Applies what a picker did: toasts, and the open note following a
+    /// rename, move or link rewrite.
+    fn apply_effects(&mut self, effects: Vec<PickerEffect>, cx: &mut Context<Self>) {
+        for effect in effects {
+            match effect {
+                PickerEffect::Toast { text, undo } => self.show_toast(text, undo, cx),
+                PickerEffect::Moved { from, to } => {
+                    if let Source::Note { note, .. } = &mut self.source
+                        && let Ok(rest) = note.as_path().strip_prefix(&from)
+                    {
+                        let moved = if rest.as_os_str().is_empty() {
+                            to
+                        } else {
+                            to.join(rest)
+                        };
+                        if let Ok(moved) = NotePath::new(moved) {
+                            *note = moved;
+                        }
+                    }
+                }
+                PickerEffect::Relinked(done) => {
+                    let Source::Note { note, .. } = &self.source else {
+                        continue;
+                    };
+                    if let Some(relinked) = done.iter().find(|r| r.note == *note) {
+                        self.buffer.reload(&relinked.text);
+                        let cursor = clamp_normal(self.buffer.text(), self.vim.cursor());
+                        self.vim.set_cursor(cursor);
+                        self.sync_lines();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Shows a toast for about four seconds.
+    fn show_toast(&mut self, text: String, undo: bool, cx: &mut Context<Self>) {
+        self.toast = Some((text.into(), undo));
+        self.toast_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(4)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.toast = None;
+                cx.notify();
+            });
+        }));
     }
 
     /// Opens `path` (if it isn't open) with the cursor at `line`.
@@ -1185,5 +1292,21 @@ impl Render for Editor {
                     .child(popup)
             }))
             .children(picker)
+            .children(self.toast.clone().map(|(text, undo)| {
+                let toast = Toast::new(text);
+                let toast = if undo {
+                    toast.action("u", "undo")
+                } else {
+                    toast
+                };
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom(px(48.))
+                    .flex()
+                    .justify_center()
+                    .child(toast)
+            }))
     }
 }

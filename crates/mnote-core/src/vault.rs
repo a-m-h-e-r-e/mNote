@@ -38,6 +38,8 @@ pub(crate) type OwnWrites = Arc<Mutex<HashMap<NotePath, Stamp>>>;
 pub struct Vault {
     root: PathBuf,
     pub(crate) own_writes: OwnWrites,
+    /// Where [`Vault::trash`] moves things; `None` is the user's Trash.
+    pub(crate) trash: Option<PathBuf>,
 }
 
 impl Vault {
@@ -53,7 +55,14 @@ impl Vault {
         Ok(Vault {
             root,
             own_writes: OwnWrites::default(),
+            trash: None,
         })
+    }
+
+    /// Uses `dir` instead of the user's Trash (for tests).
+    pub fn with_trash(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.trash = Some(dir.into());
+        self
     }
 
     /// The vault folder, as an absolute path with symlinks resolved.

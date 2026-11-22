@@ -293,7 +293,9 @@ impl PickerDelegate for Finder {
     }
 
     fn job_done(&mut self, result: JobResult) {
-        let JobResult::Content { generation, files } = result;
+        let JobResult::Content { generation, files } = result else {
+            return;
+        };
         if generation == self.generation && matches!(self.results, Results::Content(_)) {
             self.results = Results::Content(Content::new(files));
         }

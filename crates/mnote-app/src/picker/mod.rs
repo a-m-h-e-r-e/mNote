@@ -47,6 +47,8 @@ pub struct Row {
     /// A secondary row in `ink-2`, such as "create …".
     pub quiet: bool,
     pub kind: RowKind,
+    /// Cut with `dd`, waiting for `p` (explorer): drawn on `insert-wash`.
+    pub cut: bool,
     /// Byte ranges of `label` on the `match` fill (content search hits).
     pub marks: Vec<Range<usize>>,
 }
@@ -57,6 +59,14 @@ pub enum RowKind {
     /// An ordinary row.
     #[default]
     Item,
+    /// An inline name field (explorer rename and new): the label is the
+    /// text being typed, `cursor` the caret's byte offset, `block` a NORMAL
+    /// mode caret, `suffix` the quiet part after the field (`.md`).
+    Field {
+        cursor: usize,
+        block: bool,
+        suffix: &'static str,
+    },
     /// A heading over the rows below it (a file in content search). It can't
     /// be selected.
     Group,
@@ -126,6 +136,28 @@ pub enum JobResult {
         generation: u64,
         files: Vec<FileHits>,
     },
+    /// Links rewritten after a rename or move; `message` is the toast to
+    /// show, with the link count added.
+    Relinked {
+        done: Vec<mnote_core::links::Relinked>,
+        message: String,
+        undo: bool,
+    },
+}
+
+/// Something a picker did that the window around it must know.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickerEffect {
+    /// A short message at the bottom of the window; `undo` adds `u undo`.
+    Toast { text: String, undo: bool },
+    /// A note or folder moved (vault-relative paths): an open note inside it
+    /// follows.
+    Moved {
+        from: std::path::PathBuf,
+        to: std::path::PathBuf,
+    },
+    /// Notes saved with rewritten links: an open one reloads.
+    Relinked(Vec<mnote_core::links::Relinked>),
 }
 
 /// What confirming a row does.
@@ -247,6 +279,22 @@ pub trait PickerDelegate {
     /// A job's result arrived.
     fn job_done(&mut self, _result: JobResult) {}
 
+    /// Whether every key goes to [`Self::key`] instead of the filter (an
+    /// inline name field is open).
+    fn capturing(&self) -> bool {
+        false
+    }
+
+    /// A key while [`Self::capturing`].
+    fn key(&mut self, _key: Key) -> Confirm {
+        Confirm::Stay
+    }
+
+    /// Effects since the last call, for the window to apply.
+    fn take_effects(&mut self) -> Vec<PickerEffect> {
+        Vec::new()
+    }
+
     /// `⌃q`: the results as a list, if this picker has places to list.
     fn send_to_list(&mut self) -> Option<PickerAction> {
         None
@@ -283,6 +331,10 @@ impl Picker {
 
     /// Handles one key.
     pub fn handle_key(&mut self, key: Key) -> PickerOutcome {
+        if self.delegate.capturing() {
+            let confirm = self.delegate.key(key);
+            return self.apply(confirm);
+        }
         if key == Key::Ctrl('q') {
             return match self.delegate.send_to_list() {
                 Some(action) => PickerOutcome::Act(action),
@@ -353,8 +405,8 @@ impl Picker {
     }
 
     #[cfg(test)]
-    pub(crate) fn delegate_len(&self) -> usize {
-        self.delegate.len()
+    pub(crate) fn row_label(&self, ix: usize) -> String {
+        self.delegate.row(ix).label.to_string()
     }
 
     /// Replaces the query (keeping the field in INSERT) and refreshes.
@@ -362,6 +414,11 @@ impl Picker {
         self.input = VimInput::new(query);
         self.delegate.set_query(query);
         self.reset_selection();
+    }
+
+    /// What the picker did that the window must apply.
+    pub fn take_effects(&mut self) -> Vec<PickerEffect> {
+        self.delegate.take_effects()
     }
 
     /// Background work the delegate wants done now.
@@ -435,7 +492,9 @@ impl Picker {
             .p(px(6.))
             .min_w_0()
             .overflow_hidden()
-            .children(rows.map(|ix| render_row(&self.delegate.row(ix), ix == self.selected, p)));
+            .children(
+                rows.map(|ix| render_row(&self.delegate.row(ix), ix == self.selected, caret_on, p)),
+            );
         let preview = self
             .delegate
             .preview(self.selected)
@@ -484,15 +543,19 @@ impl Picker {
                 .child(div().flex_1().min_w_0().children(preview))
         };
 
-        let mut hints = match mode {
-            Mode::Normal => vec![Hint::new("j k", "move")],
-            _ => vec![Hint::new("⌃n ⌃p", "move")],
+        let capturing = self.delegate.capturing();
+        let mut hints = match (capturing, mode) {
+            (true, _) => Vec::new(),
+            (false, Mode::Normal) => vec![Hint::new("j k", "move")],
+            (false, _) => vec![Hint::new("⌃n ⌃p", "move")],
         };
         hints.extend(self.delegate.hints(mode));
-        hints.push(match mode {
-            Mode::Normal => Hint::new("esc", "close"),
-            _ => Hint::new("esc", "normal mode"),
-        });
+        if !capturing {
+            hints.push(match mode {
+                Mode::Normal => Hint::new("esc", "close"),
+                _ => Hint::new("esc", "normal mode"),
+            });
+        }
         let mut hint_bar = HintBar::new(hints);
         if let Some(count) = self.delegate.count() {
             hint_bar = hint_bar.right(count);
@@ -653,7 +716,70 @@ fn marks(ranges: &[Range<usize>], len: usize, p: &Palette) -> Vec<(Range<usize>,
         .collect()
 }
 
-fn render_row(row: &Row, selected: bool, p: &Palette) -> AnyElement {
+/// An inline name field: bordered in `cursor`, mono, the caret in its mode,
+/// and a quiet suffix after it.
+fn render_field(
+    row: &Row,
+    cursor: usize,
+    block: bool,
+    suffix: &'static str,
+    caret_on: bool,
+    p: &Palette,
+) -> AnyElement {
+    let style = text::CODE;
+    let mono = Font {
+        weight: style.font_weight(),
+        ..font(family::MONO)
+    };
+    let mut line = LineText::new(
+        row.label.clone(),
+        mono,
+        style.size(),
+        px(22.),
+        Theme::color(p.ink),
+    );
+    if caret_on || block {
+        line = line.caret(Some(Caret {
+            byte: cursor.min(row.label.len()),
+            shape: if block {
+                mnote_vim::CaretShape::Block
+            } else {
+                mnote_vim::CaretShape::Bar
+            },
+            color: Theme::color(p.cursor),
+            on_color: Theme::color(p.on_cursor),
+        }));
+    }
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .h(px(size::ROW_H))
+        .px(px(space::S2))
+        .rounded(px(radius::SM))
+        .border_1()
+        .border_color(Theme::color(p.cursor))
+        .bg(Theme::color(p.overlay))
+        .text_style(style)
+        .child(div().flex_1().min_w_0().child(line))
+        .child(
+            div()
+                .flex_none()
+                .text_color(Theme::color(p.ink_3))
+                .child(SharedString::new_static(suffix)),
+        )
+        .into_any_element()
+}
+
+fn render_row(row: &Row, selected: bool, caret_on: bool, p: &Palette) -> AnyElement {
+    if let RowKind::Field {
+        cursor,
+        block,
+        suffix,
+    } = row.kind
+    {
+        return render_field(row, cursor, block, suffix, caret_on, p);
+    }
     if row.kind == RowKind::Group {
         return div()
             .flex()
@@ -677,10 +803,11 @@ fn render_row(row: &Row, selected: bool, p: &Palette) -> AnyElement {
             }))
             .into_any_element();
     }
-    let (ink, quiet, strong) = match (selected, row.quiet) {
-        (true, _) => (p.select_ink, p.select_ink, p.select_ink),
-        (false, true) => (p.ink_2, p.ink_3, p.ink),
-        (false, false) => (p.ink, p.ink_3, p.ink),
+    let (ink, quiet, strong) = match (selected, row.cut, row.quiet) {
+        (true, _, _) => (p.select_ink, p.select_ink, p.select_ink),
+        (false, true, _) => (p.insert, p.insert, p.insert),
+        (false, false, true) => (p.ink_2, p.ink_3, p.ink),
+        (false, false, false) => (p.ink, p.ink_3, p.ink),
     };
     let styles = label_styles(row, strong, p);
     let hit_line = match row.kind {
@@ -702,6 +829,7 @@ fn render_row(row: &Row, selected: bool, p: &Palette) -> AnyElement {
             row.text_style(text::STATUS).line_height(px(22.))
         })
         .text_color(Theme::color(ink))
+        .when(row.cut && !selected, |r| r.bg(Theme::color(p.insert_wash)))
         .when(selected, |row| row.bg(Theme::color(p.select)))
         .children(hit_line.map(|line| {
             div()

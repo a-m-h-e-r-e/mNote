@@ -223,6 +223,81 @@ impl NoteIndex {
         }
     }
 
+    /// Updates the index after the note or folder `from` moved to `to`
+    /// (vault-relative), and returns each note's move, for relinking.
+    pub fn moved(
+        &mut self,
+        from: &std::path::Path,
+        to: &std::path::Path,
+    ) -> Vec<crate::links::LinkMove> {
+        let affected: Vec<usize> = (0..self.notes.len())
+            .filter(|&i| self.notes[i].path.as_path().starts_with(from))
+            .collect();
+        let mut moves = Vec::new();
+        let mut entries = Vec::new();
+        for &i in affected.iter().rev() {
+            self.count_tags(i, false);
+            let mut entry = self.notes.remove(i);
+            let Ok(rest) = entry.path.as_path().strip_prefix(from) else {
+                continue;
+            };
+            let target = if rest.as_os_str().is_empty() {
+                to.to_path_buf()
+            } else {
+                to.join(rest)
+            };
+            let Ok(new) = NotePath::new(&target) else {
+                continue;
+            };
+            // A title that came from the file name follows the new name.
+            let titled = entry
+                .headings
+                .iter()
+                .any(|h| h.level == 1 && h.text == entry.title);
+            if !titled {
+                entry.title = new.name().to_owned();
+            }
+            moves.push(crate::links::LinkMove {
+                from: entry.path.clone(),
+                to: new.clone(),
+            });
+            entry.path_text = new.to_string();
+            entry.path = new;
+            entries.push(entry);
+        }
+        for entry in entries {
+            self.insert(entry);
+        }
+        moves.reverse();
+        moves
+    }
+
+    /// Removes the note at `path`, or every note under the folder `path`.
+    /// Returns how many went.
+    pub fn remove_under(&mut self, path: &std::path::Path) -> usize {
+        let gone: Vec<NotePath> = self
+            .notes
+            .iter()
+            .filter(|n| n.path.as_path().starts_with(path))
+            .map(|n| n.path.clone())
+            .collect();
+        for note in &gone {
+            self.remove(note);
+        }
+        gone.len()
+    }
+
+    /// Reads the note at `path`, or every note under the folder `path`, from
+    /// disk into the index (after a note or folder came back from the Trash).
+    pub fn reload_under(&mut self, vault: &Vault, path: &std::path::Path) {
+        let Ok(notes) = vault.notes() else {
+            return;
+        };
+        for note in notes.into_iter().filter(|n| n.as_path().starts_with(path)) {
+            self.insert(read_entry(vault, note));
+        }
+    }
+
     /// Removes a note. Returns whether it was there.
     pub fn remove(&mut self, path: &NotePath) -> bool {
         let Ok(i) = self.position(path) else {
@@ -292,6 +367,35 @@ mod tests {
         );
         let tags: Vec<_> = index.tags().collect();
         assert_eq!(tags, [("design", 1), ("idea", 1)]);
+    }
+
+    #[test]
+    fn follows_moves_of_notes_and_folders() {
+        let entry = |p: &str, text: &str| NoteEntry::new(note(p), text, None);
+        let mut index = NoteIndex::from_entries(vec![
+            entry("a.md", "#tag"),
+            entry("dir/b.md", "# Bee\n"),
+            entry("dir/sub/c.md", ""),
+            entry("dirt.md", ""),
+        ]);
+        let moves = index.moved(std::path::Path::new("a.md"), std::path::Path::new("z.md"));
+        assert_eq!(moves.len(), 1);
+        assert_eq!(
+            index.get(&note("z.md")).map(|n| n.title.as_str()),
+            Some("z"),
+            "title from the name"
+        );
+        assert_eq!(index.tags().collect::<Vec<_>>(), [("tag", 1)]);
+
+        let moves = index.moved(std::path::Path::new("dir"), std::path::Path::new("x/dir"));
+        assert_eq!(moves.len(), 2, "dirt.md isn't inside dir/");
+        assert_eq!(
+            index.get(&note("x/dir/b.md")).map(|n| n.title.as_str()),
+            Some("Bee")
+        );
+        assert!(index.get(&note("x/dir/sub/c.md")).is_some());
+        assert_eq!(index.remove_under(std::path::Path::new("x")), 2);
+        assert_eq!(index.len(), 2);
     }
 
     #[test]

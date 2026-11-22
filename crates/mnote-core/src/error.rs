@@ -13,6 +13,12 @@ pub enum VaultError {
     /// A note path that is absolute, leaves the vault (`..`), is hidden, or
     /// isn't a Markdown file.
     InvalidNotePath(PathBuf),
+    /// A file or folder is already at the place a rename, move or new note
+    /// would put one.
+    AlreadyExists(PathBuf),
+    /// A note changed since it was made, so undoing its creation would lose
+    /// text.
+    NotEmpty(PathBuf),
     /// Reading or writing a file failed.
     Io { path: PathBuf, source: io::Error },
     /// The file watcher couldn't start.
@@ -34,6 +40,14 @@ impl fmt::Display for VaultError {
                 "{} isn't a note in this vault. Notes are .md files inside the vault folder.",
                 path.display()
             ),
+            VaultError::AlreadyExists(path) => {
+                write!(f, "{} already exists. Pick another name.", path.display())
+            }
+            VaultError::NotEmpty(path) => write!(
+                f,
+                "{} has text in it now, so it wasn't removed.",
+                path.display()
+            ),
             VaultError::Io { path, source } => write!(f, "{}: {source}", path.display()),
             VaultError::Watch(source) => {
                 write!(f, "Couldn't watch the vault for changes: {source}")
@@ -47,7 +61,10 @@ impl std::error::Error for VaultError {
         match self {
             VaultError::Io { source, .. } => Some(source),
             VaultError::Watch(source) => Some(source),
-            VaultError::NotADirectory(_) | VaultError::InvalidNotePath(_) => None,
+            VaultError::NotADirectory(_)
+            | VaultError::InvalidNotePath(_)
+            | VaultError::AlreadyExists(_)
+            | VaultError::NotEmpty(_) => None,
         }
     }
 }

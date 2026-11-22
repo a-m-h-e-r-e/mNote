@@ -6,8 +6,10 @@
 
 pub mod content;
 mod error;
+pub mod files;
 pub mod frontmatter;
 pub mod index;
+pub mod links;
 mod note_path;
 pub mod text;
 mod vault;
