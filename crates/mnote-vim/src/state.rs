@@ -487,6 +487,12 @@ impl Vim {
                 Motion::Find(find)
             }
             (Pending::G, Key::Char('g')) => Motion::FirstLine,
+            // `gd` follows the link under the cursor: the app does that.
+            (Pending::G, Key::Char('d')) => {
+                self.cancel();
+                self.app_command = Some(crate::ex::AppCommand::FollowLink);
+                return Effect::Handled;
+            }
             (Pending::G, Key::Char(c @ ('u' | 'U'))) => {
                 let op = if c == 'u' {
                     Operator::Lower

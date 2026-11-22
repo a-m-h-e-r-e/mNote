@@ -15,7 +15,7 @@ use std::fs;
 use std::thread;
 use std::time::SystemTime;
 
-pub use outline::Heading;
+pub use outline::{Heading, OutLink};
 pub use search::{HeadingHit, HitField, NoteHit, NoteSearch, StringHit, TagHit};
 
 use crate::error::Result;
@@ -36,6 +36,8 @@ pub struct NoteEntry {
     /// Without `#`, each once.
     pub tags: Vec<String>,
     pub headings: Vec<Heading>,
+    /// Its `[[links]]` to other notes, in order.
+    pub links: Vec<OutLink>,
     /// When the file last changed, if the file system says.
     pub modified: Option<SystemTime>,
 }
@@ -50,6 +52,7 @@ impl NoteEntry {
             aliases: outline.aliases,
             tags: outline.tags,
             headings: outline.headings,
+            links: outline.links,
             modified,
             path,
         }
@@ -62,6 +65,17 @@ impl NoteEntry {
             .rfind('/')
             .map_or(0, |i| self.path_text[..=i].chars().count())
     }
+}
+
+/// A link to a note, from another note.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Backlink {
+    /// The linking note, by position in [`NoteIndex::notes`].
+    pub from: usize,
+    /// 0-based line of the link in it.
+    pub line: usize,
+    /// That line, trimmed.
+    pub context: String,
 }
 
 /// One entry of a folder, as the explorer lists it.
@@ -135,6 +149,71 @@ impl NoteIndex {
 
     pub fn is_empty(&self) -> bool {
         self.notes.is_empty()
+    }
+
+    /// The note a `[[link]]` target names: by path (`projects/ui-design`)
+    /// when it has a `/`, else by file name, then by alias, ignoring case and
+    /// `.md`. Two notes with one name: the one nearest the vault root wins.
+    pub fn resolve(&self, target: &str) -> Option<usize> {
+        let key = crate::links::link_key(target);
+        if key.is_empty() {
+            return None;
+        }
+        if key.contains('/') {
+            return self
+                .notes
+                .iter()
+                .position(|n| crate::links::note_key(&n.path) == key);
+        }
+        let by_name = self
+            .notes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.path.name().to_lowercase() == key)
+            .min_by_key(|(_, n)| (n.path_text.matches('/').count(), n.path_text.len()))
+            .map(|(i, _)| i);
+        by_name.or_else(|| {
+            self.notes
+                .iter()
+                .position(|n| n.aliases.iter().any(|a| a.to_lowercase() == key))
+        })
+    }
+
+    /// Every link to note `note` from the other notes, by note then line.
+    pub fn backlinks(&self, note: usize) -> Vec<Backlink> {
+        let Some(entry) = self.notes.get(note) else {
+            return Vec::new();
+        };
+        // The keys that resolve to this note: its path always, its name and
+        // aliases when no other note takes them.
+        let mut keys = vec![crate::links::note_key(&entry.path)];
+        let names =
+            std::iter::once(entry.path.name()).chain(entry.aliases.iter().map(String::as_str));
+        for name in names {
+            let key = name.to_lowercase();
+            if !keys.contains(&key) && self.resolve(&key) == Some(note) {
+                keys.push(key);
+            }
+        }
+        let mut out = Vec::new();
+        for (from, other) in self.notes.iter().enumerate() {
+            if from == note {
+                continue;
+            }
+            let mut last_line = None;
+            for link in &other.links {
+                // One row per line, however many links it has.
+                if keys.contains(&link.key) && last_line != Some(link.line) {
+                    last_line = Some(link.line);
+                    out.push(Backlink {
+                        from,
+                        line: link.line,
+                        context: link.context.clone(),
+                    });
+                }
+            }
+        }
+        out
     }
 
     pub fn get(&self, path: &NotePath) -> Option<&NoteEntry> {
@@ -475,5 +554,51 @@ mod tests {
         // A change event for a file that's gone (moved) removes it too.
         index.apply(&vault, &VaultEvent::Changed(note("missing.md")));
         assert_eq!(index.len(), 1);
+    }
+
+    #[test]
+    fn links_resolve_by_path_name_and_alias() {
+        let entry = |p: &str, text: &str| NoteEntry::new(note(p), text, None);
+        let index = NoteIndex::from_entries(vec![
+            entry("ui-design.md", "---\naliases: [UI]\n---\n# UI design\n"),
+            entry("old/ui-design.md", ""),
+            entry(
+                "projects/roadmap.md",
+                "phase 2 follows [[ui-design]] here\n[[UI]] and [[ui]] once\n```\n[[ui-design]]\n```\n",
+            ),
+            entry(
+                "journal/2026-11-21.md",
+                "sketched [[old/ui-design]] and [[Roadmap#Phase 2|plan]]\n",
+            ),
+        ]);
+        let pos = |p: &str| index.notes().iter().position(|n| n.path_text == p);
+        assert_eq!(
+            index.resolve("UI-Design.md"),
+            pos("ui-design.md"),
+            "nearest the root"
+        );
+        assert_eq!(index.resolve("old/ui-design"), pos("old/ui-design.md"));
+        assert_eq!(index.resolve("ui"), pos("ui-design.md"), "by alias");
+        assert_eq!(index.resolve("roadmap"), pos("projects/roadmap.md"));
+        assert_eq!(index.resolve("nowhere"), None);
+
+        let ui = pos("ui-design.md").expect("indexed");
+        let back = index.backlinks(ui);
+        assert_eq!(
+            back.len(),
+            2,
+            "one row per line, fenced links skipped: {back:?}"
+        );
+        assert_eq!(back[0].context, "phase 2 follows [[ui-design]] here");
+        assert_eq!(
+            (back[1].from, back[1].line),
+            (pos("projects/roadmap.md").expect("indexed"), 1)
+        );
+        let old = pos("old/ui-design.md").expect("indexed");
+        assert_eq!(
+            index.backlinks(old).len(),
+            1,
+            "only the path link reaches the shadowed note"
+        );
     }
 }

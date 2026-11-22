@@ -37,6 +37,7 @@ use mnote_vim::{Clipboard, Effect, Mode, Vim};
 
 use crate::commands::{COMMANDS, Run};
 use crate::folder_edit::{FolderEditor, FolderOutcome};
+use crate::picker::backlinks::BacklinksPicker;
 use crate::picker::explorer::{Explorer, FileHistory, FileUndo};
 use crate::picker::finder::{CurrentNote, Finder};
 use crate::picker::list::ListPicker;
@@ -119,6 +120,9 @@ pub struct Editor {
     /// Every note in the vault, for the pickers. Built in the background
     /// when the vault opens, then kept current by watcher events and saves.
     index: Rc<RefCell<NoteIndex>>,
+    /// The index has finished its first build: until then a link that
+    /// doesn't resolve may still name a note.
+    index_ready: bool,
     /// The open picker, drawn over the note; it gets every key.
     picker: Option<Picker>,
     /// `space` was pressed in NORMAL mode: the next key is a leader command.
@@ -256,6 +260,7 @@ impl Editor {
             notice: None,
             reply: None,
             index: Rc::default(),
+            index_ready: false,
             picker: None,
             leader: false,
             list: Vec::new(),
@@ -381,9 +386,9 @@ impl Editor {
             .map_or(self.vim.mode(), |w| w.vim.mode())
     }
 
-    /// The key after `space` in NORMAL mode.
     /// The key after `space` in NORMAL mode: `f` finds notes, `/` searches
-    /// text, `@` lists this note's headings, `#` lists tags.
+    /// text, `@` lists this note's headings, `#` lists tags, `b` lists
+    /// backlinks, `e` explores, `x` toggles a task, `m` cycles the view.
     fn leader_key(&mut self, key: mnote_vim::Key, cx: &mut Context<Self>) {
         if key == mnote_vim::Key::Char('e') {
             return self.open_explorer(None, cx);
@@ -394,6 +399,9 @@ impl Editor {
         if key == mnote_vim::Key::Char('m') {
             return self.set_view(self.view.next(), cx);
         }
+        if key == mnote_vim::Key::Char('b') {
+            return self.open_backlinks(cx);
+        }
         let query = match key {
             mnote_vim::Key::Char('f') => "",
             mnote_vim::Key::Char('/') => "/",
@@ -402,6 +410,16 @@ impl Editor {
             _ => return,
         };
         self.open_finder(query, cx);
+    }
+
+    /// `space b`: the notes that link to this one.
+    fn open_backlinks(&mut self, cx: &mut Context<Self>) {
+        let Source::Note { vault, note, .. } = &self.source else {
+            self.reply = Some(("A scratch note has no backlinks".into(), true));
+            return;
+        };
+        let picker = BacklinksPicker::new(&self.index.borrow(), note, vault.clone());
+        self.open_picker(Picker::new(Box::new(picker)), cx);
     }
 
     /// Switches the view and says which it is.
@@ -849,9 +867,10 @@ impl Editor {
                     Err(err) => return Err(err.to_string()),
                 };
                 let insertion = mnote_core::capture::insertion(&text, &title, entry);
-                vault
-                    .write(target, &insertion.apply(&text))
-                    .map_err(|err| err.to_string())?;
+                let text = insertion.apply(&text);
+                vault.write(target, &text).map_err(|err| err.to_string())?;
+                // The watcher skips mNote's own writes: index it here.
+                self.index.borrow_mut().note_saved(target.clone(), &text);
                 line = insertion.line;
             }
         }
@@ -860,6 +879,66 @@ impl Editor {
         }
         cx.notify();
         Ok(())
+    }
+
+    /// `gd`: opens the note the `[[link]]` under the cursor names (or the
+    /// first link after it on the line), at its `#heading` if it has one. A
+    /// link to no note creates it.
+    fn follow_link(&mut self, cx: &mut Context<Self>) {
+        let rope = self.buffer.text();
+        let cursor = self.vim.cursor();
+        let line = line_of(rope, cursor);
+        let text = rope.line(line).to_string();
+        let at = char_to_byte(&text, cursor - line_start(rope, line));
+        let links = mnote_core::links::wikilinks(&text);
+        let link = links
+            .iter()
+            .find(|l| l.range.contains(&at))
+            .or_else(|| links.iter().find(|l| l.range.start >= at));
+        let Some(link) = link.cloned() else {
+            self.reply = Some(("E447: No [[link]] under the cursor".into(), true));
+            return;
+        };
+        let found = {
+            let index = self.index.borrow();
+            index.resolve(&link.target).map(|i| {
+                let entry = &index.notes()[i];
+                let heading = link.heading.as_ref().and_then(|h| {
+                    entry
+                        .headings
+                        .iter()
+                        .find(|x| x.text.eq_ignore_ascii_case(h))
+                        .map(|x| x.line)
+                });
+                (entry.path.clone(), heading.unwrap_or(0))
+            })
+        };
+        if let Some((path, line)) = found {
+            return self.go_to(path, line, cx);
+        }
+        if !self.index_ready {
+            self.reply = Some((
+                "Still reading the vault; try gd again in a moment".into(),
+                true,
+            ));
+            return;
+        }
+        let Some(note) = link.new_note() else {
+            self.reply = Some((
+                format!("E447: Can't make a note from [[{}]]", link.target).into(),
+                true,
+            ));
+            return;
+        };
+        // A file the index missed is opened, never written over.
+        if matches!(&self.source, Source::Note { vault, .. } if vault.path_of(&note).exists()) {
+            return self.switch_to(note, cx);
+        }
+        let created = format!("{note} created");
+        self.picker_action(PickerAction::CreateNote(note.clone()), cx);
+        if matches!(&self.source, Source::Note { note: open, .. } if *open == note) {
+            self.reply = Some((created.into(), false));
+        }
     }
 
     /// Opens `path` (if it isn't open) with the cursor at `line`.
@@ -1003,6 +1082,7 @@ impl Editor {
             if let Ok(index) = task.await {
                 let _ = this.update(cx, |this, cx| {
                     *this.index.borrow_mut() = index;
+                    this.index_ready = true;
                     cx.notify();
                 });
             }
@@ -1043,6 +1123,7 @@ impl Editor {
             AppCommand::Daily => self.not_yet(":daily"),
             AppCommand::ListNext => self.list_step(1, cx),
             AppCommand::ListPrevious => self.list_step(-1, cx),
+            AppCommand::FollowLink => self.follow_link(cx),
             AppCommand::ListOpen => {
                 if self.list.is_empty() {
                     self.reply = Some((

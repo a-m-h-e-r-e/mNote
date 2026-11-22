@@ -98,6 +98,8 @@ pub enum AppCommand {
     ListPrevious,
     /// `:copen`: the results list in a picker.
     ListOpen,
+    /// `gd`: follow the `[[link]]` at the cursor.
+    FollowLink,
 }
 
 /// What a successful command produced.

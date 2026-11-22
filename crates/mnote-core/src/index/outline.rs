@@ -1,5 +1,5 @@
-//! What the index reads from a note's text: its title, its headings and its
-//! tags. A single byte-level pass per note, no Markdown parser: indexing a
+//! What the index reads from a note's text: its title, its headings, its
+//! tags and its outgoing `[[links]]`. A single byte-level pass per note, no Markdown parser: indexing a
 //! whole vault has to stay well under a second.
 
 use crate::frontmatter::Frontmatter;
@@ -15,6 +15,20 @@ pub struct Heading {
     pub line: usize,
 }
 
+/// A `[[link]]` out of a note.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutLink {
+    /// [`crate::links::link_key`] of its target.
+    pub key: String,
+    /// 0-based line number in the note, frontmatter included.
+    pub line: usize,
+    /// The line it's on, trimmed and cut short.
+    pub context: String,
+}
+
+/// Context lines are cut to about this many bytes.
+const CONTEXT_MAX: usize = 200;
+
 /// The parts of a note the index keeps.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Outline {
@@ -24,6 +38,7 @@ pub(crate) struct Outline {
     /// Frontmatter tags, then inline `#tags`, each once, without `#`.
     pub tags: Vec<String>,
     pub aliases: Vec<String>,
+    pub links: Vec<OutLink>,
 }
 
 /// Reads the outline of a note.
@@ -70,8 +85,33 @@ pub(crate) fn outline(text: &str) -> Outline {
             });
         }
         inline_tags(line, &mut out.tags);
+        if line.contains("[[") {
+            let links = crate::links::wikilinks(line);
+            if !links.is_empty() {
+                let context = cut(line.trim(), CONTEXT_MAX);
+                for link in links {
+                    out.links.push(OutLink {
+                        key: link.key(),
+                        line: first_line + i,
+                        context: context.clone(),
+                    });
+                }
+            }
+        }
     }
     out
+}
+
+/// `text` cut to at most `max` bytes on a character boundary, with `…`.
+fn cut(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
 }
 
 /// "```" or "~~~" (three or more) at the start of `line`.

@@ -7,6 +7,7 @@
 //! follow it. Labels (`|…`) and headings (`#…`) are kept.
 
 use std::collections::HashMap;
+use std::ops::Range;
 
 use crate::note_path::NotePath;
 use crate::vault::Vault;
@@ -67,6 +68,78 @@ fn split_ext(target: &str) -> (&str, &str) {
         }
     }
     (target, "")
+}
+
+/// A `[[wikilink]]` in a line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WikiLink {
+    /// Bytes of the whole `[[…]]` in the line.
+    pub range: Range<usize>,
+    /// The note it names, as written (`ui-design`, `projects/ui-design.md`).
+    pub target: String,
+    /// After `#`, if any.
+    pub heading: Option<String>,
+    /// After `|`, if any.
+    pub label: Option<String>,
+}
+
+impl WikiLink {
+    /// The lowercase name or path a link names, without `.md`: what
+    /// [`crate::NoteIndex::resolve`] compares.
+    pub fn key(&self) -> String {
+        link_key(&self.target)
+    }
+
+    /// The note to create when the link names none: its path with `.md`.
+    pub fn new_note(&self) -> Option<NotePath> {
+        let (bare, _) = split_ext(self.target.trim());
+        if bare.is_empty() {
+            return None;
+        }
+        NotePath::new(format!("{bare}.md")).ok()
+    }
+}
+
+/// The comparable form of a link target: lowercase, without `.md`.
+pub fn link_key(target: &str) -> String {
+    split_ext(target.trim()).0.to_lowercase()
+}
+
+/// The comparable form of a note's path for links: lowercase, without `.md`.
+pub fn note_key(note: &NotePath) -> String {
+    link_path(note).to_lowercase()
+}
+
+/// Every `[[wikilink]]` in one line, in order. An empty `[[]]` isn't one.
+pub fn wikilinks(line: &str) -> Vec<WikiLink> {
+    let mut links = Vec::new();
+    let mut from = 0;
+    while let Some(open) = line[from..].find("[[").map(|i| from + i) {
+        let inner_start = open + 2;
+        let Some(close) = line[inner_start..].find("]]").map(|i| inner_start + i) else {
+            break;
+        };
+        let inner = &line[inner_start..close];
+        let (rest, label) = match inner.split_once('|') {
+            Some((rest, label)) => (rest, Some(label.trim().to_owned())),
+            None => (inner, None),
+        };
+        let (target, heading) = match rest.split_once('#') {
+            Some((target, heading)) => (target, Some(heading.trim().to_owned())),
+            None => (rest, None),
+        };
+        let target = target.trim();
+        if !target.is_empty() {
+            links.push(WikiLink {
+                range: open..close + 2,
+                target: target.to_owned(),
+                heading,
+                label,
+            });
+        }
+        from = close + 2;
+    }
+    links
 }
 
 /// Rewrites the wikilinks in `text` that point at a moved note. Returns the
@@ -186,6 +259,23 @@ pub fn relink_vault(vault: &Vault, notes: &[NotePath], moves: &[LinkMove]) -> Ve
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn finds_links_with_headings_and_labels() {
+        let links =
+            wikilinks("see [[UI-design#Modals|the modal]] and [[notes/gpui.md]] [[]] [[open");
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].range, 4..34);
+        assert_eq!(links[0].key(), "ui-design");
+        assert_eq!(links[0].heading.as_deref(), Some("Modals"));
+        assert_eq!(links[0].label.as_deref(), Some("the modal"));
+        assert_eq!(links[1].key(), "notes/gpui");
+        assert_eq!(
+            links[1].new_note().map(|n| n.to_string()),
+            Some("notes/gpui.md".into())
+        );
+    }
+
     use super::*;
 
     fn mv(from: &str, to: &str) -> LinkMove {

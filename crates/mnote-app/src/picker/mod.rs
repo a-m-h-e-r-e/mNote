@@ -7,6 +7,7 @@
 //! own: the window that opens it routes keys here and draws [`Picker::render`]
 //! on top of itself.
 
+pub mod backlinks;
 pub mod explorer;
 pub mod finder;
 pub mod list;

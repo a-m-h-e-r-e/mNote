@@ -1046,6 +1046,20 @@ mod tests {
     }
 
     #[test]
+    fn gd_asks_the_app_to_follow_a_link() {
+        let (mut vim, mut buf) = setup("see [[ui-design]]\n");
+        type_keys(&mut vim, &mut buf, "wwgd");
+        assert_eq!(vim.take_app_command(), Some(AppCommand::FollowLink));
+        assert_eq!(vim.mode(), crate::Mode::Normal);
+        type_keys(&mut vim, &mut buf, "dgd");
+        assert_eq!(
+            buf.to_string(),
+            "see [[ui-design]]\n",
+            "d then gd deletes nothing"
+        );
+    }
+
+    #[test]
     fn visual_colon_starts_with_the_selection_range() {
         let (mut vim, mut buf) = setup("b\na\nc\n");
         type_keys(&mut vim, &mut buf, "Vj:");

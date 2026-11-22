@@ -99,6 +99,20 @@ pub const COMMANDS: &[Command] = &[
         Run::Finder("#"),
     ),
     cmd(
+        "Show backlinks",
+        Some("space b"),
+        None,
+        "Every line in other notes that links here; ⏎ opens one at the link.",
+        Run::Keys(" b"),
+    ),
+    cmd(
+        "Follow link",
+        Some("gd"),
+        None,
+        "Opens the [[link]] under the cursor, at its #heading; a missing note is created.",
+        Run::Keys("gd"),
+    ),
+    cmd(
         "Toggle task",
         Some("space x"),
         None,
