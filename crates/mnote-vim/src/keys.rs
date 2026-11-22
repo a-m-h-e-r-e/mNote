@@ -17,6 +17,10 @@ pub enum Key {
     Down,
     Left,
     Right,
+    Home,
+    End,
+    PageUp,
+    PageDown,
 }
 
 /// Writes keys back in Vim notation (`<Esc>`, `<C-r>`, `jk`).
@@ -35,6 +39,10 @@ pub fn key_notation(keys: &[Key]) -> String {
             Key::Down => "<Down>".to_owned(),
             Key::Left => "<Left>".to_owned(),
             Key::Right => "<Right>".to_owned(),
+            Key::Home => "<Home>".to_owned(),
+            Key::End => "<End>".to_owned(),
+            Key::PageUp => "<PageUp>".to_owned(),
+            Key::PageDown => "<PageDown>".to_owned(),
         })
         .collect()
 }
@@ -71,6 +79,10 @@ fn named_key(name: &str) -> Option<Key> {
         "down" => Key::Down,
         "left" => Key::Left,
         "right" => Key::Right,
+        "home" => Key::Home,
+        "end" => Key::End,
+        "pageup" => Key::PageUp,
+        "pagedown" => Key::PageDown,
         "lt" => Key::Char('<'),
         _ => {
             let ch = lower.strip_prefix("c-")?;

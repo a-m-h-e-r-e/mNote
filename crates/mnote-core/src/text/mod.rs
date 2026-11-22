@@ -394,6 +394,39 @@ fn common_ends(rope: &Rope, text: &str) -> (usize, usize) {
     (prefix, suffix)
 }
 
+/// How many words `text` holds: runs of letters and digits (with `'`, `-`
+/// and `_` inside them), so Markdown markers like `##` or `-` don't count.
+/// Linear in the text; call it off the UI thread on big notes.
+pub fn count_words(text: &Rope) -> usize {
+    let mut words = 0;
+    let mut in_word = false;
+    for c in text.chars() {
+        if c.is_alphanumeric() {
+            if !in_word {
+                words += 1;
+                in_word = true;
+            }
+        } else if !(in_word && matches!(c, '\'' | '’' | '-' | '_')) {
+            in_word = false;
+        }
+    }
+    words
+}
+
+#[cfg(test)]
+mod word_tests {
+    use super::*;
+
+    #[test]
+    fn words_skip_markers_and_keep_joined_words_whole() {
+        let count = |s: &str| count_words(&Rope::from_str(s));
+        assert_eq!(count(""), 0);
+        assert_eq!(count("## Plan\n- don't over-think it_now\n"), 4);
+        assert_eq!(count("[[ui-design]] 2026-11-22 · ok"), 3);
+        assert_eq!(count("日本 語"), 2);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

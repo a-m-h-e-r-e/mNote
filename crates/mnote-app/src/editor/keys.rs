@@ -8,7 +8,12 @@ use mnote_vim::Key;
 pub fn vim_key(keystroke: &Keystroke) -> Option<Key> {
     let m = &keystroke.modifiers;
     if m.platform {
-        return None;
+        // ⌘← and ⌘→ go to the line's start and end, as everywhere on macOS.
+        return match keystroke.key.as_str() {
+            "left" => Some(Key::Home),
+            "right" => Some(Key::End),
+            _ => None,
+        };
     }
     match keystroke.key.as_str() {
         "escape" => return Some(Key::Esc),
@@ -20,6 +25,10 @@ pub fn vim_key(keystroke: &Keystroke) -> Option<Key> {
         "down" => return Some(Key::Down),
         "left" => return Some(Key::Left),
         "right" => return Some(Key::Right),
+        "home" => return Some(Key::Home),
+        "end" => return Some(Key::End),
+        "pageup" => return Some(Key::PageUp),
+        "pagedown" => return Some(Key::PageDown),
         "space" if !m.control => return Some(Key::Char(' ')),
         _ => {}
     }
@@ -98,5 +107,19 @@ mod tests {
         };
         assert_eq!(vim_key(&ks("tab", None, shift)), Some(Key::BackTab));
         assert_eq!(vim_key(&ks("f1", None, Modifiers::default())), None);
+    }
+
+    #[test]
+    fn home_end_pages_and_command_arrows() {
+        let none = Modifiers::default();
+        let cmd = Modifiers {
+            platform: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(vim_key(&ks("home", None, none)), Some(Key::Home));
+        assert_eq!(vim_key(&ks("pagedown", None, none)), Some(Key::PageDown));
+        assert_eq!(vim_key(&ks("left", None, cmd)), Some(Key::Home));
+        assert_eq!(vim_key(&ks("right", None, cmd)), Some(Key::End));
+        assert_eq!(vim_key(&ks("k", None, cmd)), None, "⌘K stays the app's");
     }
 }

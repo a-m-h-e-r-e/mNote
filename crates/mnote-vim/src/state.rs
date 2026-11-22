@@ -133,6 +133,9 @@ pub struct Vim {
     /// Insert-mode mappings (`:imap`): keys typed, keys they become. `jk`
     /// to `<Esc>` is there by default.
     pub(crate) imaps: Vec<(Vec<Key>, Vec<Key>)>,
+    /// Lines in a page, for Page Up/Down and `⌃f` `⌃b` `⌃d` `⌃u` (the app
+    /// sets it from the window).
+    page: usize,
     /// Keys typed in insert mode that start a mapping; they're already in
     /// the text and come out again if the mapping completes.
     imap_pending: Vec<Key>,
@@ -191,6 +194,7 @@ impl Default for Vim {
             search_highlight: false,
             last_substitute: None,
             anchors: crate::anchors::Anchors::default(),
+            page: 20,
             imaps: vec![(vec![Key::Char('j'), Key::Char('k')], vec![Key::Esc])],
             imap_pending: Vec::new(),
             in_mapping: false,
@@ -406,11 +410,60 @@ impl Vim {
                     }
                 }
             }
-            Key::Ctrl(_) | Key::BackTab | Key::Up | Key::Down | Key::Left | Key::Right => {
+            Key::Left
+            | Key::Right
+            | Key::Up
+            | Key::Down
+            | Key::Home
+            | Key::End
+            | Key::PageUp
+            | Key::PageDown => self.insert_move(key, buf),
+            Key::Ctrl(_) | Key::BackTab => {
                 return Effect::Unhandled(key);
             }
         }
         Effect::Handled
+    }
+
+    /// An arrow, Home/End or Page key while inserting: the cursor moves and
+    /// the insert goes on as a new undo step (as in Vim, it can't be
+    /// repeated with `.` or a count after that).
+    fn insert_move(&mut self, key: Key, buf: &mut Buffer) {
+        let text = buf.text();
+        let line = line_of(text, self.cursor);
+        let start = line_start(text, line);
+        let column = self.cursor - start;
+        let to_line = |line: usize| {
+            let start = line_start(text, line);
+            start + column.min(line_len(text, line))
+        };
+        let last = crate::text::line_count(text).saturating_sub(1);
+        let to = match key {
+            Key::Left => self.cursor.max(start + 1) - 1,
+            Key::Right => (self.cursor + 1).min(start + line_len(text, line)),
+            Key::Up => to_line(line.saturating_sub(1)),
+            Key::Down => to_line((line + 1).min(last)),
+            Key::PageUp => to_line(line.saturating_sub(self.page.max(1))),
+            Key::PageDown => to_line((line + self.page.max(1)).min(last)),
+            Key::Home => start,
+            Key::End => start + line_len(text, line),
+            _ => self.cursor,
+        };
+        if to == self.cursor {
+            return;
+        }
+        buf.end_change(self.cursor);
+        self.cursor = to;
+        buf.begin_change(self.cursor);
+        if let Some(session) = &mut self.insert {
+            session.broken = true;
+        }
+    }
+
+    /// Sets how many lines Page Up/Down and `⌃f` `⌃b` move (`⌃d` `⌃u` move
+    /// half).
+    pub fn set_page_lines(&mut self, lines: usize) {
+        self.page = lines.max(1);
     }
 
     fn typed(&mut self, buf: &mut Buffer, s: &str) {
@@ -525,11 +578,26 @@ impl Vim {
     fn normal_start(&mut self, key: Key, buf: &mut Buffer) -> Effect {
         let c = match key {
             Key::Char(c) => c,
-            // Arrows move like `h` `j` `k` `l`.
+            // Arrows move like `h` `j` `k` `l`, Home and End like `0` `$`.
             Key::Left => 'h',
             Key::Down => 'j',
             Key::Up => 'k',
             Key::Right => 'l',
+            Key::Home => '0',
+            Key::End => '$',
+            // A page (or half) down or up: `j` / `k` that many times.
+            Key::PageDown | Key::PageUp | Key::Ctrl('f' | 'b' | 'd' | 'u')
+                if self.count.is_none() =>
+            {
+                let half = matches!(key, Key::Ctrl('d' | 'u'));
+                let lines = if half { self.page / 2 } else { self.page };
+                self.count = Some(lines.max(1));
+                if matches!(key, Key::PageDown | Key::Ctrl('f' | 'd')) {
+                    'j'
+                } else {
+                    'k'
+                }
+            }
             Key::Esc => {
                 let was_visual = self.mode.is_visual();
                 self.cancel();

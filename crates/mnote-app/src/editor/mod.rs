@@ -58,6 +58,8 @@ type CodeLines = Vec<Vec<(std::ops::Range<usize>, CodeStyle)>>;
 
 /// Width left for the macOS traffic-light buttons in the top bar.
 const TRAFFIC_LIGHT_INSET: f32 = 76.;
+/// How long typing pauses before the word count catches up.
+const WORD_COUNT_DELAY: Duration = Duration::from_millis(400);
 /// Half a blink cycle of the insert-mode bar caret (about 1 Hz).
 const BLINK: Duration = Duration::from_millis(530);
 
@@ -159,6 +161,11 @@ pub struct Editor {
     pane_key: bool,
     /// The notes folder, whatever the focused pane shows.
     vault: Option<Vault>,
+    /// The focused note's word count, for the status line: its document and
+    /// text revision when counted, and the count.
+    words: Option<(DocKey, u64, usize)>,
+    /// The next word count, waiting for typing to pause.
+    words_task: Option<Task<()>>,
     /// The first-run screen, until a notes folder is chosen.
     first_run: Option<first_run::FirstRun>,
     /// The settings in use, and where they're kept.
@@ -319,6 +326,8 @@ impl Editor {
             pane_key: false,
             vault: None,
             first_run: None,
+            words: None,
+            words_task: None,
             config: Config::default(),
             config_path: Config::path(),
             _watcher: None,
@@ -1268,6 +1277,42 @@ impl Editor {
         crate::theme::Theme::set_choice(config.theme, cx);
         self.config = config;
         cx.notify();
+    }
+
+    /// Counts the focused note's words in the background, at most once per
+    /// pause in typing, never on the keystroke path.
+    fn count_words_soon(&mut self, cx: &mut Context<Self>) {
+        let key = self.source.doc_key();
+        let revision = self.buffer.revision();
+        let current = self
+            .words
+            .as_ref()
+            .is_some_and(|(k, r, _)| *k == key && *r == revision);
+        if current || self.words_task.is_some() {
+            return;
+        }
+        self.words_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(WORD_COUNT_DELAY).await;
+            // The text as it is now, after the pause.
+            let Ok((key, revision, text)) = this.update(cx, |this, _| {
+                (
+                    this.source.doc_key(),
+                    this.buffer.revision(),
+                    this.buffer.text().clone(),
+                )
+            }) else {
+                return;
+            };
+            let words = cx
+                .background_executor()
+                .spawn(async move { mnote_core::text::count_words(&text) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.words = Some((key, revision, words));
+                this.words_task = None;
+                cx.notify();
+            });
+        }));
     }
 
     /// Shows the first-run screen (no config.toml yet, no folder given):
@@ -2580,6 +2625,11 @@ impl Render for Editor {
         }
         self.tree = self.buffer.syntax_tree().cloned();
         self.refresh_parked_trees();
+        self.count_words_soon(cx);
+        // A page for Page Up/Down and ⌃f ⌃b: the lines that fit the window.
+        let text_h = window.viewport_size().height / px(1.) - 4. * size::BAR_H;
+        let page = (text_h / (text::NOTE_BODY.line_height().max(px(1.)) / px(1.))).floor();
+        self.vim.set_page_lines(page.max(1.) as usize);
         let p = cx.theme().palette;
         let width = window.viewport_size().width / px(1.);
         let caret_on = self.caret_on;
@@ -2612,7 +2662,19 @@ impl Render for Editor {
         for file in self.other_pane_files() {
             status = status.item(format!("│ {file}"));
         }
+        let words = self
+            .words
+            .as_ref()
+            .filter(|(key, _, _)| *key == self.source.doc_key())
+            .map(|(_, _, words)| *words);
         let status = status
+            .when_some(words, |status, words| {
+                status.right(if words == 1 {
+                    "1 word".to_owned()
+                } else {
+                    format!("{words} words")
+                })
+            })
             .right(format!("{} lines", line_count(rope)))
             .right(format!("{}:{}", line + 1, column + 1));
 

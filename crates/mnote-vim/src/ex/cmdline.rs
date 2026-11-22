@@ -321,8 +321,8 @@ impl Vim {
             }
             Key::Left => line.cursor = line.prev_char().unwrap_or(0),
             Key::Right => line.cursor = line.next_char().unwrap_or(line.cursor),
-            Key::Ctrl('b') => line.cursor = 0,
-            Key::Ctrl('e') => line.cursor = line.text.len(),
+            Key::Ctrl('b') | Key::Home => line.cursor = 0,
+            Key::Ctrl('e') | Key::End => line.cursor = line.text.len(),
             Key::Ctrl('r') => line.register_pending = true,
             Key::Tab if line.kind == CommandKind::Ex => return self.complete(line, buf),
             Key::Char(c) => line.insert(c.encode_utf8(&mut [0; 4])),
@@ -1403,6 +1403,39 @@ mod editing_tests {
 mod mapping_tests {
     use crate::Mode;
     use crate::harness::{check, run};
+
+    #[test]
+    fn arrows_home_end_and_pages() {
+        // NORMAL: Home and End are `0` and `$`; arrows are h j k l.
+        check("ab|cd\nef", "<home>", "|abcd\nef");
+        check("ab|cd\nef", "<end>", "abc|d\nef");
+        check("ab|cd\nef", "<down>", "abcd\ne|f");
+        // INSERT: the cursor moves and typing goes on there.
+        check("ab|cd", "i<home>X<end>Y<esc>", "Xabcd|Y");
+        check("ab\nc|d", "i<up>X<esc>", "a|Xb\ncd");
+        check("abc|", "i<left><left>X<esc>", "a|Xbc");
+        // The move starts a new undo step: `u` takes back only the last part.
+        check("|", "iab<left>X<esc>u", "a|b");
+    }
+
+    #[test]
+    fn pages_move_by_the_window_height() {
+        let text: String = (0..60).map(|i| format!("{i}\n")).collect();
+        let mut buf = mnote_core::Buffer::new(&text);
+        let mut vim = crate::Vim::new();
+        vim.set_page_lines(20);
+        let line = |vim: &crate::Vim, buf: &mnote_core::Buffer| {
+            crate::text::line_of(buf.text(), vim.cursor())
+        };
+        for key in crate::parse_keys("<pagedown>") {
+            vim.handle_key(key, &mut buf);
+        }
+        assert_eq!(line(&vim, &buf), 20);
+        for key in crate::parse_keys("<c-u>") {
+            vim.handle_key(key, &mut buf);
+        }
+        assert_eq!(line(&vim, &buf), 10);
+    }
 
     #[test]
     fn jk_leaves_insert_mode_by_default() {
