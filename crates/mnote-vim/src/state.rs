@@ -130,6 +130,14 @@ pub struct Vim {
     /// Line anchors `:g` and `:normal` walk; edits keep them on their lines,
     /// and a deleted line's anchor becomes `None`.
     pub(crate) anchors: crate::anchors::Anchors,
+    /// Insert-mode mappings (`:imap`): keys typed, keys they become. `jk`
+    /// to `<Esc>` is there by default.
+    pub(crate) imaps: Vec<(Vec<Key>, Vec<Key>)>,
+    /// Keys typed in insert mode that start a mapping; they're already in
+    /// the text and come out again if the mapping completes.
+    imap_pending: Vec<Key>,
+    /// Feeding a mapping's keys: they aren't mapped again.
+    in_mapping: bool,
     /// The last search compiled, for `n`, `N` and highlighting.
     pub(crate) search_pattern: Option<crate::ex::pattern::Pattern>,
     /// Direction of the last `/` (true) or `?` search.
@@ -183,6 +191,9 @@ impl Default for Vim {
             search_highlight: false,
             last_substitute: None,
             anchors: crate::anchors::Anchors::default(),
+            imaps: vec![(vec![Key::Char('j'), Key::Char('k')], vec![Key::Esc])],
+            imap_pending: Vec::new(),
+            in_mapping: false,
             search_pattern: None,
             search_forward: true,
             cmdline: None,
@@ -298,7 +309,7 @@ impl Vim {
             return Effect::Handled;
         }
         match self.mode {
-            Mode::Insert => self.insert_key(key, buf),
+            Mode::Insert => self.insert_mapped(key, buf),
             Mode::Command => {
                 self.command_key(key, buf);
                 Effect::Handled
@@ -312,6 +323,49 @@ impl Vim {
     }
 
     // ---- insert mode ------------------------------------------------------
+
+    /// An insert-mode key, through the `:imap` mappings. A key that may
+    /// start a mapping is typed as usual; when the mapping completes, those
+    /// keys come out again and the mapping's keys run instead (so `jk`
+    /// leaves insert mode with no `j` left behind).
+    fn insert_mapped(&mut self, key: Key, buf: &mut Buffer) -> Effect {
+        if self.in_mapping || self.imaps.is_empty() {
+            return self.insert_key(key, buf);
+        }
+        let mut typed = std::mem::take(&mut self.imap_pending);
+        typed.push(key);
+        if let Some(rhs) = self
+            .imaps
+            .iter()
+            .find(|(lhs, _)| *lhs == typed)
+            .map(|(_, rhs)| rhs.clone())
+        {
+            for _ in 1..typed.len() {
+                self.insert_key(Key::Backspace, buf);
+            }
+            self.in_mapping = true;
+            let mut effect = Effect::Handled;
+            for key in rhs {
+                effect = self.handle_key(key, buf);
+            }
+            self.in_mapping = false;
+            return effect;
+        }
+        let prefix = |keys: &[Key]| {
+            self.imaps
+                .iter()
+                .any(|(lhs, _)| lhs.len() > keys.len() && lhs.starts_with(keys))
+        };
+        if matches!(key, Key::Char(_)) && prefix(&typed) {
+            self.imap_pending = typed;
+            return self.insert_key(key, buf);
+        }
+        if typed.len() > 1 {
+            // The earlier keys didn't become a mapping; this one may start one.
+            return self.insert_mapped(key, buf);
+        }
+        self.insert_key(key, buf)
+    }
 
     fn insert_key(&mut self, key: Key, buf: &mut Buffer) -> Effect {
         match key {
@@ -1103,6 +1157,7 @@ impl Vim {
     }
 
     pub(crate) fn enter(&mut self, mode: Mode, text: &Rope) {
+        self.imap_pending.clear();
         if mode.is_visual() && !self.mode.is_visual() {
             self.anchor = self.cursor;
         }

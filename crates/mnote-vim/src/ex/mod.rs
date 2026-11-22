@@ -20,7 +20,7 @@ use ropey::Rope;
 
 use crate::Mode;
 use crate::anchors::Anchors;
-use crate::keys::parse_keys;
+use crate::keys::{key_notation, parse_keys};
 use crate::registers::Register;
 use crate::state::{Operator, Vim, line_range};
 use crate::text::{
@@ -412,6 +412,41 @@ impl Vim {
             "view" => Ok(ExOutcome::app(AppCommand::View(arg()))),
             "explore" => Ok(ExOutcome::app(AppCommand::Explore(arg()))),
             "find" => Ok(ExOutcome::app(AppCommand::Find(arg()))),
+            "imap" | "inoremap" => {
+                if args.is_empty() {
+                    let list: Vec<String> = self
+                        .imaps
+                        .iter()
+                        .map(|(lhs, rhs)| {
+                            format!("i  {:<8} {}", key_notation(lhs), key_notation(rhs))
+                        })
+                        .collect();
+                    return Ok(ExOutcome::message(if list.is_empty() {
+                        "No mapping found".to_owned()
+                    } else {
+                        list.join("\n")
+                    }));
+                }
+                let (lhs, rhs) = args
+                    .split_once(char::is_whitespace)
+                    .ok_or_else(|| ExError::new(474, "Invalid argument"))?;
+                let (lhs, rhs) = (parse_keys(lhs), parse_keys(rhs.trim()));
+                if lhs.is_empty() || rhs.is_empty() {
+                    return Err(ExError::new(474, "Invalid argument"));
+                }
+                self.imaps.retain(|(l, _)| *l != lhs);
+                self.imaps.push((lhs, rhs));
+                Ok(ExOutcome::default())
+            }
+            "iunmap" => {
+                let lhs = parse_keys(args);
+                let before = self.imaps.len();
+                self.imaps.retain(|(l, _)| *l != lhs);
+                if self.imaps.len() == before {
+                    return Err(ExError::new(31, "No such mapping"));
+                }
+                Ok(ExOutcome::default())
+            }
             "cnext" | "cprevious" | "cNext" | "copen" => {
                 no_args(args)?;
                 Ok(ExOutcome::app(match cmd.name {

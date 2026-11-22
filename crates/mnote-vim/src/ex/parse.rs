@@ -50,6 +50,9 @@ pub struct Parsed<'a> {
 /// matters where abbreviations overlap: the first match wins.
 const COMMANDS: &[(&str, usize)] = &[
     ("substitute", 1),
+    ("imap", 2),
+    ("inoremap", 3),
+    ("iunmap", 3),
     ("cnext", 2),
     ("cNext", 2),
     ("cprevious", 2),

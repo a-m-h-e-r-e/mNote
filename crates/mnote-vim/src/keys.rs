@@ -19,6 +19,26 @@ pub enum Key {
     Right,
 }
 
+/// Writes keys back in Vim notation (`<Esc>`, `<C-r>`, `jk`).
+pub fn key_notation(keys: &[Key]) -> String {
+    keys.iter()
+        .map(|key| match key {
+            Key::Char('<') => "<lt>".to_owned(),
+            Key::Char(c) => c.to_string(),
+            Key::Ctrl(c) => format!("<C-{c}>"),
+            Key::Esc => "<Esc>".to_owned(),
+            Key::Enter => "<CR>".to_owned(),
+            Key::Backspace => "<BS>".to_owned(),
+            Key::Tab => "<Tab>".to_owned(),
+            Key::BackTab => "<S-Tab>".to_owned(),
+            Key::Up => "<Up>".to_owned(),
+            Key::Down => "<Down>".to_owned(),
+            Key::Left => "<Left>".to_owned(),
+            Key::Right => "<Right>".to_owned(),
+        })
+        .collect()
+}
+
 /// Parses Vim-style key notation, for tests and key-binding tables:
 /// `"d2w"`, `"ihello<esc>"`, `"<c-r>"`, `"<cr>"`, `"<bs>"`, `"<tab>"`, `"<lt>"`.
 pub fn parse_keys(notation: &str) -> Vec<Key> {

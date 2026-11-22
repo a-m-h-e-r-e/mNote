@@ -1384,3 +1384,32 @@ mod editing_tests {
         assert_eq!(line(&vim).0, "x", "search lines don't complete");
     }
 }
+
+#[cfg(test)]
+mod mapping_tests {
+    use crate::Mode;
+    use crate::harness::{check, run};
+
+    #[test]
+    fn jk_leaves_insert_mode_by_default() {
+        check("|", "ihellojk", "hell|o");
+        check("|", "ijx<esc>", "j|x");
+        check("|", "ijjk", "|j");
+        let (_, vim, _) = run("|", "iajk");
+        assert_eq!(vim.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn imap_iunmap_and_listing() {
+        let (text, vim, _) = run("|", ":iunmap jk<cr>ijk<esc>");
+        assert_eq!(text, "j|k", "without the mapping jk is text");
+        assert_eq!(vim.mode(), Mode::Normal);
+        // `<lt>` types a literal `<` into the command line.
+        let (text, _, _) = run("|", ":imap kj <lt>Esc><cr>ihikj");
+        assert_eq!(text, "h|i");
+        let (_, mut vim, mut buf) = run("|", "");
+        let outcome = vim.execute("imap", &mut buf).expect("lists");
+        assert_eq!(outcome.message.as_deref(), Some("i  jk       <Esc>"));
+        assert!(vim.execute("iunmap zz", &mut buf).is_err());
+    }
+}

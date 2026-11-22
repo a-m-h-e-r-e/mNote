@@ -201,9 +201,10 @@ mod tests {
         assert_eq!(run(&mut input, "gpu"), [InputAction::Edited; 3]);
         assert_eq!(input.text(), "gpu");
         assert_eq!(input.cursor(), 3);
-        // j and k are letters while inserting.
-        run(&mut input, "jk");
-        assert_eq!(input.text(), "gpujk");
+        // j and k are letters while inserting (`jk` together is the
+        // default mapping to <Esc>).
+        run(&mut input, "kj");
+        assert_eq!(input.text(), "gpukj");
     }
 
     #[test]

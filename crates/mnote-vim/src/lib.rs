@@ -23,7 +23,7 @@ mod textobj;
 use std::fmt;
 
 pub use input::{InputAction, VimInput};
-pub use keys::{Key, parse_keys};
+pub use keys::{Key, key_notation, parse_keys};
 pub use motion::{Find, Motion, MotionKind, Target};
 pub use registers::{Clipboard, MemoryClipboard, Register};
 pub use state::{Effect, Operator, Vim};
