@@ -13,6 +13,11 @@ use gpui::{
     App, Application, Bounds, SharedString, TitlebarOptions, WindowBounds, WindowOptions, point,
     prelude::*, px, size,
 };
+#[cfg(target_os = "macos")]
+use std::rc::Rc;
+
+#[cfg(target_os = "macos")]
+use mnote_app::capture::{CaptureEvent, PANEL_H, QuickCapture};
 use mnote_app::editor::Editor;
 use mnote_app::theme::Theme;
 use mnote_core::{NotePath, Vault};
@@ -84,36 +89,166 @@ fn main() {
                 return;
             }
         };
-        summon_setup(window.into(), cx);
+        summon_setup(window, cx);
         cx.activate(true);
     });
 }
 
-/// `⌥M` from any app shows mNote where you are, on any Space. It only ever
-/// brings mNote forward; `esc` in NORMAL hides it.
+/// `⌥N` from any app shows mNote where you are, on any Space; it only ever
+/// brings mNote forward, and `esc` in NORMAL hides it. `⌥M` opens quick
+/// capture over whatever app is in front (AMI-174).
 #[cfg(target_os = "macos")]
-fn summon_setup(window: gpui::AnyWindowHandle, cx: &mut App) {
-    use mnote_app::summon;
+fn summon_setup(window: gpui::WindowHandle<Editor>, cx: &mut App) {
+    use mnote_app::summon::{self, Hotkey};
+
     let _ = window.update(cx, |_, window, _| summon::join_all_spaces(window));
-    let presses = match summon::register_hotkey() {
-        Ok(presses) => presses,
+    let presses = match summon::register_hotkeys() {
+        Ok((presses, failed)) => {
+            for err in failed {
+                eprintln!("mnote: {err}");
+            }
+            presses
+        }
         Err(err) => {
-            eprintln!("mnote: no summon key: {err}");
+            eprintln!("mnote: no global keys: {err}");
             return;
         }
     };
+    let capture: CaptureSlot = Rc::default();
     cx.spawn(async move |cx| {
-        while presses.recv().await.is_ok() {
+        while let Ok(key) = presses.recv().await {
+            let capture = capture.clone();
             let _ = cx.update(|cx| {
-                let _ = window.update(cx, |_, window, cx| {
-                    cx.activate(true);
-                    window.activate_window();
-                });
+                // An open capture panel takes the key back.
+                if let Some(open) = *capture.borrow()
+                    && open.update(cx, |_, w, _| w.activate_window()).is_ok()
+                {
+                    return;
+                }
+                match key {
+                    Hotkey::Capture => {
+                        let front = window
+                            .update(cx, |_, w, _| w.is_window_active())
+                            .unwrap_or(false);
+                        open_capture(window, front, capture.clone(), cx);
+                    }
+                    Hotkey::Summon => {
+                        let _ = window.update(cx, |_, window, cx| {
+                            cx.activate(true);
+                            window.activate_window();
+                        });
+                    }
+                }
             });
         }
     })
     .detach();
 }
 
+/// The quick capture panel, while it's open.
+#[cfg(target_os = "macos")]
+type CaptureSlot = Rc<std::cell::RefCell<Option<gpui::WindowHandle<QuickCapture>>>>;
+
+/// Opens the capture panel over the app in front. If mNote wasn't in front,
+/// its window stays out of sight so the panel shows alone, and closing the
+/// panel goes back to that app.
+#[cfg(target_os = "macos")]
+fn open_capture(
+    main: gpui::WindowHandle<Editor>,
+    was_front: bool,
+    slot: CaptureSlot,
+    cx: &mut App,
+) {
+    use mnote_app::summon;
+    let Some(index) = main
+        .update(cx, |editor, _, _| editor.capture_index())
+        .ok()
+        .flatten()
+    else {
+        // A scratch note has no vault to capture into: stay in the window.
+        return;
+    };
+    if !was_front {
+        let _ = main.update(cx, |_, window, _| summon::order_out(window));
+    }
+    let (year, month, day) = summon::today();
+    let target = mnote_core::capture::daily_note(year, month, day);
+
+    let panel = size(px(mnote_app::theme::size::CAPTURE_W), px(PANEL_H));
+    let mut bounds = Bounds::centered(None, panel, cx);
+    if let Some(display) = cx.primary_display() {
+        let screen = display.bounds();
+        bounds.origin.y = screen.origin.y + screen.size.height * 0.22;
+    }
+    let close_slot = slot.clone();
+    let opened = cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: None,
+            kind: gpui::WindowKind::PopUp,
+            is_movable: false,
+            is_resizable: false,
+            is_minimizable: false,
+            window_background: gpui::WindowBackgroundAppearance::Transparent,
+            ..Default::default()
+        },
+        move |window, cx| {
+            let view = cx.new(|cx| QuickCapture::new(target, index, cx));
+            window.focus(&gpui::Focusable::focus_handle(&view, cx));
+            cx.subscribe(&view, move |view, event: &CaptureEvent, cx| {
+                let close = |cx: &mut App| {
+                    if let Some(panel) = close_slot.borrow_mut().take() {
+                        let _ = panel.update(cx, |_, w, _| w.remove_window());
+                    }
+                };
+                match event {
+                    CaptureEvent::Discard => {
+                        close(cx);
+                        leave(main, was_front, false, cx);
+                    }
+                    CaptureEvent::Append {
+                        entry,
+                        target,
+                        open,
+                    } => {
+                        let saved = main
+                            .update(cx, |editor, _, cx| editor.capture(entry, target, *open, cx))
+                            .unwrap_or_else(|_| Err("the main window is gone".into()));
+                        match saved {
+                            Ok(()) => {
+                                close(cx);
+                                leave(main, was_front, *open, cx);
+                            }
+                            Err(err) => view.update(cx, |panel, cx| {
+                                panel.set_error(format!("not saved: {err}"), cx)
+                            }),
+                        }
+                    }
+                }
+            })
+            .detach();
+            view
+        },
+    );
+    match opened {
+        Ok(panel) => *slot.borrow_mut() = Some(panel),
+        Err(err) => eprintln!("mnote: couldn't open quick capture: {err}"),
+    }
+}
+
+/// After capture: the full window if asked for or if mNote was in front,
+/// else back to the app you came from.
+#[cfg(target_os = "macos")]
+fn leave(main: gpui::WindowHandle<Editor>, was_front: bool, open: bool, cx: &mut App) {
+    if open || was_front {
+        let _ = main.update(cx, |_, window, cx| {
+            cx.activate(true);
+            window.activate_window();
+        });
+    } else {
+        cx.hide();
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
-fn summon_setup(_: gpui::AnyWindowHandle, _: &mut App) {}
+fn summon_setup(_: gpui::WindowHandle<Editor>, _: &mut App) {}

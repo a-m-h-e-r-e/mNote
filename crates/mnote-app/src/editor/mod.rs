@@ -10,7 +10,7 @@
 //! typed, matches and `:s` replacements are painted into the note as a
 //! preview; nothing changes until `enter`.
 
-mod keys;
+pub(crate) mod keys;
 pub(crate) mod line;
 mod styled;
 
@@ -806,6 +806,60 @@ impl Editor {
                 cx.notify();
             });
         }));
+    }
+
+    /// The vault's index, if a vault is open (quick capture needs one).
+    pub fn capture_index(&self) -> Option<Rc<RefCell<NoteIndex>>> {
+        matches!(self.source, Source::Note { .. }).then(|| self.index.clone())
+    }
+
+    /// Appends a quick-capture line to `target` under `## Inbox`, then opens
+    /// the note here if `open`. The open note takes the line into its buffer
+    /// (one undo step) so unsaved edits are kept; any other note is written
+    /// on disk, created if it's new. An empty `entry` only opens.
+    pub fn capture(
+        &mut self,
+        entry: &str,
+        target: &NotePath,
+        open: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let Source::Note { vault, note, .. } = &self.source else {
+            return Err("quick capture needs a vault".into());
+        };
+        let mut line = 0;
+        if !entry.trim().is_empty() {
+            let title = target.name().to_owned();
+            if note == target {
+                let text = self.buffer.to_string();
+                let insertion = mnote_core::capture::insertion(&text, &title, entry);
+                let at = text[..insertion.at].chars().count();
+                self.vim.replace(&mut self.buffer, at..at, &insertion.text);
+                line = insertion.line;
+                self.sync_lines();
+                self.save_now(cx);
+            } else {
+                let text = match vault.read(target) {
+                    Ok(text) => text,
+                    Err(mnote_core::VaultError::Io { source, .. })
+                        if source.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        String::new()
+                    }
+                    Err(err) => return Err(err.to_string()),
+                };
+                let insertion = mnote_core::capture::insertion(&text, &title, entry);
+                vault
+                    .write(target, &insertion.apply(&text))
+                    .map_err(|err| err.to_string())?;
+                line = insertion.line;
+            }
+        }
+        if open {
+            self.go_to(target.clone(), line, cx);
+        }
+        cx.notify();
+        Ok(())
     }
 
     /// Opens `path` (if it isn't open) with the cursor at `line`.

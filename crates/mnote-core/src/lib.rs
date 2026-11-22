@@ -4,6 +4,7 @@
 //! This crate has no UI dependencies, so it can be tested on its own and reused
 //! by a future CLI.
 
+pub mod capture;
 pub mod code;
 pub mod content;
 mod error;
