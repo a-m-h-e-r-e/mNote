@@ -120,6 +120,25 @@ impl QuickCapture {
         if stroke.key == "enter" && stroke.modifiers.platform && self.chooser.is_none() {
             return self.finish(true, cx);
         }
+        if stroke.key == "v" && stroke.modifiers.platform {
+            let text = cx.read_from_clipboard().and_then(|item| item.text());
+            if let Some(text) = text {
+                match &mut self.chooser {
+                    Some(chooser) => {
+                        if chooser.input.paste(&text) == InputAction::Edited {
+                            let mut chooser = self.chooser.take().expect("just matched");
+                            self.refilter(&mut chooser);
+                            self.chooser = Some(chooser);
+                        }
+                    }
+                    None => {
+                        self.input.paste(&text);
+                    }
+                }
+                cx.notify();
+            }
+            return;
+        }
         let Some(key) = keys::vim_key(stroke) else {
             return;
         };

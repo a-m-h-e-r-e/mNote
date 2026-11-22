@@ -331,6 +331,16 @@ impl Vim {
         self.edited(line, buf);
     }
 
+    /// `⌘V` on the command line: the text at the caret, on one line.
+    pub(crate) fn paste_into_command_line(&mut self, text: &str, buf: &mut Buffer) -> bool {
+        let Some(mut line) = self.cmdline.take() else {
+            return false;
+        };
+        line.insert(&text.replace(['\r', '\n'], " "));
+        self.edited(line, buf);
+        true
+    }
+
     /// Puts the line back after an edit and refreshes the preview.
     fn edited(&mut self, line: CommandLine, buf: &Buffer) {
         self.cmdline = Some(line);
@@ -1416,6 +1426,63 @@ mod mapping_tests {
         check("abc|", "i<left><left>X<esc>", "a|Xbc");
         // The move starts a new undo step: `u` takes back only the last part.
         check("|", "iab<left>X<esc>u", "a|b");
+    }
+
+    #[test]
+    fn the_unnamed_register_shares_the_system_clipboard() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        struct Shared(Rc<RefCell<Option<String>>>);
+        impl crate::Clipboard for Shared {
+            fn read(&mut self) -> Option<String> {
+                self.0.borrow().clone()
+            }
+            fn write(&mut self, text: &str) {
+                *self.0.borrow_mut() = Some(text.to_owned());
+            }
+        }
+        let system = Rc::new(RefCell::new(None));
+        let mut buf = mnote_core::Buffer::new("one\ntwo\n");
+        let mut vim = crate::Vim::new();
+        vim.set_clipboard(Box::new(Shared(system.clone())));
+        vim.share_clipboard(true);
+        let keys = |vim: &mut crate::Vim, buf: &mut mnote_core::Buffer, k: &str| {
+            for key in crate::parse_keys(k) {
+                vim.handle_key(key, buf);
+            }
+        };
+        keys(&mut vim, &mut buf, "yy");
+        assert_eq!(
+            system.borrow().as_deref(),
+            Some("one\n"),
+            "a yank reaches the clipboard"
+        );
+        keys(&mut vim, &mut buf, "jp");
+        assert_eq!(
+            buf.to_string(),
+            "one\ntwo\none\n",
+            "its own linewise yank pastes as a line"
+        );
+        *system.borrow_mut() = Some("NEW".into());
+        keys(&mut vim, &mut buf, "ggp");
+        assert_eq!(
+            buf.to_string(),
+            "oNEWne\ntwo\none\n",
+            "text copied elsewhere wins"
+        );
+        keys(&mut vim, &mut buf, "\"_dd");
+        assert_eq!(
+            system.borrow().as_deref(),
+            Some("NEW"),
+            "the black hole keeps nothing"
+        );
+        // ⌘V's paste_text: into an insert, and into the command line.
+        keys(&mut vim, &mut buf, "Gi");
+        assert!(vim.paste_text("pasted", &mut buf));
+        keys(&mut vim, &mut buf, "<esc>:");
+        assert!(vim.paste_text("s/a\nb", &mut buf));
+        assert_eq!(vim.command_line().map(|l| l.text.as_str()), Some("s/a b"));
+        assert!(buf.to_string().contains("pasted"));
     }
 
     #[test]

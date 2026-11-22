@@ -452,6 +452,17 @@ impl Picker {
     }
 
     /// Replaces the query (keeping the field in INSERT) and refreshes.
+    /// `⌘V` into the query field (while inserting).
+    pub fn paste(&mut self, text: &str) {
+        if self.delegate.capturing() {
+            return;
+        }
+        if self.input.paste(text) == InputAction::Edited {
+            self.delegate.set_query(&self.input.text());
+            self.reset_selection();
+        }
+    }
+
     pub fn set_query(&mut self, query: &str) {
         self.input = VimInput::new(query);
         self.delegate.set_query(query);

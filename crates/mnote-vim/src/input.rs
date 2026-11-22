@@ -164,6 +164,17 @@ impl VimInput {
         InputAction::Edited
     }
 
+    /// `⌘V`: `text` typed at the caret while inserting (line breaks become
+    /// spaces). In other modes nothing happens.
+    pub fn paste(&mut self, text: &str) -> InputAction {
+        if self.vim.mode() != Mode::Insert || text.is_empty() {
+            return InputAction::Moved;
+        }
+        self.vim.paste_text(text, &mut self.buffer);
+        self.keep_one_line();
+        InputAction::Edited
+    }
+
     /// A paste may bring line breaks; the field stays one line.
     fn keep_one_line(&mut self) {
         let text = self.buffer.text();
@@ -277,6 +288,15 @@ mod tests {
         assert_eq!((input.text().as_str(), input.cursor()), ("one twXo ", 7));
         run(&mut input, "<c-u>");
         assert_eq!((input.text().as_str(), input.cursor()), ("o ", 0));
+    }
+
+    #[test]
+    fn pasting_types_one_line_while_inserting() {
+        let mut input = VimInput::new("a");
+        assert_eq!(input.paste("b\nc"), InputAction::Edited);
+        assert_eq!(input.text(), "ab c");
+        run(&mut input, "<esc>");
+        assert_eq!(input.paste("x"), InputAction::Moved, "not in NORMAL");
     }
 
     #[test]

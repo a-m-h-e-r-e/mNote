@@ -387,6 +387,14 @@ impl Editor {
             cx.stop_propagation();
             return self.open_picker(Picker::new(Box::new(CommandPalette::default())), cx);
         }
+        if stroke.modifiers.platform
+            && !stroke.modifiers.control
+            && !stroke.modifiers.alt
+            && self.clipboard_shortcut(&stroke.key, cx)
+        {
+            cx.stop_propagation();
+            return;
+        }
         let Some(key) = keys::vim_key(stroke) else {
             return;
         };
@@ -423,7 +431,18 @@ impl Editor {
             self.pane_key = true;
             return true;
         }
-        let clipboard_paste = matches!(self.vim.pending_register(), Some('+' | '*'))
+        // The system clipboard is read just before a paste that may use it:
+        // `"+p`, and plain `p` / `P` when y, d and p share it.
+        let plain_paste = matches!(key, mnote_vim::Key::Char('p' | 'P'))
+            && matches!(
+                self.vim.mode(),
+                Mode::Normal | Mode::Visual | Mode::VisualLine
+            )
+            && matches!(self.vim.pending_register(), None | Some('"'))
+            && !self.vim.awaits_register()
+            && self.config.system_clipboard;
+        let clipboard_paste = plain_paste
+            || matches!(self.vim.pending_register(), Some('+' | '*'))
             || (self.vim.awaits_register() && matches!(key, mnote_vim::Key::Char('+' | '*')));
         if clipboard_paste {
             self.clipboard.borrow_mut().read =
@@ -1331,6 +1350,7 @@ impl Editor {
         let _ = self.vim.execute(set, &mut self.buffer);
         crate::theme::Theme::set_choice(config.theme, cx);
         crate::commands::set_leader(config.leader);
+        self.vim.share_clipboard(config.system_clipboard);
         // Fonts: an installed one, else the bundled default (and say so).
         let installed = cx.text_system().all_font_names();
         let mut missing = Vec::new();
@@ -1487,6 +1507,56 @@ impl Editor {
             );
             let _ = this.update(cx, |_, cx| cx.quit());
         }));
+    }
+
+    /// `⌘C` `⌘X` `⌘V` `⌘A`: copy, cut and paste with the system clipboard,
+    /// and select all. Returns whether the key was one of them.
+    fn clipboard_shortcut(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        if !matches!(key, "c" | "x" | "v" | "a") {
+            return false;
+        }
+        if self.folder_edit.is_some() || self.first_run.is_some() {
+            return true;
+        }
+        if let Some(picker) = &mut self.picker {
+            if key == "v"
+                && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+            {
+                picker.paste(&text);
+                cx.notify();
+            }
+            return true;
+        }
+        let mode = self.vim.mode();
+        let visual = matches!(mode, Mode::Visual | Mode::VisualLine);
+        let keys = match (key, mode) {
+            ("c", _) if visual => "\"+y",
+            ("c", Mode::Normal) => "\"+yy",
+            ("x", _) if visual => "\"+d",
+            ("x", Mode::Normal) => "\"+dd",
+            ("v", Mode::Insert | Mode::Command) => {
+                let text = cx.read_from_clipboard().and_then(|item| item.text());
+                if let Some(text) = text {
+                    let revision = self.buffer.revision();
+                    self.vim.paste_text(&text, &mut self.buffer);
+                    self.sync_lines();
+                    if self.buffer.revision() != revision {
+                        self.schedule_autosave(cx);
+                    }
+                    cx.notify();
+                }
+                return true;
+            }
+            ("v", _) if visual => "\"+p",
+            ("v", Mode::Normal) => "\"+P",
+            ("a", Mode::Normal) => "ggVG",
+            ("a", _) if visual => "<esc>ggVG",
+            _ => return true,
+        };
+        for key in mnote_vim::parse_keys(keys) {
+            self.press(key, cx);
+        }
+        true
     }
 
     /// Shows the first-run screen (no config.toml yet, no folder given):

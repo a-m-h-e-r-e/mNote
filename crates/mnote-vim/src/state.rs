@@ -234,6 +234,30 @@ impl Vim {
     }
 
     /// Plugs in the system clipboard for the `+` and `*` registers.
+    /// Shares the unnamed register with the system clipboard (`y`, `d`
+    /// and `p` use it), or keeps them apart (only `"+` reaches it).
+    pub fn share_clipboard(&mut self, shared: bool) {
+        self.registers.share_clipboard(shared);
+    }
+
+    /// `⌘V`: types `text` where the cursor is: into the note in INSERT
+    /// (one undo step with the rest of the insert), or into the command
+    /// line (line breaks become spaces). Returns whether it went anywhere.
+    pub fn paste_text(&mut self, text: &str, buf: &mut Buffer) -> bool {
+        match self.mode {
+            Mode::Insert => {
+                self.typed(buf, text);
+                if let Some(session) = &mut self.insert {
+                    // Pasted text isn't repeated by a count or `.`.
+                    session.broken = true;
+                }
+                true
+            }
+            Mode::Command => self.paste_into_command_line(text, buf),
+            _ => false,
+        }
+    }
+
     pub fn set_clipboard(&mut self, clipboard: Box<dyn Clipboard>) {
         self.registers.set_clipboard(clipboard);
     }

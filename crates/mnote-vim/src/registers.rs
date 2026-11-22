@@ -6,6 +6,10 @@
 //! - `a` to `z`: named; `A` to `Z` append to them.
 //! - `+` and `*`: the system clipboard. `_`: the black hole, which keeps
 //!   nothing.
+//!
+//! With the clipboard shared (Vim's `clipboard=unnamedplus`, mNote's
+//! default), the unnamed register is the system clipboard too: yanks and
+//! deletes go to it, and `p` pastes what was last copied anywhere.
 
 use std::collections::HashMap;
 
@@ -40,6 +44,8 @@ pub(crate) struct Registers {
     unnamed: Register,
     stored: HashMap<char, Register>,
     clipboard: Box<dyn Clipboard>,
+    /// The unnamed register is the system clipboard too.
+    shared: bool,
 }
 
 impl std::fmt::Debug for Registers {
@@ -57,6 +63,7 @@ impl Default for Registers {
             unnamed: Register::default(),
             stored: HashMap::new(),
             clipboard: Box::new(MemoryClipboard::default()),
+            shared: false,
         }
     }
 }
@@ -66,12 +73,26 @@ impl Registers {
         self.clipboard = clipboard;
     }
 
+    /// Shares the unnamed register with the system clipboard, or not.
+    pub fn share_clipboard(&mut self, shared: bool) {
+        self.shared = shared;
+    }
+
+    /// A yank or delete into the unnamed register reaches the clipboard
+    /// when it's shared.
+    fn share(&mut self, reg: &Register) {
+        if self.shared {
+            self.clipboard.write(&reg.text);
+        }
+    }
+
     /// Stores a yank: into `name` if given, else into `0`.
     pub fn yank(&mut self, name: Option<char>, reg: Register) {
         match name {
             Some(_) => self.store_named(name, reg),
             None => {
                 self.stored.insert('0', reg.clone());
+                self.share(&reg);
                 self.unnamed = reg;
             }
         }
@@ -93,6 +114,7 @@ impl Registers {
                 } else {
                     self.stored.insert('-', reg.clone());
                 }
+                self.share(&reg);
                 self.unnamed = reg;
             }
         }
@@ -126,6 +148,15 @@ impl Registers {
     /// Reads a register for pasting. `None` or `"` is the unnamed register.
     pub fn get(&mut self, name: Option<char>) -> Option<Register> {
         match name {
+            // Shared: text copied in another app since mNote's last yank wins
+            // (mNote's own text keeps its linewise-ness).
+            None | Some('"') if self.shared => match self.clipboard.read() {
+                Some(text) if !text.is_empty() && text != self.unnamed.text => Some(Register {
+                    linewise: text.ends_with('\n'),
+                    text,
+                }),
+                _ => (!self.unnamed.text.is_empty()).then(|| self.unnamed.clone()),
+            },
             None | Some('"') => (!self.unnamed.text.is_empty()).then(|| self.unnamed.clone()),
             Some('+' | '*') => self.clipboard.read().map(|text| Register {
                 linewise: text.ends_with('\n'),

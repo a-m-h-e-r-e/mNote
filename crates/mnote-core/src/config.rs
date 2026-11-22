@@ -136,6 +136,9 @@ pub struct Config {
     pub ui_font_size: u32,
     /// The key before mNote's own commands (`space f` finds notes).
     pub leader: char,
+    /// `y`, `d` and `p` use the system clipboard (`clipboard = "system"`),
+    /// or keep to Vim's registers (`"vim"`; only `"+` reaches it).
+    pub system_clipboard: bool,
 }
 
 /// The interface sizes `ui_font_size` accepts.
@@ -169,6 +172,7 @@ impl Default for Config {
             font_size: 16,
             ui_font_size: 15,
             leader: ' ',
+            system_clipboard: true,
         }
     }
 }
@@ -295,6 +299,13 @@ impl Config {
                         _ => return Err(wrong("\"space\" or one key, like \",\"")),
                     };
                 }
+                "clipboard" => {
+                    config.system_clipboard = match value.as_str() {
+                        Some("system") => true,
+                        Some("vim") => false,
+                        _ => return Err(wrong("\"system\" or \"vim\"")),
+                    }
+                }
                 "git_blame" => {
                     config.git_blame = value.as_bool().ok_or_else(|| wrong("true or false"))?;
                 }
@@ -382,7 +393,11 @@ impl Config {
              ui_font_size = {ui_font_size}\n\
              \n\
              # The key before mNote's commands (\"space\" or one key, like \",\").\n\
-             leader = \"{leader}\"\n",
+             leader = \"{leader}\"\n\
+             \n\
+             # \"system\": y, d and p use the system clipboard (and ⌘C ⌘V).\n\
+             # \"vim\": they keep to Vim's registers; \"+ reaches the clipboard.\n\
+             clipboard = \"{clipboard}\"\n",
             summon = key_words(&self.summon),
             capture = key_words(&self.capture),
             rnu = self.relative_numbers,
@@ -393,6 +408,11 @@ impl Config {
             font_size = self.font_size,
             ui_font_size = self.ui_font_size,
             leader = leader_name(self.leader),
+            clipboard = if self.system_clipboard {
+                "system"
+            } else {
+                "vim"
+            },
         )
     }
 }
@@ -503,6 +523,7 @@ mod tests {
             font_size: 18,
             ui_font_size: 17,
             leader: ',',
+            system_clipboard: false,
             ..Config::default()
         };
         assert_eq!(Config::parse(&config.template()), Ok(config));
