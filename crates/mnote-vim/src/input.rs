@@ -71,6 +71,15 @@ impl VimInput {
         self.vim.mode()
     }
 
+    /// Empties the field, keeping its mode.
+    pub fn clear(&mut self) {
+        let len = self.buffer.len_chars();
+        if len > 0 {
+            self.vim.edit(&mut self.buffer, 0..len, "");
+        }
+        self.vim.set_cursor(0);
+    }
+
     /// The selected characters in VISUAL mode.
     pub fn selection(&self) -> Option<std::ops::Range<usize>> {
         self.vim.selection()
@@ -255,6 +264,14 @@ mod tests {
         assert_eq!((input.text().as_str(), input.cursor()), ("one twXo ", 7));
         run(&mut input, "<c-u>");
         assert_eq!((input.text().as_str(), input.cursor()), ("o ", 0));
+    }
+
+    #[test]
+    fn clearing_keeps_the_mode() {
+        let mut input = VimInput::new("des");
+        run(&mut input, "<esc>");
+        input.clear();
+        assert_eq!((input.text().as_str(), input.mode()), ("", Mode::Normal));
     }
 
     #[test]

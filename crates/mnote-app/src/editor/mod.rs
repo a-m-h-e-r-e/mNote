@@ -30,6 +30,7 @@ use mnote_vim::text::{clamp_normal, line_count, line_len, line_of, line_start};
 use mnote_vim::{Clipboard, Effect, Mode, Vim};
 
 use crate::commands::{COMMANDS, Run};
+use crate::picker::explorer::Explorer;
 use crate::picker::finder::{CurrentNote, Finder};
 use crate::picker::list::ListPicker;
 use crate::picker::palette::CommandPalette;
@@ -300,6 +301,9 @@ impl Editor {
     /// The key after `space` in NORMAL mode: `f` finds notes, `/` searches
     /// text, `@` lists this note's headings, `#` lists tags.
     fn leader_key(&mut self, key: mnote_vim::Key, cx: &mut Context<Self>) {
+        if key == mnote_vim::Key::Char('e') {
+            return self.open_explorer(None, cx);
+        }
         let query = match key {
             mnote_vim::Key::Char('f') => "",
             mnote_vim::Key::Char('/') => "/",
@@ -327,6 +331,29 @@ impl Editor {
         if !query.is_empty() {
             picker.set_query(query);
         }
+        self.open_picker(picker, cx);
+    }
+
+    /// Opens the explorer on the open note's folder, or on `folder`.
+    fn open_explorer(&mut self, folder: Option<String>, cx: &mut Context<Self>) {
+        let Source::Note { vault, note, .. } = &self.source else {
+            self.reply = Some(("A scratch note isn't in a vault to explore".into(), true));
+            return;
+        };
+        let name = vault_name(vault.root());
+        let picker = match folder {
+            Some(folder) => Picker::new(Box::new(Explorer::at_folder(
+                self.index.clone(),
+                name,
+                &folder,
+            ))),
+            None => {
+                let (explorer, select) = Explorer::new(self.index.clone(), name, Some(note));
+                let mut picker = Picker::new(Box::new(explorer));
+                picker.select(select);
+                picker
+            }
+        };
         self.open_picker(picker, cx);
     }
 
@@ -554,7 +581,7 @@ impl Editor {
             AppCommand::WriteQuit { force } => self.quit(true, force, cx),
             AppCommand::Edit { .. } => self.not_yet(":edit"),
             AppCommand::View(_) => self.not_yet(":view"),
-            AppCommand::Explore(_) => self.not_yet(":explore"),
+            AppCommand::Explore(folder) => self.open_explorer(folder, cx),
             AppCommand::Find(_) => self.not_yet(":find"),
             AppCommand::Daily => self.not_yet(":daily"),
             AppCommand::ListNext => self.list_step(1, cx),
@@ -926,6 +953,15 @@ fn prose_font(style: crate::theme::TextStyle) -> Font {
     Font {
         weight: style.font_weight(),
         ..font(family::PROSE)
+    }
+}
+
+/// The vault folder as titles show it: `~/notes` under the home folder.
+fn vault_name(root: &std::path::Path) -> String {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    match home.as_deref().and_then(|h| root.strip_prefix(h).ok()) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => root.display().to_string(),
     }
 }
 

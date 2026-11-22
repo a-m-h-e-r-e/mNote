@@ -7,6 +7,7 @@
 //! own: the window that opens it routes keys here and draws [`Picker::render`]
 //! on top of itself.
 
+pub mod explorer;
 pub mod finder;
 pub mod list;
 pub mod palette;
@@ -134,6 +135,13 @@ pub enum Confirm {
     Act(PickerAction),
     /// Stay open with this query (a tag narrows the finder to its notes).
     SetQuery(String),
+    /// Stay open: the delegate moved (the explorer entered a folder). The
+    /// filter clears and row `select` is selected.
+    Navigate {
+        select: usize,
+    },
+    /// Nothing to do; stay open.
+    Stay,
     Close,
 }
 
@@ -209,6 +217,23 @@ pub trait PickerDelegate {
         None
     }
 
+    /// NORMAL-mode letters this picker handles itself (the explorer's `h`).
+    /// `l` always opens.
+    fn claims(&self, _c: char) -> bool {
+        false
+    }
+
+    /// A claimed letter typed in NORMAL mode, with row `ix` selected.
+    fn claimed(&mut self, _c: char, _ix: usize) -> Confirm {
+        Confirm::Stay
+    }
+
+    /// Whether `esc` in NORMAL mode first clears a non-empty filter before a
+    /// second `esc` closes (the explorer, per D-001).
+    fn clear_on_escape(&self) -> bool {
+        false
+    }
+
     /// Whether row `ix` can be selected (group rows can't).
     fn selectable(&self, _ix: usize) -> bool {
         true
@@ -264,7 +289,11 @@ impl Picker {
                 None => PickerOutcome::Open,
             };
         }
-        match self.input.handle_key(key, |c| c == 'l') {
+        let delegate = &self.delegate;
+        match self
+            .input
+            .handle_key(key, |c| c == 'l' || delegate.claims(c))
+        {
             InputAction::Edited => {
                 self.delegate.set_query(&self.input.text());
                 self.reset_selection();
@@ -275,19 +304,57 @@ impl Picker {
                 if self.delegate.is_empty() || !self.delegate.selectable(self.selected) {
                     return PickerOutcome::Open;
                 }
-                return match self.delegate.confirm(self.selected) {
-                    Confirm::Act(action) => PickerOutcome::Act(action),
-                    Confirm::SetQuery(query) => {
-                        self.set_query(&query);
-                        PickerOutcome::Open
-                    }
-                    Confirm::Close => PickerOutcome::Close,
-                };
+                let confirm = self.delegate.confirm(self.selected);
+                return self.apply(confirm);
             }
-            InputAction::Claimed(_) => {}
-            InputAction::Close => return PickerOutcome::Close,
+            InputAction::Claimed(c) => {
+                let confirm = self.delegate.claimed(c, self.selected);
+                return self.apply(confirm);
+            }
+            InputAction::Close => {
+                if self.delegate.clear_on_escape() && !self.input.text().is_empty() {
+                    self.input.clear();
+                    self.delegate.set_query("");
+                    self.reset_selection();
+                    return PickerOutcome::Open;
+                }
+                return PickerOutcome::Close;
+            }
         }
         PickerOutcome::Open
+    }
+
+    fn apply(&mut self, confirm: Confirm) -> PickerOutcome {
+        match confirm {
+            Confirm::Act(action) => PickerOutcome::Act(action),
+            Confirm::SetQuery(query) => {
+                self.set_query(&query);
+                PickerOutcome::Open
+            }
+            Confirm::Navigate { select } => {
+                self.input.clear();
+                self.delegate.set_query("");
+                self.reset_selection();
+                if select < self.delegate.len() && self.delegate.selectable(select) {
+                    self.selected = select;
+                }
+                PickerOutcome::Open
+            }
+            Confirm::Stay => PickerOutcome::Open,
+            Confirm::Close => PickerOutcome::Close,
+        }
+    }
+
+    /// Selects row `ix`, if it can be.
+    pub fn select(&mut self, ix: usize) {
+        if ix < self.delegate.len() && self.delegate.selectable(ix) {
+            self.selected = ix;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn delegate_len(&self) -> usize {
+        self.delegate.len()
     }
 
     /// Replaces the query (keeping the field in INSERT) and refreshes.

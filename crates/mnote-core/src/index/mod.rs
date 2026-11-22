@@ -64,6 +64,15 @@ impl NoteEntry {
     }
 }
 
+/// One entry of a folder, as the explorer lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FolderItem {
+    /// A subfolder, with how many entries (notes and folders) it holds.
+    Folder { name: String, items: usize },
+    /// A note, by its position in [`NoteIndex::notes`].
+    Note(usize),
+}
+
 /// Every note in the vault, sorted by path.
 #[derive(Debug, Clone, Default)]
 pub struct NoteIndex {
@@ -130,6 +139,44 @@ impl NoteIndex {
 
     pub fn get(&self, path: &NotePath) -> Option<&NoteEntry> {
         self.position(path).ok().map(|i| &self.notes[i])
+    }
+
+    /// What's directly in `folder` (vault-relative, `""` for the root, no
+    /// trailing `/`): subfolders first, then notes, each by name ignoring
+    /// case. Folders come from note paths, so a folder without notes in it
+    /// isn't listed.
+    pub fn folder_items(&self, folder: &str) -> Vec<FolderItem> {
+        use std::collections::{BTreeMap, BTreeSet};
+        let prefix = if folder.is_empty() {
+            String::new()
+        } else {
+            format!("{folder}/")
+        };
+        let mut folders: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
+        let mut notes = Vec::new();
+        for (i, note) in self.notes.iter().enumerate() {
+            let Some(rest) = note.path_text.strip_prefix(&prefix) else {
+                continue;
+            };
+            match rest.split_once('/') {
+                Some((dir, inner)) => {
+                    let child = inner.split('/').next().unwrap_or(inner);
+                    folders.entry(dir.to_owned()).or_default().insert(child);
+                }
+                None => notes.push(i),
+            }
+        }
+        let mut folders: Vec<(String, usize)> = folders
+            .into_iter()
+            .map(|(name, children)| (name, children.len()))
+            .collect();
+        folders.sort_by_key(|(name, _)| name.to_lowercase());
+        notes.sort_by_key(|&i| self.notes[i].path.file_name().to_lowercase());
+        folders
+            .into_iter()
+            .map(|(name, items)| FolderItem::Folder { name, items })
+            .chain(notes.into_iter().map(FolderItem::Note))
+            .collect()
     }
 
     /// Every tag with how many notes have it, sorted by name.
@@ -245,6 +292,33 @@ mod tests {
         );
         let tags: Vec<_> = index.tags().collect();
         assert_eq!(tags, [("design", 1), ("idea", 1)]);
+    }
+
+    #[test]
+    fn lists_folders_then_notes() {
+        let entry = |p: &str| NoteEntry::new(note(p), "", None);
+        let index = NoteIndex::from_entries(vec![
+            entry("inbox.md"),
+            entry("Projects/mnote/ui-design.md"),
+            entry("Projects/mnote/design/colours.md"),
+            entry("Projects/mnote/design/type.md"),
+            entry("Projects/gpui-notes.md"),
+            entry("journal/2026-11-21.md"),
+        ]);
+        let names = |folder: &str| -> Vec<String> {
+            index
+                .folder_items(folder)
+                .into_iter()
+                .map(|item| match item {
+                    FolderItem::Folder { name, items } => format!("{name}/ {items}"),
+                    FolderItem::Note(i) => index.notes()[i].path.file_name().to_owned(),
+                })
+                .collect()
+        };
+        assert_eq!(names(""), ["journal/ 1", "Projects/ 2", "inbox.md"]);
+        assert_eq!(names("Projects"), ["mnote/ 2", "gpui-notes.md"]);
+        assert_eq!(names("Projects/mnote"), ["design/ 2", "ui-design.md"]);
+        assert!(names("missing").is_empty());
     }
 
     #[test]

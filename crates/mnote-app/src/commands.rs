@@ -71,6 +71,13 @@ pub const COMMANDS: &[Command] = &[
         Run::Finder(""),
     ),
     cmd(
+        "Explore folders",
+        Some("space e"),
+        Some("explore"),
+        "The vault folder by folder, with a preview; h goes up, l opens.",
+        Run::Keys(" e"),
+    ),
+    cmd(
         "Search note text",
         Some("space /"),
         None,

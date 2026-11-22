@@ -17,7 +17,7 @@ use std::path::Path;
 
 pub use error::{Result, VaultError};
 pub use frontmatter::Frontmatter;
-pub use index::{NoteEntry, NoteIndex, NoteSearch};
+pub use index::{FolderItem, NoteEntry, NoteIndex, NoteSearch};
 pub use note_path::NotePath;
 pub use text::{Autosave, Buffer, ChangedLines, Reload};
 pub use vault::Vault;

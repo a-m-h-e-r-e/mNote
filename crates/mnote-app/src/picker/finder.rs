@@ -579,7 +579,7 @@ fn note_row(index: &NoteIndex, hit: &NoteHit) -> Row {
     }
 }
 
-fn note_preview(note: &NoteEntry) -> PreviewContent {
+pub(crate) fn note_preview(note: &NoteEntry) -> PreviewContent {
     let mut meta = vec![note.path_text.clone()];
     if note.modified.is_some() {
         meta.push(format!("edited {} ago", age(note.modified)));
@@ -606,7 +606,7 @@ fn note_preview(note: &NoteEntry) -> PreviewContent {
     }
 }
 
-fn plural(n: usize, one: &str) -> String {
+pub(crate) fn plural(n: usize, one: &str) -> String {
     if n == 1 {
         format!("1 {one}")
     } else {
@@ -615,7 +615,7 @@ fn plural(n: usize, one: &str) -> String {
 }
 
 /// `4m`, `3h`, `2d`, `5w`, `1y`: how long ago `when` was.
-fn age(when: Option<SystemTime>) -> String {
+pub(crate) fn age(when: Option<SystemTime>) -> String {
     let Some(ago) = when.and_then(|w| SystemTime::now().duration_since(w).ok()) else {
         return String::new();
     };
