@@ -5,8 +5,8 @@
 //!
 //! - `mnote ~/notes/ideas.md` opens that note, with its folder as the vault;
 //! - `mnote ~/notes` opens `inbox.md` in that vault (created on first save);
-//! - `mnote` alone opens `inbox.md` in the config's `vault`, or a scratch
-//!   note that isn't saved when there's none.
+//! - `mnote` alone opens `inbox.md` in the config's `vault`; with no
+//!   config.toml yet, it first asks for a notes folder (first run).
 
 use std::path::{Path, PathBuf};
 
@@ -62,12 +62,15 @@ fn target_from_args(vault: Option<&Path>) -> Result<Target, String> {
 
 fn main() {
     // A mistake in config.toml shows in the window; the defaults are used.
-    let (config, mut problem) = match Config::path().map(|p| Config::load(&p)) {
-        Some(Ok(Some(config))) => (config, None),
-        Some(Ok(None)) | None => (Config::default(), None),
-        Some(Err(err)) => (Config::default(), Some(err.to_string())),
+    let (config, mut problem, no_config) = match Config::path().map(|p| Config::load(&p)) {
+        Some(Ok(Some(config))) => (config, None, false),
+        Some(Ok(None)) => (Config::default(), None, true),
+        None => (Config::default(), None, false),
+        Some(Err(err)) => (Config::default(), Some(err.to_string()), false),
     };
     let from_args = std::env::args_os().nth(1).is_some();
+    // No settings and no folder given: ask for a notes folder first.
+    let first_run = no_config && !from_args;
     let target = match target_from_args(config.vault.as_deref()) {
         Ok(target) => target,
         Err(message) if from_args => {
@@ -103,7 +106,10 @@ fn main() {
                         Target::Scratch => Editor::scratch(window, cx),
                         Target::Note(vault, note) => Editor::open(vault, note, window, cx),
                     };
-                    editor.apply_config(settings, cx);
+                    editor.apply_config(settings.clone(), cx);
+                    if first_run {
+                        editor.start_first_run(settings, cx);
+                    }
                     if let Some(problem) = problem {
                         editor.show_notice(problem, cx);
                     }

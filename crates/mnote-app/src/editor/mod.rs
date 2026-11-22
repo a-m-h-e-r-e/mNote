@@ -10,6 +10,7 @@
 //! typed, matches and `:s` replacements are painted into the note as a
 //! preview; nothing changes until `enter`.
 
+mod first_run;
 pub(crate) mod keys;
 pub(crate) mod line;
 mod panes;
@@ -158,6 +159,8 @@ pub struct Editor {
     pane_key: bool,
     /// The notes folder, whatever the focused pane shows.
     vault: Option<Vault>,
+    /// The first-run screen, until a notes folder is chosen.
+    first_run: Option<first_run::FirstRun>,
     /// The settings in use, and where they're kept.
     config: Config,
     config_path: Option<std::path::PathBuf>,
@@ -177,31 +180,52 @@ impl Editor {
     /// An editor for `note` in `vault`. A note that doesn't exist yet starts
     /// empty and is created on the first save.
     pub fn open(vault: Vault, note: NotePath, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (buffer, notice) = match Buffer::open(&vault, &note) {
-            Ok(buffer) => (buffer, None),
-            Err(_) if !vault.path_of(&note).exists() => (Buffer::new(""), None),
-            Err(err) => (
-                Buffer::new(""),
-                Some(SharedString::from(format!("Couldn't open {note}: {err}"))),
-            ),
-        };
+        let (buffer, notice) = open_buffer(&vault, &note);
+        let mut editor = Self::build(
+            buffer,
+            Source::Note {
+                vault: vault.clone(),
+                note,
+            },
+            window,
+            cx,
+        );
+        editor.notice = notice;
+        editor.attach_vault(vault, cx);
+        editor
+    }
 
+    /// Starts on a scratch note and turns into `vault`'s editor at `note`
+    /// (first run, after a folder is chosen).
+    pub fn open_vault(&mut self, vault: Vault, note: NotePath, cx: &mut Context<Self>) {
+        let (buffer, notice) = open_buffer(&vault, &note);
+        let mut doc = self.new_doc(
+            buffer,
+            Source::Note {
+                vault: vault.clone(),
+                note,
+            },
+        );
+        doc.notice = notice;
+        self.show_doc(doc);
+        self.attach_vault(vault, cx);
+        cx.notify();
+    }
+
+    /// The vault's watcher, index and `:e` completion.
+    fn attach_vault(&mut self, vault: Vault, cx: &mut Context<Self>) {
         // Changes by other apps arrive on the watcher's thread; hop to ours.
         let (tx, rx) = async_channel::unbounded::<VaultEvent>();
-        let watcher = vault
+        self._watcher = vault
             .watch(move |event| {
                 let _ = tx.try_send(event);
             })
-            .ok();
-        let paths = VaultPaths(vault.clone());
-        let kept = vault.clone();
-        let mut editor = Self::build(buffer, Source::Note { vault, note }, window, cx);
-        editor.vault = Some(kept);
-        editor._watcher = watcher.map(Box::new);
-        editor.notice = notice;
-        editor.vim.set_completer(Box::new(paths));
-        editor.build_index(cx);
-        editor._tasks.push(cx.spawn(async move |this, cx| {
+            .ok()
+            .map(Box::new);
+        self.vim.set_completer(Box::new(VaultPaths(vault.clone())));
+        self.vault = Some(vault);
+        self.build_index(cx);
+        self._tasks.push(cx.spawn(async move |this, cx| {
             while let Ok(event) = rx.recv().await {
                 if this
                     .update(cx, |this, cx| this.on_vault_event(event, cx))
@@ -211,7 +235,6 @@ impl Editor {
                 }
             }
         }));
-        editor
     }
 
     fn build(buffer: Buffer, source: Source, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -295,6 +318,7 @@ impl Editor {
             drawing_other: false,
             pane_key: false,
             vault: None,
+            first_run: None,
             config: Config::default(),
             config_path: Config::path(),
             _watcher: None,
@@ -307,6 +331,10 @@ impl Editor {
 
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let stroke = &event.keystroke;
+        if self.first_run_key(stroke, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if stroke.modifiers.platform && stroke.key == "k" && self.picker.is_none() {
             cx.stop_propagation();
             return self.open_picker(Picker::new(Box::new(CommandPalette::default())), cx);
@@ -1242,6 +1270,13 @@ impl Editor {
         cx.notify();
     }
 
+    /// Shows the first-run screen (no config.toml yet, no folder given):
+    /// `config` holds the keys it starts with.
+    pub fn start_first_run(&mut self, config: Config, cx: &mut Context<Self>) {
+        self.first_run = Some(first_run::FirstRun::new(config));
+        cx.notify();
+    }
+
     /// The global keys couldn't all be registered, or config.toml has a
     /// mistake: say so in the status line.
     pub fn show_notice(&mut self, notice: String, cx: &mut Context<Self>) {
@@ -1251,10 +1286,9 @@ impl Editor {
 
     /// Reads the whole vault into the index on a background thread.
     fn build_index(&mut self, cx: &mut Context<Self>) {
-        let Source::Note { vault, .. } = &self.source else {
+        let Some(vault) = self.vault.clone() else {
             return;
         };
-        let vault = vault.clone();
         let task = cx
             .background_executor()
             .spawn(async move { NoteIndex::build(&vault) });
@@ -1508,7 +1542,7 @@ impl Editor {
     }
 
     fn on_vault_event(&mut self, event: VaultEvent, cx: &mut Context<Self>) {
-        let Source::Note { vault, .. } = &self.source else {
+        let Some(vault) = &self.vault else {
             return;
         };
         self.index.borrow_mut().apply(vault, &event);
@@ -2289,6 +2323,19 @@ impl Editor {
     }
 }
 
+/// A note's buffer; one that doesn't exist yet starts empty and is made on
+/// the first save.
+fn open_buffer(vault: &Vault, note: &NotePath) -> (Buffer, Option<SharedString>) {
+    match Buffer::open(vault, note) {
+        Ok(buffer) => (buffer, None),
+        Err(_) if !vault.path_of(note).exists() => (Buffer::new(""), None),
+        Err(err) => (
+            Buffer::new(""),
+            Some(SharedString::from(format!("Couldn't open {note}: {err}"))),
+        ),
+    }
+}
+
 /// The vault folder as titles show it: `~/notes` under the home folder.
 fn vault_name(root: &std::path::Path) -> String {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
@@ -2523,6 +2570,14 @@ impl Editor {
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(first_run) = self.render_first_run(cx) {
+            return div()
+                .size_full()
+                .track_focus(&self.focus)
+                .on_key_down(cx.listener(Self::on_key))
+                .child(first_run)
+                .into_any_element();
+        }
         self.tree = self.buffer.syntax_tree().cloned();
         self.refresh_parked_trees();
         let p = cx.theme().palette;
@@ -2623,5 +2678,6 @@ impl Render for Editor {
                     .justify_center()
                     .child(toast)
             }))
+            .into_any_element()
     }
 }
