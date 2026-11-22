@@ -12,6 +12,7 @@
 
 pub(crate) mod keys;
 pub(crate) mod line;
+mod panes;
 mod styled;
 
 use std::cell::RefCell;
@@ -58,16 +59,7 @@ const TRAFFIC_LIGHT_INSET: f32 = 76.;
 /// Half a blink cycle of the insert-mode bar caret (about 1 Hz).
 const BLINK: Duration = Duration::from_millis(530);
 
-/// Where the open note lives. A scratch note isn't saved.
-enum Source {
-    Scratch,
-    Note {
-        vault: Vault,
-        note: NotePath,
-        /// Boxed: the watcher is large, and a scratch note has none.
-        _watcher: Option<Box<VaultWatcher>>,
-    },
-}
+use panes::{Axis, Doc, Layout, PaneId, PaneSlot, Source};
 
 /// Bridges Vim's synchronous clipboard to gpui's: the editor fills `read`
 /// just before a `"+p`, and flushes `write` after each key.
@@ -151,6 +143,21 @@ pub struct Editor {
     table_cache: std::collections::HashMap<usize, (u64, TableLayout)>,
     /// Wakes the editor when a background parse lands.
     syntax_ready: async_channel::Sender<()>,
+    /// Every pane, the focused one's state being the fields above.
+    panes: Vec<PaneSlot>,
+    focused: PaneId,
+    layout: Layout,
+    next_pane: u32,
+    /// Open notes other than the focused pane's.
+    parked: Vec<Doc>,
+    /// A line of an unfocused pane is being drawn: no caret, selection or
+    /// typed-command preview.
+    drawing_other: bool,
+    /// `⌃w` was pressed: the next key is a pane command.
+    pane_key: bool,
+    /// Changes by other apps. Boxed: the watcher is large, and a scratch
+    /// note has none.
+    _watcher: Option<Box<VaultWatcher>>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -181,16 +188,8 @@ impl Editor {
             })
             .ok();
         let paths = VaultPaths(vault.clone());
-        let mut editor = Self::build(
-            buffer,
-            Source::Note {
-                vault,
-                note,
-                _watcher: watcher.map(Box::new),
-            },
-            window,
-            cx,
-        );
+        let mut editor = Self::build(buffer, Source::Note { vault, note }, window, cx);
+        editor._watcher = watcher.map(Box::new);
         editor.notice = notice;
         editor.vim.set_completer(Box::new(paths));
         editor.build_index(cx);
@@ -246,6 +245,7 @@ impl Editor {
             }),
         ];
 
+        let first_note = source.key().cloned();
         Editor {
             lines: ListState::new(buffer.text().len_lines(), ListAlignment::Top, px(400.)),
             buffer,
@@ -275,6 +275,18 @@ impl Editor {
             table_cache: std::collections::HashMap::new(),
             image_paths: RefCell::default(),
             syntax_ready,
+            panes: vec![PaneSlot {
+                id: PaneId(0),
+                note: first_note,
+                local: None,
+            }],
+            focused: PaneId(0),
+            layout: Layout::Pane(PaneId(0)),
+            next_pane: 1,
+            parked: Vec::new(),
+            drawing_other: false,
+            pane_key: false,
+            _watcher: None,
             _tasks: vec![redraw],
             _subscriptions: subscriptions,
         }
@@ -309,6 +321,19 @@ impl Editor {
         }
         if std::mem::take(&mut self.leader) {
             self.leader_key(key, cx);
+            return true;
+        }
+        if std::mem::take(&mut self.pane_key) {
+            self.pane_command(key, cx);
+            cx.notify();
+            return true;
+        }
+        if key == mnote_vim::Key::Ctrl('w')
+            && self.vim.mode() == Mode::Normal
+            && !self.vim.is_pending()
+            && self.vim.cmd_window().is_none()
+        {
+            self.pane_key = true;
             return true;
         }
         let clipboard_paste = matches!(self.vim.pending_register(), Some('+' | '*'))
@@ -718,6 +743,12 @@ impl Editor {
                 self.picker_action(action, cx);
                 self.restart_blink(cx);
             }
+            PickerOutcome::ActInSplit { action, vertical } => {
+                self.picker = None;
+                self.split_pane(if vertical { Axis::Row } else { Axis::Column }, cx);
+                self.picker_action(action, cx);
+                self.restart_blink(cx);
+            }
         }
         self.apply_effects(effects, cx);
         if let Some(job) = job {
@@ -786,16 +817,30 @@ impl Editor {
             match effect {
                 PickerEffect::Toast { text, undo } => self.show_toast(text, undo, cx),
                 PickerEffect::Moved { from, to } => {
-                    if let Source::Note { note, .. } = &mut self.source
-                        && let Ok(rest) = note.as_path().strip_prefix(&from)
-                    {
-                        let moved = if rest.as_os_str().is_empty() {
-                            to
-                        } else {
-                            to.join(rest)
-                        };
-                        if let Ok(moved) = NotePath::new(moved) {
-                            *note = moved;
+                    // Open notes inside it follow, in every pane.
+                    let follow = |note: &mut NotePath| {
+                        if let Ok(rest) = note.as_path().strip_prefix(&from) {
+                            let moved = if rest.as_os_str().is_empty() {
+                                to.clone()
+                            } else {
+                                to.join(rest)
+                            };
+                            if let Ok(moved) = NotePath::new(moved) {
+                                *note = moved;
+                            }
+                        }
+                    };
+                    if let Source::Note { note, .. } = &mut self.source {
+                        follow(note);
+                    }
+                    for doc in &mut self.parked {
+                        if let Source::Note { note, .. } = &mut doc.source {
+                            follow(note);
+                        }
+                    }
+                    for slot in &mut self.panes {
+                        if let Some(note) = &mut slot.note {
+                            follow(note);
                         }
                     }
                 }
@@ -807,14 +852,17 @@ impl Editor {
                             index.note_saved(relinked.note.clone(), &relinked.text);
                         }
                     }
-                    let Source::Note { note, .. } = &self.source else {
-                        continue;
-                    };
-                    if let Some(relinked) = done.iter().find(|r| r.note == *note) {
-                        self.buffer.reload(&relinked.text);
-                        let cursor = clamp_normal(self.buffer.text(), self.vim.cursor());
-                        self.vim.set_cursor(cursor);
-                        self.sync_lines();
+                    for relinked in &done {
+                        if self.source.key() == Some(&relinked.note) {
+                            self.buffer.reload(&relinked.text);
+                            let cursor = clamp_normal(self.buffer.text(), self.vim.cursor());
+                            self.vim.set_cursor(cursor);
+                            self.sync_lines();
+                        } else {
+                            self.with_parked(&relinked.note, |this| {
+                                this.buffer.reload(&relinked.text);
+                            });
+                        }
                     }
                 }
             }
@@ -863,6 +911,18 @@ impl Editor {
                 line = insertion.line;
                 self.sync_lines();
                 self.save_now(cx);
+            } else if self.parked_notes().contains(target) {
+                // Open in another pane: into its buffer, so it isn't stale.
+                line = self
+                    .with_parked(target, |this| {
+                        let text = this.buffer.to_string();
+                        let insertion = mnote_core::capture::insertion(&text, &title, entry);
+                        let at = text[..insertion.at].chars().count();
+                        this.vim.replace(&mut this.buffer, at..at, &insertion.text);
+                        this.save_now(cx);
+                        insertion.line
+                    })
+                    .unwrap_or(0);
             } else {
                 let text = match vault.read(target) {
                     Ok(text) => text,
@@ -1044,35 +1104,46 @@ impl Editor {
         }
     }
 
-    /// Opens another note of the same vault in this editor, saving the
-    /// current one first. Registers, history and options carry over.
+    /// Opens another note of the same vault in the focused pane, saving the
+    /// current one first. Registers, history and options carry over. A note
+    /// another pane shows keeps its buffer, shared.
     fn switch_to(&mut self, target: NotePath, cx: &mut Context<Self>) {
         self.save_now(cx);
-        let Source::Note { vault, note, .. } = &mut self.source else {
+        let Source::Note { vault, note } = &self.source else {
             return;
         };
         if *note == target {
             return;
         }
-        let buffer = match Buffer::open(vault, &target) {
-            Ok(buffer) => buffer,
-            Err(err) => {
-                self.reply = Some((format!("Couldn't open {target}: {err}").into(), true));
-                return;
-            }
+        let vault = vault.clone();
+        let mut next = match self.unpark(&target) {
+            Some(doc) => doc,
+            None => match Buffer::open(&vault, &target) {
+                Ok(buffer) => self.new_doc(
+                    buffer,
+                    Source::Note {
+                        vault,
+                        note: target,
+                    },
+                ),
+                Err(err) => {
+                    self.reply = Some((format!("Couldn't open {target}: {err}").into(), true));
+                    return;
+                }
+            },
         };
-        *note = target;
-        self.buffer = buffer;
-        let tx = self.syntax_ready.clone();
-        self.buffer.on_syntax_ready(move || {
-            let _ = tx.try_send(());
-        });
-        self.code_cache.clear();
-        self.table_cache.clear();
-        self.image_paths.borrow_mut().clear();
+        std::mem::swap(&mut self.buffer, &mut next.buffer);
+        std::mem::swap(&mut self.source, &mut next.source);
+        std::mem::swap(&mut self.autosave, &mut next.autosave);
+        std::mem::swap(&mut self.autosave_task, &mut next.autosave_task);
+        std::mem::swap(&mut self.notice, &mut next.notice);
+        std::mem::swap(&mut self.tree, &mut next.tree);
+        std::mem::swap(&mut self.code_cache, &mut next.code_cache);
+        std::mem::swap(&mut self.table_cache, &mut next.table_cache);
+        std::mem::swap(&mut self.image_paths, &mut next.image_paths);
+        self.set_pane_note();
+        self.park_or_drop(next);
         self.vim.set_cursor(0);
-        self.autosave_task = None;
-        self.notice = None;
         self.lines.reset(self.buffer.text().len_lines());
     }
 
@@ -1131,6 +1202,36 @@ impl Editor {
             AppCommand::ListNext => self.list_step(1, cx),
             AppCommand::ListPrevious => self.list_step(-1, cx),
             AppCommand::FollowLink => self.follow_link(cx),
+            AppCommand::Split { vertical, path } => {
+                let axis = if vertical { Axis::Row } else { Axis::Column };
+                let target = match path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+                    None => None,
+                    Some(name) => {
+                        let found = {
+                            let index = self.index.borrow();
+                            index.resolve(name).map(|i| index.notes()[i].path.clone())
+                        };
+                        match found {
+                            Some(note) => Some(note),
+                            None => {
+                                self.reply =
+                                    Some((format!("E32: No note named {name}").into(), true));
+                                return;
+                            }
+                        }
+                    }
+                };
+                self.split_pane(axis, cx);
+                if let Some(note) = target {
+                    self.switch_to(note, cx);
+                }
+            }
+            AppCommand::Close => {
+                if !self.close_pane(cx) {
+                    self.reply = Some(("E444: Cannot close last window".into(), true));
+                }
+            }
+            AppCommand::Only => self.only_pane(cx),
             AppCommand::ListOpen => {
                 if self.list.is_empty() {
                     self.reply = Some((
@@ -1168,6 +1269,16 @@ impl Editor {
     /// `:q`, `:wq`, `:x`. Notes autosave, so quitting saves them first; only
     /// unsaved scratch text needs `!` to throw away.
     fn quit(&mut self, write: bool, force: bool, cx: &mut Context<Self>) {
+        // With split panes, `:q` closes the focused one (notes autosave).
+        if self.panes.len() > 1 {
+            if write && let Err(err) = self.write(cx) {
+                self.reply = Some((err.into(), true));
+                return;
+            }
+            self.save_now(cx);
+            self.close_pane(cx);
+            return;
+        }
         let result = match self.source {
             Source::Scratch if write => Err("E32: No file name".to_owned()),
             Source::Scratch if self.buffer.is_dirty() && !force => {
@@ -1194,6 +1305,7 @@ impl Editor {
         let top = changed.unchanged_top.min(old).min(new);
         let bottom = changed.unchanged_bottom.min(old - top).min(new - top);
         self.lines.splice(top..old - bottom, new - top - bottom);
+        self.splice_other_panes(top..old - bottom, new - top - bottom);
     }
 
     /// The bar caret (insert mode, and the command line) blinks at about
@@ -1260,18 +1372,37 @@ impl Editor {
     }
 
     fn on_vault_event(&mut self, event: VaultEvent, cx: &mut Context<Self>) {
-        let Source::Note { vault, note, .. } = &self.source else {
+        let Source::Note { vault, .. } = &self.source else {
             return;
         };
         self.index.borrow_mut().apply(vault, &event);
+        let path = match &event {
+            VaultEvent::Changed(path) | VaultEvent::Removed(path) => path.clone(),
+        };
+        if self.source.key() == Some(&path) {
+            self.reload_from_disk(&event, true);
+        } else if self.parked_notes().contains(&path) {
+            self.with_parked(&path, |this| this.reload_from_disk(&event, false));
+        }
+        cx.notify();
+    }
+
+    /// The focused note changed or went away on disk. `live`: it's the
+    /// focused pane's own (not a parked note swapped in).
+    fn reload_from_disk(&mut self, event: &VaultEvent, live: bool) {
+        let Source::Note { vault, note } = &self.source else {
+            return;
+        };
         match event {
-            VaultEvent::Changed(path) if &path == note => {
+            VaultEvent::Changed(_) => {
                 let Ok(disk) = vault.read(note) else { return };
                 match self.buffer.reload(&disk) {
                     Reload::Reloaded => {
-                        let cursor = clamp_normal(self.buffer.text(), self.vim.cursor());
-                        self.vim.set_cursor(cursor);
-                        self.sync_lines();
+                        if live {
+                            let cursor = clamp_normal(self.buffer.text(), self.vim.cursor());
+                            self.vim.set_cursor(cursor);
+                            self.sync_lines();
+                        }
                         self.notice = None;
                     }
                     Reload::KeptLocalEdits => {
@@ -1280,14 +1411,11 @@ impl Editor {
                     }
                     Reload::Unchanged => {}
                 }
-                cx.notify();
             }
-            VaultEvent::Removed(path) if &path == note => {
+            VaultEvent::Removed(_) => {
                 self.notice =
                     Some("This note was deleted or moved on disk. Saving recreates it.".into());
-                cx.notify();
             }
-            _ => {}
         }
     }
 
@@ -1306,7 +1434,8 @@ impl Editor {
 
         let cursor = self.vim.cursor();
         let cursor_line = line_of(rope, cursor);
-        let current = ix == cursor_line;
+        // An unfocused pane shows no cursor line.
+        let current = ix == cursor_line && !self.drawing_other;
         let number = if current || !self.vim.options().relativenumber {
             ix + 1
         } else {
@@ -1893,6 +2022,9 @@ impl Editor {
     /// Whether line `ix` is in the `'<,'>` range of the command being typed,
     /// so the selection stays tinted while the command line is open.
     fn in_visual_range(&self, ix: usize) -> bool {
+        if self.drawing_other {
+            return false;
+        }
         let Some(line) = self.vim.command_line() else {
             return false;
         };
@@ -1920,7 +2052,8 @@ impl Editor {
         content: &SharedString,
         p: &Palette,
     ) -> (SharedString, Vec<Highlight>) {
-        let preview = self.vim.preview();
+        // A command being typed previews in the focused pane only.
+        let preview = self.vim.preview().filter(|_| !self.drawing_other);
         if let Some(preview) = preview.filter(|pv| !pv.substitutions.is_empty()) {
             let subs = preview.substitutions_in(start..start + len);
             if subs.is_empty() {
@@ -1981,6 +2114,9 @@ impl Editor {
         start: usize,
         len: usize,
     ) -> Option<std::ops::Range<usize>> {
+        if self.drawing_other {
+            return None;
+        }
         let rope = self.buffer.text();
         let (anchor, cursor) = (self.vim.anchor(), self.vim.cursor());
         let (a, b) = (anchor.min(cursor), anchor.max(cursor));
@@ -2159,9 +2295,94 @@ impl Editor {
     }
 }
 
+impl Editor {
+    /// The panes as laid out, with a rule between parts.
+    fn render_layout(
+        &self,
+        layout: &Layout,
+        view: &gpui::Entity<Editor>,
+        p: &Palette,
+    ) -> AnyElement {
+        match layout {
+            Layout::Pane(id) => self.render_pane(*id, view, p),
+            Layout::Split(axis, parts) => {
+                let row = *axis == Axis::Row;
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .when(!row, |d| d.flex_col())
+                    .children(parts.iter().enumerate().map(|(i, part)| {
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .when(i > 0 && row, |d| d.border_l_1())
+                            .when(i > 0 && !row, |d| d.border_t_1())
+                            .border_color(Theme::color(p.line))
+                            .child(self.render_layout(part, view, p))
+                    }))
+                    .into_any_element()
+            }
+        }
+    }
+
+    /// One pane: its note's visible lines. With several panes, the focused
+    /// one has a `cursor` rule along its top and the others are quieter.
+    fn render_pane(&self, id: PaneId, view: &gpui::Entity<Editor>, p: &Palette) -> AnyElement {
+        let focused = id == self.focused;
+        let several = self.panes.len() > 1;
+        let lines = if focused {
+            Some(self.lines.clone())
+        } else {
+            self.panes
+                .iter()
+                .find(|s| s.id == id)
+                .and_then(|s| s.local.as_ref())
+                .map(|l| l.lines.clone())
+        };
+        let Some(lines) = lines else {
+            return div().flex_1().into_any_element();
+        };
+        let view = view.clone();
+        div()
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .justify_center()
+            .pt(px(space::S8))
+            .when(several, |d| {
+                d.px(px(space::S3)).border_t_2().border_color(if focused {
+                    Theme::color(p.cursor)
+                } else {
+                    gpui::transparent_black()
+                })
+            })
+            .when(several && !focused, |d| d.opacity(0.72))
+            .child(
+                list(lines, move |ix, _window, cx: &mut App| {
+                    view.update(cx, |this, cx| {
+                        if this.focused == id {
+                            this.render_line(ix, cx)
+                        } else {
+                            this.render_other(id, ix, cx)
+                        }
+                    })
+                })
+                .size_full()
+                .max_w(px(size::GUTTER_W + size::MEASURE + space::S8)),
+            )
+            .into_any_element()
+    }
+}
+
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.tree = self.buffer.syntax_tree().cloned();
+        self.refresh_parked_trees();
         let p = cx.theme().palette;
         let width = window.viewport_size().width / px(1.);
         let caret_on = self.caret_on;
@@ -2190,6 +2411,9 @@ impl Render for Editor {
         if let Some(notice) = &self.notice {
             status = status.item(notice.clone());
         }
+        for file in self.other_pane_files() {
+            status = status.item(format!("│ {file}"));
+        }
         let status = status
             .right(format!("{} lines", line_count(rope)))
             .right(format!("{}:{}", line + 1, column + 1));
@@ -2206,6 +2430,9 @@ impl Render for Editor {
                 TopBar::new(self.path_segments())
                     .dirty(self.buffer.is_dirty())
                     .leading_inset(px(TRAFFIC_LIGHT_INSET))
+                    .when(self.panes.len() > 1, |bar| {
+                        bar.hint("⌃w h j k l move · ⌃w c close")
+                    })
                     .when(self.vim.command_line().is_some(), |bar| {
                         bar.hint("⇥ complete · ↑ history · ⌃f edit")
                     })
@@ -2214,21 +2441,7 @@ impl Render for Editor {
                         |bar| bar.hint(format!("space m view: {}", self.view.next().name())),
                     ),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .justify_center()
-                    .pt(px(space::S8))
-                    .child(
-                        list(self.lines.clone(), move |ix, _window, cx: &mut App| {
-                            view.update(cx, |this, cx| this.render_line(ix, cx))
-                        })
-                        .size_full()
-                        .max_w(px(size::GUTTER_W + size::MEASURE + space::S8)),
-                    ),
-            )
+            .child(self.render_layout(&self.layout.clone(), &view, p))
             // The command line takes the status line's place while it's
             // typed, and while it shows the result.
             .map(|editor| {

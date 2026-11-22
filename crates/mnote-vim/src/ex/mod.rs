@@ -100,6 +100,16 @@ pub enum AppCommand {
     ListOpen,
     /// `gd`: follow the `[[link]]` at the cursor.
     FollowLink,
+    /// `:split [note]` (`vertical`: `:vsplit`): a new pane, on that note or
+    /// this one.
+    Split {
+        vertical: bool,
+        path: Option<String>,
+    },
+    /// `:close`: closes the focused pane.
+    Close,
+    /// `:only`: closes every other pane.
+    Only,
 }
 
 /// What a successful command produced.
@@ -460,6 +470,18 @@ impl Vim {
             "daily" => {
                 no_args(args)?;
                 Ok(ExOutcome::app(AppCommand::Daily))
+            }
+            "split" | "vsplit" => Ok(ExOutcome::app(AppCommand::Split {
+                vertical: cmd.name == "vsplit",
+                path: arg(),
+            })),
+            "close" | "only" => {
+                no_args(args)?;
+                Ok(ExOutcome::app(if cmd.name == "close" {
+                    AppCommand::Close
+                } else {
+                    AppCommand::Only
+                }))
             }
             other => Err(ExError::not_a_command(other)),
         }
@@ -1240,6 +1262,22 @@ mod tests {
             Some(AppCommand::View(Some("source".into())))
         );
         assert_eq!(app("explore"), Some(AppCommand::Explore(None)));
+        assert_eq!(
+            app("vs ideas"),
+            Some(AppCommand::Split {
+                vertical: true,
+                path: Some("ideas".into())
+            })
+        );
+        assert_eq!(
+            app("sp"),
+            Some(AppCommand::Split {
+                vertical: false,
+                path: None
+            })
+        );
+        assert_eq!(app("clo"), Some(AppCommand::Close));
+        assert_eq!(app("on"), Some(AppCommand::Only));
         assert_eq!(
             app("find road"),
             Some(AppCommand::Find(Some("road".into())))

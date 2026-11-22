@@ -520,8 +520,12 @@ impl PickerDelegate for Finder {
         if let Results::Content(_) = &self.results {
             return vec![
                 Hint::new("⏎", "jump to line"),
+                Hint::new("⌃v ⌃x", "split"),
                 Hint::new("⌃q", "send to list"),
             ];
+        }
+        if let Results::Notes { .. } = &self.results {
+            return vec![Hint::new("⏎", "open"), Hint::new("⌃v ⌃x", "split")];
         }
         vec![match &self.results {
             Results::Notes { .. } => Hint::new("⏎", "open"),

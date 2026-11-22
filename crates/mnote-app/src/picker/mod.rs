@@ -190,6 +190,12 @@ pub enum PickerOutcome {
     Close,
     /// Close and do this.
     Act(PickerAction),
+    /// `⌃v` / `⌃x`: close and do this in a new pane beside (`vertical`) or
+    /// below the focused one.
+    ActInSplit {
+        action: PickerAction,
+        vertical: bool,
+    },
 }
 
 /// What a particular picker lists and does.
@@ -339,6 +345,23 @@ impl Picker {
         if self.delegate.capturing() {
             let confirm = self.delegate.key(key);
             return self.apply(confirm);
+        }
+        if let Key::Ctrl(c @ ('v' | 'x')) = key {
+            if self.delegate.is_empty() || !self.delegate.selectable(self.selected) {
+                return PickerOutcome::Open;
+            }
+            return match self.delegate.confirm(self.selected) {
+                Confirm::Act(
+                    action @ (PickerAction::OpenNote(_)
+                    | PickerAction::CreateNote(_)
+                    | PickerAction::JumpTo { .. }),
+                ) => PickerOutcome::ActInSplit {
+                    action,
+                    vertical: c == 'v',
+                },
+                // Rows that don't open a note: as if ⏎.
+                confirm => self.apply(confirm),
+            };
         }
         if key == Key::Ctrl('q') {
             return match self.delegate.send_to_list() {
@@ -998,6 +1021,34 @@ mod tests {
             PickerOutcome::Act(PickerAction::OpenNote(
                 NotePath::new("banana.md").expect("path")
             ))
+        );
+    }
+
+    #[test]
+    fn ctrl_v_and_ctrl_x_open_in_a_split() {
+        let mut p = picker();
+        let apple = PickerAction::OpenNote(NotePath::new("apple.md").expect("path"));
+        assert_eq!(
+            keys(&mut p, "<c-v>"),
+            PickerOutcome::ActInSplit {
+                action: apple.clone(),
+                vertical: true
+            }
+        );
+        let mut p = picker();
+        assert_eq!(
+            keys(&mut p, "<c-x>"),
+            PickerOutcome::ActInSplit {
+                action: apple,
+                vertical: false
+            }
+        );
+        let mut p = picker();
+        keys(&mut p, "<c-n><c-n>");
+        assert_eq!(
+            keys(&mut p, "<c-v>"),
+            PickerOutcome::Open,
+            "a row that doesn't open a note acts as ⏎"
         );
     }
 
