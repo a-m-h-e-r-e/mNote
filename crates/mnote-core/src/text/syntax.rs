@@ -10,7 +10,12 @@
 //! - a worker thread re-parses a snapshot of the text (a rope clone is O(1));
 //! - when the result arrives, edits made since the snapshot are applied to it
 //!   too, and another parse is requested if the text moved on.
+//!
+//! Freeing a tree walks every node it alone owns, which on a large note
+//! takes milliseconds; replaced trees go to [`drop_tree_later`] so that
+//! happens off the UI thread too.
 
+use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
@@ -181,11 +186,34 @@ impl Syntax {
             }
         }
         if tree.is_some() {
-            self.tree = tree;
+            drop_tree_later(std::mem::replace(&mut self.tree, tree));
         }
         self.parsed_revision = Some(parsed.revision);
         self.in_flight = None;
         self.edits_since_request.clear();
+    }
+}
+
+/// Frees `tree` on a background thread: freeing a large note's tree takes
+/// milliseconds, too long for the keystroke path. Trees share nodes with
+/// atomic counts, so this is safe while copies are still in use. Without the
+/// thread it's freed here.
+pub fn drop_tree_later(tree: Option<Tree>) {
+    static TRASH: OnceLock<Option<Sender<Tree>>> = OnceLock::new();
+    let Some(tree) = tree else {
+        return;
+    };
+    let trash = TRASH.get_or_init(|| {
+        let (send, recv) = mpsc::channel::<Tree>();
+        thread::Builder::new()
+            .name("mnote-tree-drop".into())
+            .spawn(move || recv.into_iter().for_each(drop))
+            .ok()
+            .map(|_| send)
+    });
+    if let Some(trash) = trash {
+        // A failed send hands the tree back; it's then freed here.
+        let _ = trash.send(tree);
     }
 }
 

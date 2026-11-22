@@ -3196,7 +3196,9 @@ impl Render for Editor {
                 .child(first_run)
                 .into_any_element();
         }
-        self.tree = self.buffer.syntax_tree().cloned();
+        // The tree it replaces is freed off this thread (slow on big notes).
+        let tree = self.buffer.syntax_tree().cloned();
+        mnote_core::drop_tree_later(std::mem::replace(&mut self.tree, tree));
         self.refresh_parked_trees();
         self.count_words_soon(cx);
         self.blame_soon(cx);

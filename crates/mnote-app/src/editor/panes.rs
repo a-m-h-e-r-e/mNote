@@ -541,7 +541,8 @@ impl Editor {
     /// Refreshes the parked docs' syntax trees for drawing.
     pub(super) fn refresh_parked_trees(&mut self) {
         for doc in &mut self.parked {
-            doc.tree = doc.buffer.syntax_tree().cloned();
+            let tree = doc.buffer.syntax_tree().cloned();
+            mnote_core::drop_tree_later(std::mem::replace(&mut doc.tree, tree));
         }
     }
 

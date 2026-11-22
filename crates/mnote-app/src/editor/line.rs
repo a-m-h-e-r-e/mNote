@@ -109,12 +109,13 @@ const SCROLL_MARGIN_CELLS: f32 = 4.;
 
 /// The sideways offset that shows the caret at `x` (a cell wide) in `width`,
 /// moving `offset` as little as possible and keeping a margin beside it.
+/// Whole pixels, so glyphs keep the positions they're rasterized at.
 pub fn follow_caret(offset: Pixels, x: Pixels, cell: Pixels, width: Pixels) -> Pixels {
     let margin = (cell * SCROLL_MARGIN_CELLS).min(width / 4.);
     if x - margin < offset {
-        (x - margin).max(px(0.))
+        (x - margin).max(px(0.)).floor()
     } else if x + cell + margin > offset + width {
-        x + cell + margin - width
+        (x + cell + margin - width).ceil()
     } else {
         offset
     }

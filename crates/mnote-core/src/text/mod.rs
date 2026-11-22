@@ -16,6 +16,7 @@ pub use autosave::Autosave;
 pub use history::Change;
 use history::{History, Step};
 use ropey::Rope;
+pub use syntax::drop_tree_later;
 use syntax::{Syntax, point_at};
 use tree_sitter::{InputEdit, Tree};
 
@@ -543,6 +544,20 @@ mod tests {
             b.syntax_tree_now().expect("tree").root_node().to_sexp(),
             before
         );
+    }
+
+    #[test]
+    fn replaced_trees_are_freed_off_the_thread() {
+        let mut b = Buffer::new("# Title\n\nSome text.\n");
+        let held = b.syntax_tree_now().expect("tree").clone();
+        // The buffer's next tree replaces (and hands off) the one it had.
+        b.edit(0..0, "Intro\n\n", 0).expect("edit");
+        let fresh = b.syntax_tree_now().expect("tree").clone();
+        // A copy handed off while others still share its nodes.
+        drop_tree_later(Some(held.clone()));
+        drop_tree_later(None);
+        assert!(held.root_node().to_sexp().contains("atx_heading"));
+        assert_eq!(fresh.root_node().to_sexp(), fresh_sexp(&b.to_string()));
     }
 
     #[test]

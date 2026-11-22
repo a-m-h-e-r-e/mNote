@@ -85,3 +85,9 @@ Keystroke-to-pixels in the real window (types into a note, then prints p50/p95/m
 ```bash
 MNOTE_LATENCY=1 MNOTE_LATENCY_BENCH=300 target/release/mnote ~/notes/some-note.md
 ```
+
+The same on a large note (336 KB of long lines), wrapped and not, in a throwaway HOME; it fails if p95 goes over 8 ms. Run it after changes to the keystroke path:
+
+```bash
+tools/bench-large-note.sh
+```
