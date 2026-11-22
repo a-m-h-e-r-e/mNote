@@ -1339,6 +1339,8 @@ impl Editor {
             return;
         };
         self.save_now(cx);
+        // An older file gains the settings it doesn't have yet.
+        let mut missing = None;
         let next = match self.unpark(&DocKey::Config) {
             Some(doc) => doc,
             None => {
@@ -1363,10 +1365,38 @@ impl Editor {
                         return;
                     }
                 };
+                missing = Config::missing_settings(&text);
                 self.new_doc(Buffer::new(&text), Source::Config(path))
             }
         };
         self.show_doc(next);
+        // Added as one change (u takes it back), saved like any edit. They're
+        // at their defaults, so nothing changes until one is edited.
+        if let Some(missing) = missing {
+            let rope = self.buffer.text();
+            let end = rope.len_chars();
+            let gap = if end == 0 || rope.char(end - 1) == '\n' {
+                ""
+            } else {
+                "\n"
+            };
+            let added = missing
+                .lines()
+                .filter(|l| !l.starts_with('#') && l.contains(" = "))
+                .count();
+            self.vim
+                .replace(&mut self.buffer, end..end, &format!("{gap}{missing}"));
+            self.sync_lines();
+            self.schedule_autosave(cx);
+            self.reply = Some((
+                format!(
+                    "Added {added} setting{} this file didn't have yet, at the end (u undoes)",
+                    if added == 1 { "" } else { "s" }
+                )
+                .into(),
+                false,
+            ));
+        }
         cx.notify();
     }
 

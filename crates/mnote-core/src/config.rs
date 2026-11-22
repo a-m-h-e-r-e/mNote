@@ -351,13 +351,19 @@ impl Config {
                     config.mappings = Some(lines);
                 }
                 "panel_radius" => {
-                    config.panel_radius = Some(
-                        value
-                            .as_integer()
-                            .and_then(|n| u32::try_from(n).ok())
-                            .filter(|n| PANEL_RADII.contains(n))
-                            .ok_or_else(|| wrong("a whole number from 0 to 24"))?,
-                    );
+                    config.panel_radius = if value.as_str() == Some("default") {
+                        None
+                    } else {
+                        Some(
+                            value
+                                .as_integer()
+                                .and_then(|n| u32::try_from(n).ok())
+                                .filter(|n| PANEL_RADII.contains(n))
+                                .ok_or_else(|| {
+                                    wrong("a whole number from 0 to 24, or \"default\"")
+                                })?,
+                        )
+                    };
                 }
                 "panel_shadow" => {
                     config.panel_shadow = value.as_bool().ok_or_else(|| wrong("true or false"))?;
@@ -402,121 +408,290 @@ impl Config {
             .unwrap_or_else(|_| crate::capture::daily_note(year, month, day))
     }
 
-    /// A commented config file holding these settings, for first run and
-    /// for `space ,` when there's no file yet.
-    pub fn template(&self) -> String {
-        let vault = self
-            .vault
-            .as_ref()
-            .map_or_else(|| "~/notes".to_owned(), |v| collapse_home(v));
-        let theme = match self.theme {
+    /// Every setting as config.toml writes it: what it does and the values
+    /// it takes (in `help`), and its value in these settings.
+    fn settings(&self) -> Vec<Setting> {
+        let d = Config::default();
+        let on_off = |b: bool| if b { "true" } else { "false" };
+        let quoted = |s: &str| format!("\"{s}\"");
+        let theme = |t: ThemeChoice| match t {
             ThemeChoice::System => "system",
             ThemeChoice::Dark => "dark",
             ThemeChoice::Light => "light",
         };
-        let view = match self.view {
+        let view = |v: ViewChoice| match v {
             ViewChoice::Styled => "styled",
             ViewChoice::Source => "source",
             ViewChoice::Plain => "plain",
         };
-        format!(
-            "# mNote settings. Saving this note applies them.\n\
-             \n\
-             # Your notes folder, used when mNote starts without one.\n\
-             vault = \"{vault}\"\n\
-             \n\
-             # Global keys: option, control, command and shift with a letter,\n\
-             # digit, punctuation key or space.\n\
-             summon = \"{summon}\"\n\
-             capture = \"{capture}\"\n\
-             \n\
-             # \"system\", \"dark\" or \"light\".\n\
-             theme = \"{theme}\"\n\
-             \n\
-             # How notes open: \"styled\", \"source\" or \"plain\" (space m cycles).\n\
-             view = \"{view}\"\n\
-             \n\
-             # Line numbers count from the cursor.\n\
-             relative_numbers = {rnu}\n\
-             \n\
-             # Today's note for :daily and quick capture. {{date}} is 2026-11-22;\n\
-             # {{year}}, {{month}} and {{day}} work too.\n\
-             daily_note = \"{daily}\"\n\
-             \n\
-             # Who last changed the cursor line, and when, if the vault is in git.\n\
-             git_blame = {blame}\n\
-             \n\
-             # The note's font, and the font for headings and the interface\n\
-             # (any installed font; IBM Plex comes with mNote).\n\
-             font = \"{font}\"\n\
-             ui_font = \"{ui_font}\"\n\
-             \n\
-             # Note text size in pixels, 10 to 32; headings and code follow.\n\
-             font_size = {font_size}\n\
-             \n\
-             # Interface text size in pixels, 11 to 24: menus, pickers, bars.\n\
-             ui_font_size = {ui_font_size}\n\
-             \n\
-             # The key before mNote's commands (\"space\" or one key, like \",\").\n\
-             leader = \"{leader}\"\n\
-             \n\
-             # \"system\": y, d and p use the system clipboard (and ⌘C ⌘V).\n\
-             # \"vim\": they keep to Vim's registers; \"+ reaches the clipboard.\n\
-             clipboard = \"{clipboard}\"\n\
-             \n\
-             # Long lines wrap; with false each line is one row and the note\n\
-             # scrolls sideways (:set wrap / :set nowrap).\n\
-             wrap = {wrap}\n\
-             \n\
-             # j and k move by screen row through wrapped lines (as gj and gk).\n\
-             wrap_motion = {wrap_motion}\n\
-             \n\
-             # Notes save a moment after you stop typing. With false, they save\n\
-             # on :w and ⌘S, and still when you leave a note, the window or mNote.\n\
-             autosave = {autosave}\n\
-             \n\
-             # Corner radius of pickers, modals and toasts in pixels, 0 to 24\n\
-             # (0 is square); without it they keep mNote's own.\n\
-             {panel_radius}\n\
-             \n\
-             # The shadow under pickers, modals and toasts.\n\
-             panel_shadow = {panel_shadow}\n\
-             \n\
-             # Vim mappings, like in a vimrc (map, noremap, nmap, nnoremap, vmap,\n\
-             # vnoremap, imap, inoremap and the unmap commands).\n\
-             mappings = [{mappings}]\n",
-            summon = key_words(&self.summon),
-            capture = key_words(&self.capture),
-            rnu = self.relative_numbers,
-            daily = self.daily_note,
-            blame = self.git_blame,
-            font = self.font,
-            ui_font = self.ui_font,
-            font_size = self.font_size,
-            ui_font_size = self.ui_font_size,
-            leader = leader_name(self.leader),
-            clipboard = if self.system_clipboard {
-                "system"
-            } else {
-                "vim"
-            },
-            wrap_motion = self.wrap_motion,
-            wrap = self.wrap,
-            autosave = self.autosave,
-            panel_radius = match self.panel_radius {
-                Some(r) => format!("panel_radius = {r}"),
-                None => "# panel_radius = 10".to_owned(),
-            },
-            panel_shadow = self.panel_shadow,
-            mappings = self
-                .mappings
+        let clipboard = |system: bool| if system { "system" } else { "vim" };
+        let radius = |r: Option<u32>| r.map_or_else(|| quoted("default"), |r| r.to_string());
+        let mappings = |m: &Option<Vec<String>>| {
+            let lines = m
                 .clone()
-                .unwrap_or_else(|| vec!["inoremap jk <Esc>".to_owned()])
-                .iter()
-                .map(|m| format!("{m:?}"))
-                .collect::<Vec<_>>()
-                .join(", "),
-        )
+                .unwrap_or_else(|| vec!["inoremap jk <Esc>".to_owned()]);
+            let items: Vec<String> = lines.iter().map(|m| format!("{m:?}")).collect();
+            format!("[{}]", items.join(", "))
+        };
+        let vault = self
+            .vault
+            .as_ref()
+            .map_or_else(|| "~/notes".to_owned(), |v| collapse_home(v));
+        vec![
+            Setting::new(
+                "vault",
+                "Your notes folder, used when mNote starts without one.\n\
+                 Values: a folder path in quotes (~ is your home folder).",
+                quoted(&vault),
+            ),
+            Setting::new(
+                "summon",
+                &format!(
+                    "The global key that shows and hides mNote, from any app.\n\
+                     Values: option, control, command and shift, joined with +, and a\n\
+                     letter, digit, punctuation key or space, like \"control+shift+space\".\n\
+                     Default: {}",
+                    quoted(&key_words(&d.summon))
+                ),
+                quoted(&key_words(&self.summon)),
+            ),
+            Setting::new(
+                "capture",
+                &format!(
+                    "The global key for quick capture into today's note.\n\
+                     Values: as for summon. Default: {}",
+                    quoted(&key_words(&d.capture))
+                ),
+                quoted(&key_words(&self.capture)),
+            ),
+            Setting::new(
+                "theme",
+                &format!(
+                    "Colours. Values: \"system\" (follows macOS), \"dark\", \"light\".\n\
+                     Default: {}",
+                    quoted(theme(d.theme))
+                ),
+                quoted(theme(self.theme)),
+            ),
+            Setting::new(
+                "view",
+                &format!(
+                    "How notes open (space m cycles). Values: \"styled\" (Markdown\n\
+                     formatted, markers hidden), \"source\" (every character, coloured),\n\
+                     \"plain\" (every character, no colour). Default: {}",
+                    quoted(view(d.view))
+                ),
+                quoted(view(self.view)),
+            ),
+            Setting::new(
+                "relative_numbers",
+                &format!(
+                    "Line numbers count from the cursor line (:set rnu).\n\
+                     Values: true, false. Default: {}",
+                    on_off(d.relative_numbers)
+                ),
+                on_off(self.relative_numbers).into(),
+            ),
+            Setting::new(
+                "daily_note",
+                &format!(
+                    "Today's note, for :daily and quick capture.\n\
+                     Values: a path in the vault ending in .md; {{date}} is 2026-11-22,\n\
+                     and {{year}}, {{month}} and {{day}} work too. Default: {}",
+                    quoted(&d.daily_note)
+                ),
+                quoted(&self.daily_note),
+            ),
+            Setting::new(
+                "git_blame",
+                &format!(
+                    "Shows who last changed the cursor line, and when, if the vault\n\
+                     is in git. Values: true, false. Default: {}",
+                    on_off(d.git_blame)
+                ),
+                on_off(self.git_blame).into(),
+            ),
+            Setting::new(
+                "font",
+                &format!(
+                    "The note's font, also for code, inputs and the status line.\n\
+                     Values: any installed font's name. Default: {}",
+                    quoted(&d.font)
+                ),
+                quoted(&self.font),
+            ),
+            Setting::new(
+                "ui_font",
+                &format!(
+                    "The font for headings and the interface.\n\
+                     Values: any installed font's name. Default: {}",
+                    quoted(&d.ui_font)
+                ),
+                quoted(&self.ui_font),
+            ),
+            Setting::new(
+                "font_size",
+                &format!(
+                    "Note text size in pixels; headings and code follow it.\n\
+                     Values: 10 to 32. Default: {}",
+                    d.font_size
+                ),
+                self.font_size.to_string(),
+            ),
+            Setting::new(
+                "ui_font_size",
+                &format!(
+                    "Interface text size in pixels: menus, pickers, bars, hints.\n\
+                     Values: 11 to 24. Default: {}",
+                    d.ui_font_size
+                ),
+                self.ui_font_size.to_string(),
+            ),
+            Setting::new(
+                "leader",
+                &format!(
+                    "The key before mNote's own commands (leader f finds notes).\n\
+                     Values: \"space\" or one key, like \",\". Default: {}",
+                    quoted(&leader_name(d.leader))
+                ),
+                quoted(&leader_name(self.leader)),
+            ),
+            Setting::new(
+                "clipboard",
+                &format!(
+                    "Where yanks and pastes go.\n\
+                     Values: \"system\" (y, d and p use the system clipboard, as do\n\
+                     ⌘C ⌘X ⌘V), \"vim\" (they keep to Vim's registers; \"+ reaches the\n\
+                     clipboard). Default: {}",
+                    quoted(clipboard(d.system_clipboard))
+                ),
+                quoted(clipboard(self.system_clipboard)),
+            ),
+            Setting::new(
+                "wrap",
+                &format!(
+                    "Long lines wrap onto more rows (:set wrap / :set nowrap); with\n\
+                     false each line is one row and the note scrolls sideways.\n\
+                     Values: true, false. Default: {}",
+                    on_off(d.wrap)
+                ),
+                on_off(self.wrap).into(),
+            ),
+            Setting::new(
+                "wrap_motion",
+                &format!(
+                    "j and k move by screen row through wrapped lines, as gj and gk.\n\
+                     Values: true, false. Default: {}",
+                    on_off(d.wrap_motion)
+                ),
+                on_off(self.wrap_motion).into(),
+            ),
+            Setting::new(
+                "autosave",
+                &format!(
+                    "Notes save a moment after you stop typing. With false they save\n\
+                     on :w and ⌘S, and still when you leave a note, the window or mNote.\n\
+                     Values: true, false. Default: {}",
+                    on_off(d.autosave)
+                ),
+                on_off(self.autosave).into(),
+            ),
+            Setting::new(
+                "panel_radius",
+                &format!(
+                    "Corner radius of pickers, modals, the capture panel, the command\n\
+                     line and toasts. Values: 0 to 24 pixels (0 is square), or \"default\"\n\
+                     (10 for pickers and modals, 6 for the rest). Default: {}",
+                    radius(d.panel_radius)
+                ),
+                radius(self.panel_radius),
+            ),
+            Setting::new(
+                "panel_shadow",
+                &format!(
+                    "The shadow under pickers, modals and toasts.\n\
+                     Values: true, false. Default: {}",
+                    on_off(d.panel_shadow)
+                ),
+                on_off(self.panel_shadow).into(),
+            ),
+            Setting::new(
+                "mappings",
+                &format!(
+                    "Vim mappings, as in a vimrc. Values: a list of lines using map,\n\
+                     noremap, nmap, nnoremap, vmap, vnoremap, imap, inoremap or their\n\
+                     unmap commands, like \"nnoremap j gj\". They replace the built-in\n\
+                     jk to leave INSERT, so keep that line to keep it.\n\
+                     Default: {}",
+                    mappings(&d.mappings)
+                ),
+                mappings(&self.mappings),
+            ),
+        ]
+    }
+
+    /// A commented config file holding these settings, for first run and
+    /// for `space ,` when there's no file yet: every setting, what it does,
+    /// the values it takes and its default.
+    pub fn template(&self) -> String {
+        let mut out = String::from(
+            "# mNote settings. Saving this note applies them.\n\
+             # Each setting says what it does, the values it takes and its default.\n",
+        );
+        for setting in self.settings() {
+            out.push('\n');
+            out.push_str(&setting.block());
+        }
+        out
+    }
+
+    /// The settings missing from config text, at their defaults with their
+    /// comments, to add to the end of an older file. `None` when nothing is
+    /// missing, or the text doesn't parse (it's left as it is). The vault
+    /// is never added: without one, mNote asks for it.
+    pub fn missing_settings(text: &str) -> Option<String> {
+        let table: toml::Table = text.parse().ok()?;
+        let missing: Vec<String> = Config::default()
+            .settings()
+            .into_iter()
+            .filter(|s| s.key != "vault" && !table.contains_key(s.key))
+            .map(|s| s.block())
+            .collect();
+        if missing.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "\n# Settings this file didn't have yet, added at their defaults.\n\n{}",
+            missing.join("\n")
+        ))
+    }
+}
+
+/// One setting in config.toml: its comment and its line.
+struct Setting {
+    key: &'static str,
+    help: String,
+    value: String,
+}
+
+impl Setting {
+    fn new(key: &'static str, help: &str, value: String) -> Self {
+        Setting {
+            key,
+            help: help.to_owned(),
+            value,
+        }
+    }
+
+    fn block(&self) -> String {
+        let mut out = String::new();
+        for line in self.help.lines() {
+            out.push_str("# ");
+            out.push_str(line.trim_start());
+            out.push('\n');
+        }
+        out.push_str(&format!("{} = {}\n", self.key, self.value));
+        out
     }
 }
 
@@ -639,6 +814,58 @@ mod tests {
     }
 
     #[test]
+    fn the_template_lists_every_setting_with_values_and_default() {
+        let template = Config::default().template();
+        assert_eq!(
+            Config::parse(&template),
+            Ok(Config {
+                vault: Some(expand_home("~/notes")),
+                // The built-in mapping, written out.
+                mappings: Some(vec!["inoremap jk <Esc>".into()]),
+                ..Config::default()
+            })
+        );
+        for setting in Config::default().settings() {
+            let line = format!("\n{} = ", setting.key);
+            assert!(template.contains(&line), "{} is written", setting.key);
+            assert!(
+                setting.help.contains("Values"),
+                "{} lists its values",
+                setting.key
+            );
+            if setting.key != "vault" {
+                assert!(
+                    setting.help.contains("Default: "),
+                    "{} says its default",
+                    setting.key
+                );
+            }
+        }
+        assert!(template.contains("panel_radius = \"default\""));
+        assert!(template.contains("# Values: true, false. Default: true\nautosave = true"));
+    }
+
+    #[test]
+    fn missing_settings_are_added_at_their_defaults() {
+        let old = "vault = \"~/n\"\ntheme = \"dark\"\n";
+        let added = Config::missing_settings(old).expect("some are missing");
+        assert!(added.contains("\nautosave = true\n"));
+        assert!(added.contains("\nwrap = true\n"));
+        assert!(!added.contains("\ntheme = "), "theme is already there");
+        assert!(!added.contains("\nvault = "), "the vault is never added");
+        // The file with them added keeps its own settings.
+        let full = format!("{old}{added}");
+        let config = Config::parse(&full).expect("still valid");
+        assert_eq!(config.theme, ThemeChoice::Dark);
+        assert_eq!(Config::missing_settings(&full), None);
+        assert_eq!(
+            Config::missing_settings("theme = "),
+            None,
+            "broken: left alone"
+        );
+    }
+
+    #[test]
     fn settings_are_read() {
         let config = Config::parse(
             "theme = \"dark\"\nsummon = \"ctrl+shift+space\"\ndaily_note = \"days/{year}/{month}-{day}.md\"\n",
@@ -682,6 +909,10 @@ mod tests {
         assert_eq!(
             Config::parse("mappings = [\"nnoremap j gj\"]").map(|c| c.mappings),
             Ok(Some(vec!["nnoremap j gj".to_owned()]))
+        );
+        assert_eq!(
+            Config::parse("panel_radius = \"default\"").map(|c| c.panel_radius),
+            Ok(None)
         );
         let err = Config::parse("panel_radius = 30").expect_err("too round");
         assert!(err.message.contains("0 to 24"));
