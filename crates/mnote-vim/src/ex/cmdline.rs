@@ -1565,6 +1565,52 @@ mod mapping_tests {
     }
 
     #[test]
+    fn normal_and_visual_mappings() {
+        // A mapping runs its keys; a count before it still applies.
+        check("|a\nb\nc\n", ":nnoremap Q dd<cr>Q", "|b\nc\n");
+        check("|a\nb\nc\n", ":nnoremap Q dd<cr>2Q", "|c\n");
+        // Two keys: the first waits, the pair runs the mapping.
+        check("|a\nb\n", ":nmap ,d dd<cr>,d", "|b\n");
+        // VISUAL mappings apply in VISUAL only.
+        check("|abc\n", ":vnoremap q d<cr>vlq", "|c\n");
+        check("a|bc\n", ":vnoremap q d<cr>x", "a|c\n");
+        // :nunmap takes one away.
+        check("|a\nb\n", ":nnoremap Q dd<cr>:nunmap Q<cr>Q", "|a\nb\n");
+    }
+
+    #[test]
+    fn a_waiting_prefix_runs_as_typed_when_flushed() {
+        let mut buf = mnote_core::Buffer::new("abc\n");
+        let mut vim = crate::Vim::new();
+        for key in crate::parse_keys(":nmap xy dd<cr>x") {
+            vim.handle_key(key, &mut buf);
+        }
+        assert!(vim.map_pending(), "x waits: it may become xy");
+        assert_eq!(buf.to_string(), "abc\n");
+        vim.flush_mapping(&mut buf);
+        assert!(!vim.map_pending());
+        assert_eq!(buf.to_string(), "bc\n", "then x runs as typed");
+    }
+
+    #[test]
+    fn map_lists_and_unmap_reports() {
+        let (_, vim, _) = run("|a\n", ":nnoremap Q dd<cr>:vmap q d<cr>");
+        let mut vim = vim;
+        let mut buf = mnote_core::Buffer::new("a\n");
+        let listed = vim
+            .execute("map", &mut buf)
+            .expect("lists")
+            .message
+            .unwrap_or_default();
+        assert!(
+            listed.contains("n  Q") && listed.contains("v  q"),
+            "{listed}"
+        );
+        let err = vim.execute("nunmap Z", &mut buf).expect_err("none");
+        assert_eq!(err.code, 31);
+    }
+
+    #[test]
     fn pages_move_by_the_window_height() {
         let text: String = (0..60).map(|i| format!("{i}\n")).collect();
         let mut buf = mnote_core::Buffer::new(&text);

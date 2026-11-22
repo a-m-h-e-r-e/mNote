@@ -140,6 +140,11 @@ pub struct Vim {
     /// Insert-mode mappings (`:imap`): keys typed, keys they become. `jk`
     /// to `<Esc>` is there by default.
     pub(crate) imaps: Vec<(Vec<Key>, Vec<Key>)>,
+    /// NORMAL and VISUAL mappings (`:nmap`, `:vmap`), non-recursive.
+    pub(crate) nmaps: Vec<(Vec<Key>, Vec<Key>)>,
+    pub(crate) vmaps: Vec<(Vec<Key>, Vec<Key>)>,
+    /// Keys typed in NORMAL or VISUAL that may yet become a mapping.
+    map_pending: Vec<Key>,
     /// Lines in a page, for Page Up/Down and `⌃f` `⌃b` `⌃d` `⌃u` (the app
     /// sets it from the window).
     page: usize,
@@ -210,6 +215,9 @@ impl Default for Vim {
             wrap_motion: false,
             imaps: vec![(vec![Key::Char('j'), Key::Char('k')], vec![Key::Esc])],
             imap_pending: Vec::new(),
+            nmaps: Vec::new(),
+            vmaps: Vec::new(),
+            map_pending: Vec::new(),
             in_mapping: false,
             search_pattern: None,
             search_forward: true,
@@ -317,6 +325,7 @@ impl Vim {
     /// Whether a key sequence is half typed (shown in the status line).
     pub fn is_pending(&self) -> bool {
         self.pending != Pending::None
+            || !self.map_pending.is_empty()
             || self.count.is_some()
             || self.op.is_some()
             || self.register.is_some()
@@ -355,7 +364,7 @@ impl Vim {
                 self.command_key(key, buf);
                 Effect::Handled
             }
-            Mode::Normal | Mode::Visual | Mode::VisualLine => self.normal_key(key, buf),
+            Mode::Normal | Mode::Visual | Mode::VisualLine => self.normal_mapped(key, buf),
         }
     }
 
@@ -364,6 +373,88 @@ impl Vim {
     }
 
     // ---- insert mode ------------------------------------------------------
+
+    /// A NORMAL or VISUAL key, through the `:nmap` / `:vmap` mappings.
+    /// Keys that may start a mapping wait (see [`Vim::map_pending`]); a
+    /// full match runs the mapping's keys, and keys that turn out not to
+    /// be one run as typed.
+    fn normal_mapped(&mut self, key: Key, buf: &mut Buffer) -> Effect {
+        let visual = self.mode.is_visual();
+        let mappable = !self.in_mapping
+            && self.op.is_none()
+            && self.pending == Pending::None
+            && self.register.is_none();
+        let table = if visual { &self.vmaps } else { &self.nmaps };
+        if self.map_pending.is_empty() && (!mappable || table.is_empty()) {
+            return self.normal_key(key, buf);
+        }
+        let mut typed = std::mem::take(&mut self.map_pending);
+        typed.push(key);
+        if let Some(rhs) = table
+            .iter()
+            .find(|(lhs, _)| *lhs == typed)
+            .map(|(_, rhs)| rhs.clone())
+        {
+            return self.run_mapping(&rhs, buf);
+        }
+        if table
+            .iter()
+            .any(|(lhs, _)| lhs.len() > typed.len() && lhs.starts_with(&typed))
+        {
+            self.map_pending = typed;
+            return Effect::Handled;
+        }
+        self.run_unmapped(typed, buf)
+    }
+
+    /// Keys that didn't become a mapping: the first runs as typed, the
+    /// rest may still start one.
+    fn run_unmapped(&mut self, mut typed: Vec<Key>, buf: &mut Buffer) -> Effect {
+        if typed.is_empty() {
+            return Effect::Handled;
+        }
+        let first = typed.remove(0);
+        let mut effect = self.normal_key(first, buf);
+        for key in typed {
+            effect = self.normal_mapped(key, buf);
+        }
+        effect
+    }
+
+    /// A mapping's keys, run without mapping them again.
+    fn run_mapping(&mut self, rhs: &[Key], buf: &mut Buffer) -> Effect {
+        self.in_mapping = true;
+        let mut effect = Effect::Handled;
+        for key in rhs {
+            effect = self.handle_key(*key, buf);
+        }
+        self.in_mapping = false;
+        effect
+    }
+
+    /// Whether NORMAL or VISUAL keys wait to see if they become a mapping;
+    /// the app gives up on them after a second ([`Vim::flush_mapping`]).
+    pub fn map_pending(&self) -> bool {
+        !self.map_pending.is_empty()
+    }
+
+    /// Runs the waiting keys as typed (the wait for a mapping timed out).
+    pub fn flush_mapping(&mut self, buf: &mut Buffer) -> Effect {
+        let typed = std::mem::take(&mut self.map_pending);
+        if typed.is_empty() {
+            return Effect::Handled;
+        }
+        // The first can't start a longer mapping any more; the rest may.
+        self.run_unmapped(typed, buf)
+    }
+
+    /// Forgets every mapping (before config.toml's are applied).
+    pub fn clear_mappings(&mut self) {
+        self.imaps.clear();
+        self.nmaps.clear();
+        self.vmaps.clear();
+        self.map_pending.clear();
+    }
 
     /// An insert-mode key, through the `:imap` mappings. A key that may
     /// start a mapping is typed as usual; when the mapping completes, those

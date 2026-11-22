@@ -53,6 +53,15 @@ const COMMANDS: &[(&str, usize)] = &[
     ("imap", 2),
     ("inoremap", 3),
     ("iunmap", 3),
+    ("map", 3),
+    ("noremap", 2),
+    ("unmap", 3),
+    ("nmap", 2),
+    ("nnoremap", 2),
+    ("nunmap", 3),
+    ("vmap", 2),
+    ("vnoremap", 2),
+    ("vunmap", 2),
     ("cnext", 2),
     ("cNext", 2),
     ("cprevious", 2),
@@ -331,7 +340,10 @@ mod tests {
     fn unknown_commands_are_e492() {
         let err = parse("frobnicate").expect_err("unknown");
         assert_eq!(err.to_string(), "E492: Not an editor command: frobnicate");
-        assert!(parse("no").is_err(), "too short to choose");
+        assert!(parse("n").is_err(), "too short to choose");
+        assert_eq!(parse("no").expect("Vim's :no").name, "noremap");
+        assert_eq!(parse("noh").expect("ok").name, "nohlsearch");
+        assert_eq!(parse("norm x").expect("ok").name, "normal");
     }
 
     #[test]

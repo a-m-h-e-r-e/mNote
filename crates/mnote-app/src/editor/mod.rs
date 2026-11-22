@@ -62,6 +62,8 @@ type CodeLines = Vec<Vec<(std::ops::Range<usize>, CodeStyle)>>;
 
 /// Width left for the macOS traffic-light buttons in the top bar.
 const TRAFFIC_LIGHT_INSET: f32 = 76.;
+/// How long keys wait to become a mapping before they run as typed.
+const MAPPING_TIMEOUT: Duration = Duration::from_millis(1000);
 /// How long the cursor rests on a line before git blame runs.
 const BLAME_DELAY: Duration = Duration::from_millis(300);
 /// How long typing pauses before the word count catches up.
@@ -178,6 +180,8 @@ pub struct Editor {
     drawing_pane: PaneId,
     /// Where a mouse drag started (a character), while the button is down.
     drag_anchor: Option<usize>,
+    /// Gives up on keys waiting to become a mapping.
+    map_task: Option<Task<()>>,
     /// Where the focused pane's visible lines wrap (characters each screen
     /// row starts at, by line), for `gj` / `gk`; filled as lines paint.
     wraps: Rc<RefCell<std::collections::HashMap<usize, Vec<usize>>>>,
@@ -363,6 +367,7 @@ impl Editor {
             pane_key: false,
             drawing_pane: PaneId(0),
             drag_anchor: None,
+            map_task: None,
             wraps,
             vault: None,
             first_run: None,
@@ -521,8 +526,31 @@ impl Editor {
         if self.shown_mode() != mode_before || has_bar_caret(self.shown_mode()) {
             self.restart_blink(cx);
         }
+        self.wait_for_mapping(cx);
         cx.notify();
         true
+    }
+
+    /// Keys that may yet become a mapping wait up to a second (Vim's
+    /// `timeoutlen`), then run as typed.
+    fn wait_for_mapping(&mut self, cx: &mut Context<Self>) {
+        if !self.vim.map_pending() {
+            self.map_task = None;
+            return;
+        }
+        self.map_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(MAPPING_TIMEOUT).await;
+            let _ = this.update(cx, |this, cx| {
+                let revision = this.buffer.revision();
+                this.vim.flush_mapping(&mut this.buffer);
+                this.sync_lines();
+                if this.buffer.revision() != revision {
+                    this.schedule_autosave(cx);
+                }
+                this.map_task = None;
+                cx.notify();
+            });
+        }));
     }
 
     /// Whether `esc` hides mNote: in NORMAL with nothing pending, no
@@ -1374,6 +1402,25 @@ impl Editor {
         crate::commands::set_leader(config.leader);
         self.vim.share_clipboard(config.system_clipboard);
         self.vim.set_wrap_motion(config.wrap_motion);
+        // config.toml's mappings replace the built-in ones (only mapping
+        // commands; anything else is reported).
+        if let Some(lines) = &config.mappings {
+            self.vim.clear_mappings();
+            let mut problems = Vec::new();
+            for line in lines {
+                let name = line.split_whitespace().next().unwrap_or("");
+                if !mnote_core::config::MAPPING_COMMANDS.contains(&name) {
+                    problems.push(format!("{line}: only mapping commands go here"));
+                    continue;
+                }
+                if let Err(err) = self.vim.execute(line, &mut self.buffer) {
+                    problems.push(format!("{line}: {err}"));
+                }
+            }
+            if let Some(first) = problems.first() {
+                self.notice = Some(format!("config.toml mappings: {first}").into());
+            }
+        }
         // Fonts: an installed one, else the bundled default (and say so).
         let installed = cx.text_system().all_font_names();
         let mut missing = Vec::new();

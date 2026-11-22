@@ -141,7 +141,16 @@ pub struct Config {
     pub system_clipboard: bool,
     /// `j` / `k` move by screen row through wrapped lines, as `gj` / `gk`.
     pub wrap_motion: bool,
+    /// Vim mappings (`"nnoremap j gj"`), run at start and on save; they
+    /// replace the built-in `jk` → `<Esc>`. `None` keeps the built-in.
+    pub mappings: Option<Vec<String>>,
 }
+
+/// The commands `mappings` accepts.
+pub const MAPPING_COMMANDS: &[&str] = &[
+    "map", "noremap", "unmap", "nmap", "nnoremap", "nunmap", "vmap", "vnoremap", "vunmap", "imap",
+    "inoremap", "iunmap",
+];
 
 /// The interface sizes `ui_font_size` accepts.
 pub const UI_FONT_SIZES: std::ops::RangeInclusive<u32> = 11..=24;
@@ -176,6 +185,7 @@ impl Default for Config {
             leader: ' ',
             system_clipboard: true,
             wrap_motion: false,
+            mappings: None,
         }
     }
 }
@@ -309,6 +319,20 @@ impl Config {
                         _ => return Err(wrong("\"system\" or \"vim\"")),
                     }
                 }
+                "mappings" => {
+                    let lines = value
+                        .as_array()
+                        .and_then(|items| {
+                            items
+                                .iter()
+                                .map(|i| i.as_str().map(str::to_owned))
+                                .collect::<Option<Vec<_>>>()
+                        })
+                        .ok_or_else(|| {
+                            wrong("a list of mapping lines, like [\"nnoremap j gj\"]")
+                        })?;
+                    config.mappings = Some(lines);
+                }
                 "wrap_motion" => {
                     config.wrap_motion = value.as_bool().ok_or_else(|| wrong("true or false"))?;
                 }
@@ -406,7 +430,11 @@ impl Config {
              clipboard = \"{clipboard}\"\n\
              \n\
              # j and k move by screen row through wrapped lines (as gj and gk).\n\
-             wrap_motion = {wrap_motion}\n",
+             wrap_motion = {wrap_motion}\n\
+             \n\
+             # Vim mappings, like in a vimrc (map, noremap, nmap, nnoremap, vmap,\n\
+             # vnoremap, imap, inoremap and the unmap commands).\n\
+             mappings = [{mappings}]\n",
             summon = key_words(&self.summon),
             capture = key_words(&self.capture),
             rnu = self.relative_numbers,
@@ -423,6 +451,14 @@ impl Config {
                 "vim"
             },
             wrap_motion = self.wrap_motion,
+            mappings = self
+                .mappings
+                .clone()
+                .unwrap_or_else(|| vec!["inoremap jk <Esc>".to_owned()])
+                .iter()
+                .map(|m| format!("{m:?}"))
+                .collect::<Vec<_>>()
+                .join(", "),
         )
     }
 }
@@ -535,6 +571,7 @@ mod tests {
             leader: ',',
             system_clipboard: false,
             wrap_motion: true,
+            mappings: Some(vec!["nnoremap j gj".into(), "inoremap jk <Esc>".into()]),
             ..Config::default()
         };
         assert_eq!(Config::parse(&config.template()), Ok(config));
@@ -579,6 +616,12 @@ mod tests {
         );
         let err = Config::parse("ui_font_size = 40").expect_err("too big");
         assert!(err.message.contains("11 to 24"));
+        let err = Config::parse("\nmappings = [1]").expect_err("not strings");
+        assert_eq!(err.line, Some(2));
+        assert_eq!(
+            Config::parse("mappings = [\"nnoremap j gj\"]").map(|c| c.mappings),
+            Ok(Some(vec!["nnoremap j gj".to_owned()]))
+        );
         let err = Config::parse("view = ").expect_err("not toml");
         assert_eq!(err.line, Some(1));
     }

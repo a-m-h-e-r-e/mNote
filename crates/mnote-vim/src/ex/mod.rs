@@ -424,15 +424,10 @@ impl Vim {
             "view" => Ok(ExOutcome::app(AppCommand::View(arg()))),
             "explore" => Ok(ExOutcome::app(AppCommand::Explore(arg()))),
             "find" => Ok(ExOutcome::app(AppCommand::Find(arg()))),
-            "imap" | "inoremap" => {
+            "map" | "noremap" | "nmap" | "nnoremap" | "vmap" | "vnoremap" | "imap" | "inoremap" => {
+                let modes = map_modes(cmd.name);
                 if args.is_empty() {
-                    let list: Vec<String> = self
-                        .imaps
-                        .iter()
-                        .map(|(lhs, rhs)| {
-                            format!("i  {:<8} {}", key_notation(lhs), key_notation(rhs))
-                        })
-                        .collect();
+                    let list = self.list_mappings(modes);
                     return Ok(ExOutcome::message(if list.is_empty() {
                         "No mapping found".to_owned()
                     } else {
@@ -446,15 +441,23 @@ impl Vim {
                 if lhs.is_empty() || rhs.is_empty() {
                     return Err(ExError::new(474, "Invalid argument"));
                 }
-                self.imaps.retain(|(l, _)| *l != lhs);
-                self.imaps.push((lhs, rhs));
+                for mode in modes.chars() {
+                    let table = self.mapping_table(mode);
+                    table.retain(|(l, _)| *l != lhs);
+                    table.push((lhs.clone(), rhs.clone()));
+                }
                 Ok(ExOutcome::default())
             }
-            "iunmap" => {
+            "unmap" | "nunmap" | "vunmap" | "iunmap" => {
                 let lhs = parse_keys(args);
-                let before = self.imaps.len();
-                self.imaps.retain(|(l, _)| *l != lhs);
-                if self.imaps.len() == before {
+                let mut found = false;
+                for mode in map_modes(cmd.name).chars() {
+                    let table = self.mapping_table(mode);
+                    let before = table.len();
+                    table.retain(|(l, _)| *l != lhs);
+                    found |= table.len() != before;
+                }
+                if !found {
                     return Err(ExError::new(31, "No such mapping"));
                 }
                 Ok(ExOutcome::default())
@@ -1019,6 +1022,45 @@ fn first_number(line: &str) -> Option<i64> {
         .collect();
     let n: i64 = digits.parse().ok()?;
     Some(if negative { -n } else { n })
+}
+
+/// The modes a mapping command acts in: `n` NORMAL, `v` VISUAL, `i`
+/// INSERT (`:map` is both NORMAL and VISUAL, as in Vim).
+fn map_modes(name: &str) -> &'static str {
+    match name {
+        "nmap" | "nnoremap" | "nunmap" => "n",
+        "vmap" | "vnoremap" | "vunmap" => "v",
+        "imap" | "inoremap" | "iunmap" => "i",
+        _ => "nv",
+    }
+}
+
+impl Vim {
+    fn mapping_table(&mut self, mode: char) -> &mut Vec<(Vec<crate::Key>, Vec<crate::Key>)> {
+        match mode {
+            'n' => &mut self.nmaps,
+            'v' => &mut self.vmaps,
+            _ => &mut self.imaps,
+        }
+    }
+
+    /// `:map` and friends with no arguments: each mapping as `n  lhs  rhs`.
+    fn list_mappings(&self, modes: &str) -> Vec<String> {
+        let mut list = Vec::new();
+        for (mode, table) in [('n', &self.nmaps), ('v', &self.vmaps), ('i', &self.imaps)] {
+            if !modes.contains(mode) {
+                continue;
+            }
+            for (lhs, rhs) in table {
+                list.push(format!(
+                    "{mode}  {:<8} {}",
+                    key_notation(lhs),
+                    key_notation(rhs)
+                ));
+            }
+        }
+        list
+    }
 }
 
 #[cfg(test)]
