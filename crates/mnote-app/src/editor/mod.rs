@@ -405,7 +405,10 @@ impl Editor {
             && !self.pane_key
             && !stroke.modifiers.control
             && stroke.key_char.is_some()
-            && matches!(keys::vim_key(stroke), Some(mnote_vim::Key::Char(_)))
+            && matches!(
+                keys::vim_key(stroke),
+                Some(mnote_vim::Key::Char(_) | mnote_vim::Key::Alt(_))
+            )
         {
             return;
         }

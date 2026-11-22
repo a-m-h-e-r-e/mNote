@@ -39,6 +39,10 @@ pub fn vim_key(keystroke: &Keystroke) -> Option<Key> {
         }
         return single_char(&keystroke.key).map(|c| Key::Ctrl(c.to_ascii_lowercase()));
     }
+    // ⌥j / ⌥k move lines; other ⌥ keys type their character.
+    if m.alt && !m.shift && matches!(keystroke.key.as_str(), "j" | "k") {
+        return single_char(&keystroke.key).map(Key::Alt);
+    }
     // The typed character, with Shift and Option applied ("A", "$", "ß").
     keystroke
         .key_char
@@ -96,6 +100,12 @@ mod tests {
         };
         assert_eq!(vim_key(&ks("r", None, ctrl)), Some(Key::Ctrl('r')));
         assert_eq!(vim_key(&ks("[", None, ctrl)), Some(Key::Esc));
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(vim_key(&ks("j", Some("∆"), alt)), Some(Key::Alt('j')));
+        assert_eq!(vim_key(&ks("s", Some("ß"), alt)), Some(Key::Char('ß')));
         assert_eq!(vim_key(&ks("k", None, cmd)), None, "⌘K is the app's");
         assert_eq!(
             vim_key(&ks("left", None, Modifiers::default())),

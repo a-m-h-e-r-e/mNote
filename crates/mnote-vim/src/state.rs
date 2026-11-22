@@ -546,7 +546,7 @@ impl Vim {
             | Key::End
             | Key::PageUp
             | Key::PageDown => self.insert_move(key, buf),
-            Key::Ctrl(_) | Key::BackTab => {
+            Key::Ctrl(_) | Key::Alt(_) | Key::BackTab => {
                 return Effect::Unhandled(key);
             }
         }
@@ -696,6 +696,70 @@ impl Vim {
         self.cursor = clamp_normal(buf.text(), at);
         buf.end_change(self.cursor);
         self.done(buf, true);
+    }
+
+    /// `⌥j` / `⌥k`, and `J` / `K` in VISUAL: swaps the cursor line (or the
+    /// selected lines) with the `count` lines below or above, as one undo
+    /// step, stopping at the first and last line. The cursor (and the
+    /// selection) stay on the moved lines, so the key can be pressed again.
+    fn move_lines(&mut self, down: bool, buf: &mut Buffer) -> Effect {
+        let count = self.count.take().unwrap_or(1);
+        let text = buf.text();
+        let visual = self.mode.is_visual();
+        let (a, b) = if visual {
+            (self.anchor.min(self.cursor), self.anchor.max(self.cursor))
+        } else {
+            (self.cursor, self.cursor)
+        };
+        let (first, last) = (line_of(text, a), line_of(text, b));
+        let n = if down {
+            count.min(last_line(text) - last)
+        } else {
+            count.min(first)
+        };
+        if n == 0 {
+            self.done(buf, false);
+            return Effect::Handled;
+        }
+        let (from, to) = if down {
+            (first, last + n)
+        } else {
+            (first - n, last)
+        };
+        let lines: Vec<String> = (from..=to)
+            .map(|l| {
+                let start = line_start(text, l);
+                text.slice(start..start + line_len(text, l)).to_string()
+            })
+            .collect();
+        // The block, and the lines it trades places with.
+        let split = if down { last - from + 1 } else { first - from };
+        let (head, tail) = lines.split_at(split);
+        let moved = [tail, head].concat().join("\n");
+        let start = line_start(text, from);
+        let end = line_start(text, to) + line_len(text, to);
+        // Where the cursor and anchor sit: line and column, to put back.
+        let place = |pos: usize| {
+            let line = line_of(text, pos);
+            (line, pos - line_start(text, line))
+        };
+        let (cursor_at, anchor_at) = (place(self.cursor), place(self.anchor));
+        buf.begin_change(self.cursor);
+        self.edit(buf, start..end, &moved);
+        let text = buf.text();
+        let shift = |(line, col): (usize, usize)| {
+            let line = if down { line + n } else { line - n };
+            line_start(text, line) + col.min(line_len(text, line))
+        };
+        self.cursor = shift(cursor_at);
+        if visual {
+            self.anchor = shift(anchor_at);
+        } else {
+            self.cursor = clamp_normal(text, self.cursor);
+        }
+        buf.end_change(self.cursor);
+        self.done(buf, true);
+        Effect::Handled
     }
 
     /// `J` / `gJ` in VISUAL: joins the selected lines (at least two).
@@ -907,6 +971,12 @@ impl Vim {
     }
 
     fn normal_start(&mut self, key: Key, buf: &mut Buffer) -> Effect {
+        // `⌥j` / `⌥k`: the line (or the selected lines) down or up.
+        if let Key::Alt(c @ ('j' | 'k')) = key
+            && self.op.is_none()
+        {
+            return self.move_lines(c == 'j', buf);
+        }
         let c = match key {
             Key::Char(c) => c,
             // Arrows move like `h` `j` `k` `l`, Home and End like `0` `$`.
@@ -1148,8 +1218,9 @@ impl Vim {
             self.apply_operator(op, range, linewise, buf);
             return Effect::Handled;
         }
-        if c == 'J' {
-            return self.join_selection(true, buf);
+        // `J` / `K` move the selected lines (`gJ` still joins them).
+        if c == 'J' || c == 'K' {
+            return self.move_lines(c == 'J', buf);
         }
         match (self.mode, c) {
             (_, 'p' | 'P') => {

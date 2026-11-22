@@ -1522,11 +1522,48 @@ mod mapping_tests {
         check("o|ne\n  two\n", "gJ", "one|  two\n");
         check(
             "o|ne\ntwo\nthree\nfour\n",
-            "Vj<esc>gvJ",
-            "one| two\nthree\nfour\n",
+            "Vj<esc>gvgJ",
+            "one|two\nthree\nfour\n",
         );
         check("o|ne\ntwo\nthree\n", "Ju", "o|ne\ntwo\nthree\n");
         check("o|ne\ntwo\nthree\nfour\n", "J.", "one two| three\nfour\n");
+    }
+
+    #[test]
+    fn alt_j_k_and_visual_j_k_move_lines() {
+        check("o|ne\ntwo\nthree\n", "<A-j>", "two\no|ne\nthree\n");
+        check("one\ntwo\nth|ree\n", "<A-k>", "one\nth|ree\ntwo\n");
+        check("o|ne\ntwo\nthree\n", "2<A-j>", "two\nthree\no|ne\n");
+        check("o|ne\ntwo\nthree\n", "5<A-j>", "two\nthree\no|ne\n");
+        check("o|ne\ntwo\n", "<A-k>", "o|ne\ntwo\n");
+        check("one\nt|wo\n", "<A-j>", "one\nt|wo\n");
+        check("o|ne\ntwo\nthree\n", "<A-j><A-j>u", "two\no|ne\nthree\n");
+        // The selection moves, and stays on the moved lines.
+        check(
+            "o|ne\ntwo\nthree\nfour\n",
+            "VjJ<esc>",
+            "three\no|ne\ntwo\nfour\n",
+        );
+        check(
+            "one\ntwo\nth|ree\nfour\n",
+            "VjK<esc>",
+            "one\nth|ree\nfour\ntwo\n",
+        );
+        check("o|ne\ntwo\nthree\nfour\n", "VjJJd", "three\n|four\n");
+        check("o|ne\ntwo\nthree\n", "V<A-j><esc>", "two\no|ne\nthree\n");
+        check("o|ne\ntwo\nthree\n", "VJ<esc>u", "o|ne\ntwo\nthree\n");
+        // ⌥j types ∆ in INSERT, so Vim leaves it to the input system.
+        let mut vim = crate::Vim::new();
+        let mut buf = mnote_core::Buffer::new("one\n");
+        vim.handle_key(crate::Key::Char('i'), &mut buf);
+        assert!(matches!(
+            vim.handle_key(crate::Key::Alt('j'), &mut buf),
+            crate::Effect::Unhandled(_)
+        ));
+        assert_eq!(
+            crate::parse_keys("<A-j><M-k>"),
+            vec![crate::Key::Alt('j'), crate::Key::Alt('k')]
+        );
     }
 
     #[test]
