@@ -7,6 +7,7 @@
 pub mod content;
 mod error;
 pub mod files;
+pub mod folder_edit;
 pub mod frontmatter;
 pub mod index;
 pub mod links;

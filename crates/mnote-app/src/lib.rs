@@ -3,6 +3,7 @@
 
 pub mod commands;
 pub mod editor;
+pub mod folder_edit;
 pub mod picker;
 pub mod theme;
 pub mod ui;

@@ -22,6 +22,9 @@ use gpui::{
     ListAlignment, ListState, ParentElement, Render, SharedString, Styled, Subscription, Task,
     Window, div, font, list, prelude::*, px,
 };
+use mnote_core::files::FileOp;
+use mnote_core::folder_edit::{Change, FolderEntry};
+use mnote_core::links::{LinkMove, count_relinks, relink_vault};
 use mnote_core::{Autosave, Buffer, NoteIndex, NotePath, Reload, Vault, VaultEvent, VaultWatcher};
 use mnote_vim::ex::AppCommand;
 use mnote_vim::ex::cmdline::{Completer, line_matches};
@@ -30,7 +33,8 @@ use mnote_vim::text::{clamp_normal, line_count, line_len, line_of, line_start};
 use mnote_vim::{Clipboard, Effect, Mode, Vim};
 
 use crate::commands::{COMMANDS, Run};
-use crate::picker::explorer::{Explorer, FileHistory};
+use crate::folder_edit::{FolderEditor, FolderOutcome};
+use crate::picker::explorer::{Explorer, FileHistory, FileUndo};
 use crate::picker::finder::{CurrentNote, Finder};
 use crate::picker::list::ListPicker;
 use crate::picker::palette::CommandPalette;
@@ -113,6 +117,8 @@ pub struct Editor {
     /// The results list (`⌃q` in content search) and where `:cnext` is.
     list: Vec<ListEntry>,
     list_pos: usize,
+    /// The folder editor (`e` in the explorer), over the note.
+    folder_edit: Option<FolderEditor>,
     /// File operations from the explorer, for `u` there.
     file_history: FileHistory,
     /// A message near the bottom after a file operation, and whether it
@@ -214,6 +220,7 @@ impl Editor {
             leader: false,
             list: Vec::new(),
             list_pos: 0,
+            folder_edit: None,
             file_history: FileHistory::default(),
             toast: None,
             toast_task: None,
@@ -241,6 +248,10 @@ impl Editor {
     /// One key, as typed: to the open picker, the leader, or Vim. Returns
     /// whether it was used (unused keys go on to the app).
     fn press(&mut self, key: mnote_vim::Key, cx: &mut Context<Self>) -> bool {
+        if self.folder_edit.is_some() {
+            self.folder_key(key, cx);
+            return true;
+        }
         if self.picker.is_some() {
             self.picker_key(key, cx);
             return true;
@@ -299,6 +310,9 @@ impl Editor {
     /// The mode whose caret is showing: the picker field's, or the
     /// command-line window's, while either is open.
     fn shown_mode(&self) -> Mode {
+        if let Some(folder) = &self.folder_edit {
+            return folder.mode();
+        }
         if let Some(picker) = &self.picker {
             return picker.mode();
         }
@@ -382,6 +396,173 @@ impl Editor {
         self.restart_blink(cx);
         self.run_picker_job(cx);
         cx.notify();
+    }
+
+    /// Opens the folder editor on `folder` (vault-relative).
+    fn open_folder_editor(&mut self, folder: String, cx: &mut Context<Self>) {
+        let Source::Note { vault, .. } = &self.source else {
+            return;
+        };
+        let entries = self
+            .index
+            .borrow()
+            .folder_items(&folder)
+            .into_iter()
+            .map(|item| match item {
+                mnote_core::FolderItem::Folder { name, .. } => FolderEntry { name, is_dir: true },
+                mnote_core::FolderItem::Note(i) => FolderEntry {
+                    name: self.index.borrow().notes()[i].path.file_name().to_owned(),
+                    is_dir: false,
+                },
+            })
+            .collect();
+        let mut location = vault_name(vault.root());
+        location.push('/');
+        if !folder.is_empty() {
+            location.push_str(&folder);
+            location.push('/');
+        }
+        self.folder_edit = Some(FolderEditor::new(folder, location, entries));
+        self.restart_blink(cx);
+        cx.notify();
+    }
+
+    fn folder_key(&mut self, key: mnote_vim::Key, cx: &mut Context<Self>) {
+        let Some(editor) = self.folder_edit.as_mut() else {
+            return;
+        };
+        match editor.handle_key(key) {
+            FolderOutcome::Open => {}
+            FolderOutcome::Close => self.folder_edit = None,
+            FolderOutcome::CountLinks(changes) => self.count_folder_links(&changes, cx),
+            FolderOutcome::Apply(changes) => {
+                let folder = editor.folder.clone();
+                self.folder_edit = None;
+                self.apply_folder_changes(folder, &changes, cx);
+            }
+        }
+        self.restart_blink(cx);
+        cx.notify();
+    }
+
+    /// The vault-relative path of `rel` in `folder`.
+    fn in_folder(folder: &str, rel: &str) -> std::path::PathBuf {
+        let rel = rel.trim_end_matches('/');
+        if folder.is_empty() {
+            rel.into()
+        } else {
+            std::path::Path::new(folder).join(rel)
+        }
+    }
+
+    /// Counts, in the background, the wikilinks the reviewed changes would
+    /// rewrite.
+    fn count_folder_links(&mut self, changes: &[Change], cx: &mut Context<Self>) {
+        let (Source::Note { vault, .. }, Some(editor)) = (&self.source, &self.folder_edit) else {
+            return;
+        };
+        let index = self.index.borrow();
+        let moves: Vec<LinkMove> = changes
+            .iter()
+            .filter_map(|c| match c {
+                Change::Move { from, to } => Some(index.would_move(
+                    &Self::in_folder(&editor.folder, from),
+                    &Self::in_folder(&editor.folder, to),
+                )),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let notes: Vec<NotePath> = index.notes().iter().map(|n| n.path.clone()).collect();
+        drop(index);
+        let vault = vault.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { count_relinks(&vault, &notes, &moves) });
+        cx.spawn(async move |this, cx| {
+            let count = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(editor) = this.folder_edit.as_mut() {
+                    editor.set_links(count);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// `y` in the folder editor: runs the changes, records them for undo,
+    /// updates the index, rewrites links, and shows the folder again.
+    fn apply_folder_changes(&mut self, folder: String, changes: &[Change], cx: &mut Context<Self>) {
+        let Source::Note { vault, .. } = &self.source else {
+            return;
+        };
+        let vault = vault.clone();
+        let (ops, error) = mnote_core::folder_edit::apply(&vault, &folder, changes);
+        let mut moves = Vec::new();
+        let mut effects = Vec::new();
+        for op in &ops {
+            let label = match op {
+                FileOp::Created(note) => {
+                    self.index.borrow_mut().note_saved(note.clone(), "");
+                    format!("Created {}", note.file_name())
+                }
+                FileOp::Moved { from, to } => {
+                    moves.extend(self.index.borrow_mut().moved(from.as_path(), to.as_path()));
+                    effects.push(PickerEffect::Moved {
+                        from: from.as_path().to_path_buf(),
+                        to: to.as_path().to_path_buf(),
+                    });
+                    format!("Moved {from} to {to}")
+                }
+                FileOp::Trashed { from, .. } => {
+                    self.index.borrow_mut().remove_under(from.as_path());
+                    format!("{from} moved to Trash")
+                }
+            };
+            self.file_history.borrow_mut().push(FileUndo {
+                op: op.clone(),
+                label,
+            });
+        }
+        self.apply_effects(effects, cx);
+        let message = match &error {
+            Some(err) => format!(
+                "Stopped after {} of {} changes: {err}",
+                ops.len(),
+                changes.len()
+            ),
+            None => format!(
+                "Applied {} {}",
+                changes.len(),
+                if changes.len() == 1 {
+                    "change"
+                } else {
+                    "changes"
+                }
+            ),
+        };
+        if moves.is_empty() {
+            self.show_toast(message, false, cx);
+        } else {
+            let notes: Vec<NotePath> = self
+                .index
+                .borrow()
+                .notes()
+                .iter()
+                .map(|n| n.path.clone())
+                .collect();
+            let job: Job = Box::new(move || {
+                let done = relink_vault(&vault, &notes, &moves);
+                Some(JobResult::Relinked {
+                    done,
+                    message,
+                    undo: false,
+                })
+            });
+            self.spawn_job(job, cx);
+        }
+        self.open_explorer(Some(folder), cx);
     }
 
     /// Runs a command from the palette or the finder's `>` scope.
@@ -606,6 +787,7 @@ impl Editor {
             }
             PickerAction::ListGo(n) => self.list_go(n, cx),
             PickerAction::Command(n) => self.run_command(n, cx),
+            PickerAction::EditFolder(folder) => self.open_folder_editor(folder, cx),
             PickerAction::RunEx(command) => {
                 let revision = self.buffer.revision();
                 match self.vim.execute(&command, &mut self.buffer) {
@@ -1222,6 +1404,10 @@ impl Render for Editor {
             .picker
             .as_mut()
             .map(|picker| picker.render(width, caret_on, p));
+        let folder_edit = self
+            .folder_edit
+            .as_ref()
+            .map(|editor| editor.render(caret_on, p));
         let rope = self.buffer.text();
         let cursor = self.vim.cursor();
         let line = line_of(rope, cursor);
@@ -1292,6 +1478,7 @@ impl Render for Editor {
                     .child(popup)
             }))
             .children(picker)
+            .children(folder_edit)
             .children(self.toast.clone().map(|(text, undo)| {
                 let toast = Toast::new(text);
                 let toast = if undo {

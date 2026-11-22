@@ -113,6 +113,8 @@ pub enum PickerAction {
     ListGo(usize),
     /// Run [`crate::commands::COMMANDS`]`[n]`.
     Command(usize),
+    /// Edit this folder (vault-relative) as text.
+    EditFolder(String),
 }
 
 /// A place in the results list.

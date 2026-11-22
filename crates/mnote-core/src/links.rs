@@ -108,6 +108,35 @@ pub fn rewrite_wikilinks(text: &str, moves: &[LinkMove]) -> Option<(String, usiz
     (changed > 0).then_some((out, changed))
 }
 
+/// How many links in `notes` point at notes in `moves` (what
+/// [`relink_vault`] would rewrite), without changing anything. Call it off
+/// the UI thread.
+pub fn count_relinks(vault: &Vault, notes: &[NotePath], moves: &[LinkMove]) -> usize {
+    if moves.is_empty() {
+        return 0;
+    }
+    let threads = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .min(16);
+    let chunk = notes.len().div_ceil(threads).max(1);
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = notes
+            .chunks(chunk)
+            .map(|part| {
+                scope.spawn(move || {
+                    part.iter()
+                        .filter_map(|note| {
+                            let text = vault.read(note).ok()?;
+                            rewrite_wikilinks(&text, moves).map(|(_, n)| n)
+                        })
+                        .sum::<usize>()
+                })
+            })
+            .collect();
+        workers.into_iter().map(|w| w.join().unwrap_or(0)).sum()
+    })
+}
+
 /// A note whose links were rewritten.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Relinked {

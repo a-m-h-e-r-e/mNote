@@ -611,7 +611,7 @@ impl PickerDelegate for Explorer {
     }
 
     fn claims(&self, c: char) -> bool {
-        matches!(c, 'h' | 'a' | 'r' | 'd' | 'p' | 'D')
+        matches!(c, 'h' | 'a' | 'r' | 'd' | 'p' | 'D' | 'e')
             || (c == 'u' && !self.history.borrow().is_empty())
     }
 
@@ -634,6 +634,7 @@ impl PickerDelegate for Explorer {
             'p' => self.paste(),
             'D' => self.trash(ix),
             'u' => self.undo(),
+            'e' => Confirm::Act(PickerAction::EditFolder(self.folder.clone())),
             _ => Confirm::Stay,
         }
     }
@@ -720,6 +721,7 @@ impl PickerDelegate for Explorer {
                     Hint::new("r", "rename"),
                     Hint::new("dd p", "move"),
                     Hint::new("D", "trash"),
+                    Hint::new("e", "edit as text"),
                 ]);
                 if !self.history.borrow().is_empty() {
                     hints.push(Hint::new("u", "undo"));

@@ -272,6 +272,30 @@ impl NoteIndex {
         moves
     }
 
+    /// The note moves that moving `from` to `to` would make, without changing
+    /// the index (for previews).
+    pub fn would_move(
+        &self,
+        from: &std::path::Path,
+        to: &std::path::Path,
+    ) -> Vec<crate::links::LinkMove> {
+        self.notes
+            .iter()
+            .filter_map(|n| {
+                let rest = n.path.as_path().strip_prefix(from).ok()?;
+                let target = if rest.as_os_str().is_empty() {
+                    to.to_path_buf()
+                } else {
+                    to.join(rest)
+                };
+                Some(crate::links::LinkMove {
+                    from: n.path.clone(),
+                    to: NotePath::new(target).ok()?,
+                })
+            })
+            .collect()
+    }
+
     /// Removes the note at `path`, or every note under the folder `path`.
     /// Returns how many went.
     pub fn remove_under(&mut self, path: &std::path::Path) -> usize {
