@@ -18,7 +18,7 @@ use gpui::{
 use std::rc::Rc;
 
 #[cfg(target_os = "macos")]
-use mnote_app::capture::{CaptureEvent, PANEL_H, QuickCapture};
+use mnote_app::capture::{CaptureEvent, QuickCapture, panel_h};
 use mnote_app::editor::Editor;
 use mnote_app::theme::Theme;
 use mnote_core::config::Config;
@@ -220,7 +220,7 @@ fn open_capture(
         return;
     };
 
-    let panel = size(px(mnote_app::theme::size::CAPTURE_W), px(PANEL_H));
+    let panel = size(px(mnote_app::theme::size::CAPTURE_W), px(panel_h()));
     let mut bounds = Bounds::centered(None, panel, cx);
     if let Some(display) = cx.primary_display() {
         let screen = display.bounds();

@@ -44,6 +44,8 @@ pub struct Fonts {
     pub prose: SharedString,
     /// The note body's size; the other note styles scale with it.
     pub note_size: f32,
+    /// The interface's text size; its styles, bars and rows scale with it.
+    pub ui_size: f32,
 }
 
 impl Default for Fonts {
@@ -52,6 +54,7 @@ impl Default for Fonts {
             mono: SharedString::new_static(family::MONO),
             prose: SharedString::new_static(family::PROSE),
             note_size: text::NOTE_BODY.size,
+            ui_size: text::UI.size,
         }
     }
 }
@@ -85,6 +88,21 @@ pub fn prose() -> SharedString {
 /// How much bigger than the design the note text is (`font_size` / 16).
 pub fn note_scale() -> f32 {
     FONTS.with(|f| f.borrow().note_size / text::NOTE_BODY.size)
+}
+
+/// How much bigger than the design the interface is (`ui_font_size` / 15).
+pub fn ui_scale() -> f32 {
+    FONTS.with(|f| f.borrow().ui_size / text::UI.size)
+}
+
+/// The height of the top bar, status line, command line and hint bars.
+pub fn bar_h() -> f32 {
+    (size::BAR_H * ui_scale()).round()
+}
+
+/// The height of a list row in pickers and popups.
+pub fn row_h() -> f32 {
+    (size::ROW_H * ui_scale()).round()
 }
 
 /// The appearance `config.toml` fixes, if it does (`theme = "dark"`).
@@ -200,7 +218,11 @@ impl TextStyle {
     }
 
     fn scale(&self) -> f32 {
-        if self.is_note() { note_scale() } else { 1. }
+        if self.is_note() {
+            note_scale()
+        } else {
+            ui_scale()
+        }
     }
 
     pub fn font_weight(&self) -> FontWeight {
@@ -346,6 +368,19 @@ mod font_tests {
         );
         assert_eq!(text::NOTE_BODY.font_family().as_ref(), "Menlo");
         assert_eq!(text::UI.font_family().as_ref(), family::PROSE);
+
+        // ui_font_size scales the interface, not the note.
+        set_fonts(Fonts {
+            ui_size: 18.,
+            ..Fonts::default()
+        });
+        assert_eq!(text::UI.size(), px(18.));
+        assert_eq!(bar_h(), 38., "32 × 1.2, rounded");
+        assert_eq!(
+            text::NOTE_BODY.size(),
+            px(16.),
+            "note text keeps its own size"
+        );
         set_fonts(Fonts::default());
     }
 }

@@ -91,6 +91,11 @@ fn welcome(config: &Config) -> String {
         summon = config.summon.label(),
         capture = config.capture.label(),
     )
+    // The tour names the leader as configured (`, f` with a `,` leader).
+    .replace(
+        "`space ",
+        &format!("`{} ", mnote_core::config::leader_name(config.leader)),
+    )
 }
 
 impl Editor {
@@ -339,9 +344,10 @@ impl Editor {
                     .font_family(crate::theme::mono())
                     .text_size(px(11.))
                     .text_color(Theme::color(p.ink_3))
-                    .child(SharedString::new_static(
-                        "Saved in ~/.config/mnote/config.toml · space , opens it any time",
-                    )),
+                    .child(SharedString::from(format!(
+                        "Saved in ~/.config/mnote/config.toml · {} opens it any time",
+                        crate::commands::with_leader("space ,")
+                    ))),
             );
         Some(element.into_any_element())
     }

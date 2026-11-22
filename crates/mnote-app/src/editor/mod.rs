@@ -434,6 +434,17 @@ impl Editor {
             cx.hide();
             return true;
         }
+        // The leader (config.toml's `leader`) comes before Vim, so a leader
+        // like `,` isn't taken by Vim's own `,`.
+        if key == mnote_vim::Key::Char(crate::commands::leader())
+            && self.vim.mode() == Mode::Normal
+            && !self.vim.is_pending()
+            && self.vim.cmd_window().is_none()
+        {
+            self.reply = None;
+            self.leader = true;
+            return true;
+        }
         let mode_before = self.shown_mode();
         let revision_before = self.buffer.revision();
         self.reply = None;
@@ -443,12 +454,8 @@ impl Editor {
         if let Some(text) = self.clipboard.borrow_mut().write.take() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
-        if let Effect::Unhandled(key) = effect {
-            if key == mnote_vim::Key::Char(' ') && self.vim.mode() == Mode::Normal {
-                self.leader = true;
-                return true;
-            }
-            // Anything else is the app's (⌘ shortcuts).
+        if let Effect::Unhandled(_) = effect {
+            // The app's (⌘ shortcuts).
             return false;
         }
 
@@ -799,7 +806,13 @@ impl Editor {
             Run::Ex(ex) => self.picker_action(PickerAction::RunEx(ex.to_owned()), cx),
             Run::Finder(query) => self.open_finder(query, cx),
             Run::Keys(keys) => {
-                for key in mnote_vim::parse_keys(keys) {
+                // A leading space is the leader binding: replay it with the
+                // real leader.
+                let keys = match keys.strip_prefix(' ') {
+                    Some(rest) => format!("{}{rest}", crate::commands::leader()),
+                    None => keys.to_owned(),
+                };
+                for key in mnote_vim::parse_keys(&keys) {
                     self.press(key, cx);
                 }
             }
@@ -1317,6 +1330,7 @@ impl Editor {
         };
         let _ = self.vim.execute(set, &mut self.buffer);
         crate::theme::Theme::set_choice(config.theme, cx);
+        crate::commands::set_leader(config.leader);
         // Fonts: an installed one, else the bundled default (and say so).
         let installed = cx.text_system().all_font_names();
         let mut missing = Vec::new();
@@ -1332,6 +1346,7 @@ impl Editor {
             mono: pick(&config.font, crate::theme::family::MONO),
             prose: pick(&config.ui_font, crate::theme::family::PROSE),
             note_size: config.font_size as f32,
+            ui_size: config.ui_font_size as f32,
         };
         if crate::theme::set_fonts(fonts) {
             self.remeasure_all();
@@ -2859,7 +2874,7 @@ impl Render for Editor {
         self.count_words_soon(cx);
         self.blame_soon(cx);
         // A page for Page Up/Down and ⌃f ⌃b: the lines that fit the window.
-        let text_h = window.viewport_size().height / px(1.) - 4. * size::BAR_H;
+        let text_h = window.viewport_size().height / px(1.) - 4. * crate::theme::bar_h();
         let page = (text_h / (text::NOTE_BODY.line_height().max(px(1.)) / px(1.))).floor();
         self.vim.set_page_lines(page.max(1.) as usize);
         let p = cx.theme().palette;
@@ -2931,7 +2946,13 @@ impl Render for Editor {
                     })
                     .when(
                         self.vim.command_line().is_none() && self.view != styled::View::Styled,
-                        |bar| bar.hint(format!("space m view: {}", self.view.next().name())),
+                        |bar| {
+                            bar.hint(format!(
+                                "{} view: {}",
+                                crate::commands::with_leader("space m"),
+                                self.view.next().name()
+                            ))
+                        },
                     ),
             )
             .child({
@@ -2970,7 +2991,7 @@ impl Render for Editor {
                 div()
                     .absolute()
                     .left(px(space::S3))
-                    .bottom(px(size::BAR_H + space::S1))
+                    .bottom(px(crate::theme::bar_h() + space::S1))
                     .child(popup)
             }))
             .children(picker)

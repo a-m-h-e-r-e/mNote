@@ -132,6 +132,22 @@ pub struct Config {
     pub ui_font: String,
     /// The note text's size in pixels; headings and code scale with it.
     pub font_size: u32,
+    /// The interface's text size in pixels (menus, pickers, bars, hints).
+    pub ui_font_size: u32,
+    /// The key before mNote's own commands (`space f` finds notes).
+    pub leader: char,
+}
+
+/// The interface sizes `ui_font_size` accepts.
+pub const UI_FONT_SIZES: std::ops::RangeInclusive<u32> = 11..=24;
+
+/// The leader as config.toml and hints write it: `space`, or the key.
+pub fn leader_name(leader: char) -> String {
+    if leader == ' ' {
+        "space".into()
+    } else {
+        leader.to_string()
+    }
 }
 
 /// The font sizes `font_size` accepts.
@@ -151,6 +167,8 @@ impl Default for Config {
             font: "IBM Plex Mono".into(),
             ui_font: "IBM Plex Sans".into(),
             font_size: 16,
+            ui_font_size: 15,
+            leader: ' ',
         }
     }
 }
@@ -261,6 +279,22 @@ impl Config {
                         .filter(|n| FONT_SIZES.contains(n))
                         .ok_or_else(|| wrong("a whole number from 10 to 32"))?;
                 }
+                "ui_font_size" => {
+                    config.ui_font_size = value
+                        .as_integer()
+                        .and_then(|n| u32::try_from(n).ok())
+                        .filter(|n| UI_FONT_SIZES.contains(n))
+                        .ok_or_else(|| wrong("a whole number from 11 to 24"))?;
+                }
+                "leader" => {
+                    let text = value.as_str().unwrap_or("");
+                    let mut chars = text.chars();
+                    config.leader = match (text, chars.next(), chars.next()) {
+                        ("space", _, _) => ' ',
+                        (_, Some(c), None) if c.is_ascii_graphic() => c,
+                        _ => return Err(wrong("\"space\" or one key, like \",\"")),
+                    };
+                }
                 "git_blame" => {
                     config.git_blame = value.as_bool().ok_or_else(|| wrong("true or false"))?;
                 }
@@ -342,7 +376,13 @@ impl Config {
              ui_font = \"{ui_font}\"\n\
              \n\
              # Note text size in pixels, 10 to 32; headings and code follow.\n\
-             font_size = {font_size}\n",
+             font_size = {font_size}\n\
+             \n\
+             # Interface text size in pixels, 11 to 24: menus, pickers, bars.\n\
+             ui_font_size = {ui_font_size}\n\
+             \n\
+             # The key before mNote's commands (\"space\" or one key, like \",\").\n\
+             leader = \"{leader}\"\n",
             summon = key_words(&self.summon),
             capture = key_words(&self.capture),
             rnu = self.relative_numbers,
@@ -351,6 +391,8 @@ impl Config {
             font = self.font,
             ui_font = self.ui_font,
             font_size = self.font_size,
+            ui_font_size = self.ui_font_size,
+            leader = leader_name(self.leader),
         )
     }
 }
@@ -459,6 +501,8 @@ mod tests {
             git_blame: true,
             font: "Menlo".into(),
             font_size: 18,
+            ui_font_size: 17,
+            leader: ',',
             ..Config::default()
         };
         assert_eq!(Config::parse(&config.template()), Ok(config));
@@ -495,6 +539,14 @@ mod tests {
         assert!(err.message.contains("10 to 32"));
         let err = Config::parse("font = \"\"").expect_err("no name");
         assert_eq!(err.line, Some(1));
+        let err = Config::parse("leader = \"ab\"").expect_err("two keys");
+        assert!(err.message.contains("one key"));
+        assert_eq!(
+            Config::parse("leader = \"space\"").map(|c| c.leader),
+            Ok(' ')
+        );
+        let err = Config::parse("ui_font_size = 40").expect_err("too big");
+        assert!(err.message.contains("11 to 24"));
         let err = Config::parse("view = ").expect_err("not toml");
         assert_eq!(err.line, Some(1));
     }

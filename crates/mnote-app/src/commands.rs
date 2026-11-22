@@ -27,13 +27,39 @@ pub struct Command {
     pub run: Run,
 }
 
+thread_local! {
+    // The leader key from config.toml, for hints and replayed keys (UI
+    // thread only).
+    static LEADER: std::cell::Cell<char> = const { std::cell::Cell::new(' ') };
+}
+
+/// Sets the leader key (config.toml's `leader`).
+pub fn set_leader(leader: char) {
+    LEADER.with(|l| l.set(leader));
+}
+
+/// The leader key in use.
+pub fn leader() -> char {
+    LEADER.with(std::cell::Cell::get)
+}
+
+/// `keys` as shown, with `space …` bindings under the real leader
+/// (`space f` → `, f` when the leader is `,`).
+pub fn with_leader(keys: &str) -> String {
+    match keys.strip_prefix("space ") {
+        Some(rest) => format!("{} {rest}", mnote_core::config::leader_name(leader())),
+        None => keys.to_owned(),
+    }
+}
+
 impl Command {
     /// The quiet text at the right of its row: keys, then the ex form.
     pub fn detail(&self) -> String {
         let ex = self.ex.map(|ex| format!(":{ex}"));
-        match (self.keys, ex) {
+        let keys = self.keys.map(with_leader);
+        match (keys, ex) {
             (Some(keys), Some(ex)) => format!("{keys} · {ex}"),
-            (Some(keys), None) => keys.to_owned(),
+            (Some(keys), None) => keys,
             (None, Some(ex)) => ex,
             (None, None) => String::new(),
         }
@@ -261,6 +287,15 @@ mod tests {
         let undo = COMMANDS.iter().find(|c| c.label == "Undo").expect("listed");
         assert_eq!(undo.detail(), "u · :undo");
         assert!(undo.haystack().contains(":undo"));
+    }
+
+    #[test]
+    fn leader_bindings_show_the_real_leader() {
+        assert_eq!(with_leader("space f"), "space f");
+        set_leader(',');
+        assert_eq!(with_leader("space f"), ", f");
+        assert_eq!(with_leader("gd"), "gd");
+        set_leader(' ');
     }
 
     #[test]

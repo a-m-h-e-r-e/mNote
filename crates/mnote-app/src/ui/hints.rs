@@ -3,7 +3,7 @@
 
 use gpui::{App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div, px};
 
-use crate::theme::{ActiveTheme, StyledExt, Theme, radius, size, space, text};
+use crate::theme::{ActiveTheme, StyledExt, Theme, radius, space, text};
 
 /// One key in a hint: `esc`, `⌃n`, `j`.
 #[derive(IntoElement)]
@@ -23,8 +23,8 @@ impl RenderOnce for KeyCap {
             .flex_none()
             .items_center()
             .justify_center()
-            .min_w(px(20.))
-            .h(px(20.))
+            .min_w(px((20. * crate::theme::ui_scale()).round()))
+            .h(px((20. * crate::theme::ui_scale()).round()))
             .px(px(space::S1))
             .border_1()
             .border_color(Theme::color(p.line_strong))
@@ -75,7 +75,7 @@ impl RenderOnce for HintBar {
             .flex_none()
             .items_center()
             .gap(px(space::S4))
-            .h(px(size::BAR_H))
+            .h(px(crate::theme::bar_h()))
             .px(px(space::S3))
             .border_t_1()
             .border_color(Theme::color(p.line))

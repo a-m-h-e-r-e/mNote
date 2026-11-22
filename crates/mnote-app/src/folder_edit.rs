@@ -23,7 +23,9 @@ use crate::ui::{Hint, HintBar};
 const MODAL_W_SHARE: f32 = 0.8;
 const MODAL_H_SHARE: f32 = 0.72;
 /// Heights around the body: the title row, the hint bar, the border.
-const CHROME_H: f32 = 47. + size::BAR_H + 1. + 2.;
+fn chrome_h() -> f32 {
+    47. * crate::theme::ui_scale() + crate::theme::bar_h() + 1. + 2.
+}
 /// A buffer line, and the pane's header and padding above the lines.
 const LINE_H: f32 = 24.;
 const PANE_TOP: f32 = 33. + 16.;
@@ -173,7 +175,7 @@ impl FolderEditor {
         p: &Palette,
     ) -> AnyElement {
         let modal_w = (window_width * MODAL_W_SHARE).min(size::MODAL_W);
-        let body_h = (window_height * MODAL_H_SHARE - CHROME_H).max(PANE_TOP + LINE_H);
+        let body_h = (window_height * MODAL_H_SHARE - chrome_h()).max(PANE_TOP + LINE_H);
         let visible = (((body_h - PANE_TOP) / LINE_H).floor() as usize).max(1);
         let (title, changes, links) = match &self.state {
             State::Editing => (

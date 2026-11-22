@@ -23,14 +23,19 @@ use mnote_vim::{InputAction, Key, Mode, VimInput};
 
 use crate::editor::keys;
 use crate::editor::line::{Caret, LineText};
-use crate::theme::{ActiveTheme, Palette, StyledExt, TextStyle, Theme, radius, size, space, text};
+use crate::theme::{ActiveTheme, Palette, StyledExt, TextStyle, Theme, radius, space, text};
 use crate::ui::{Hint, HintBar, ModePill};
 
 /// Notes listed while choosing one.
 const CHOICES: usize = 6;
 /// The panel's height without and with the note list.
-pub const PANEL_H: f32 = 116.;
-const CHOOSER_H: f32 = CHOICES as f32 * size::ROW_H + 52.;
+pub fn panel_h() -> f32 {
+    (116. * crate::theme::ui_scale()).round()
+}
+
+fn chooser_h() -> f32 {
+    CHOICES as f32 * crate::theme::row_h() + (52. * crate::theme::ui_scale()).round()
+}
 
 /// What the panel asks for when it closes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,9 +106,9 @@ impl QuickCapture {
 
     /// The height the window needs now.
     pub fn height(&self) -> f32 {
-        PANEL_H
+        panel_h()
             + if self.chooser.is_some() {
-                CHOOSER_H
+                chooser_h()
             } else {
                 0.
             }
@@ -317,7 +322,7 @@ impl Render for QuickCapture {
                 div()
                     .flex()
                     .items_center()
-                    .h(px(size::ROW_H))
+                    .h(px(crate::theme::row_h()))
                     .px(px(space::S3))
                     .rounded(px(radius::SM))
                     .text_style(text::UI)

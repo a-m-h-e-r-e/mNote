@@ -11,7 +11,7 @@ use gpui::{
 };
 use mnote_vim::ex::cmdline::{CommandKind, Token, tokens};
 
-use crate::theme::{ActiveTheme, Palette, StyledExt, Theme, radius, size, space, text};
+use crate::theme::{ActiveTheme, Palette, StyledExt, Theme, radius, space, text};
 
 /// The colour (`0xRRGGBBAA`) of each part of a command line.
 pub fn token_color(token: Token, p: &Palette) -> u32 {
@@ -107,7 +107,7 @@ impl RenderOnce for CommandLine {
             .flex_none()
             .items_center()
             .gap(px(2.))
-            .h(px(size::BAR_H))
+            .h(px(crate::theme::bar_h()))
             .px(px(space::S3))
             .overflow_hidden()
             .whitespace_nowrap()
@@ -203,7 +203,7 @@ impl RenderOnce for CompletionPopup {
                     .flex()
                     .items_center()
                     .gap(px(space::S2))
-                    .h(px(size::ROW_H))
+                    .h(px(crate::theme::row_h()))
                     .px(px(space::S2))
                     .rounded(px(radius::SM))
                     .whitespace_nowrap()

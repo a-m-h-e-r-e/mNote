@@ -10,7 +10,7 @@ use gpui::{
 };
 use mnote_vim::Mode;
 
-use crate::theme::{ActiveTheme, Palette, StyledExt, Theme, radius, size, space, text};
+use crate::theme::{ActiveTheme, Palette, StyledExt, Theme, radius, space, text};
 
 /// Fill and text colour (`0xRRGGBBAA`) of the mode pill for each Vim mode.
 ///
@@ -208,7 +208,7 @@ fn bar(p: &Palette) -> gpui::Div {
         .flex_none()
         .items_center()
         .gap(px(space::S4))
-        .h(px(size::BAR_H))
+        .h(px(crate::theme::bar_h()))
         .px(px(space::S3))
         .overflow_hidden()
         .whitespace_nowrap()

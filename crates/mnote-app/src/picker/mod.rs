@@ -40,7 +40,6 @@ const STACKED_LIST_SHARE: f32 = 0.45;
 /// Heights around the list: the field, the hint bar (with its rule), the
 /// title row, a footer, and the modal's border.
 const INPUT_H: f32 = 44.;
-const HINTS_H: f32 = size::BAR_H + 1.;
 const TITLE_H: f32 = 47.;
 const FOOTER_H: f32 = 39.;
 const BORDERS_H: f32 = 2.;
@@ -546,17 +545,19 @@ impl Picker {
         let footer = !self.delegate.has_preview()
             && !self.delegate.is_empty()
             && self.delegate.footer(self.selected).is_some();
-        let chrome = INPUT_H
-            + HINTS_H
+        let s = crate::theme::ui_scale();
+        let chrome = INPUT_H * s
+            + crate::theme::bar_h()
+            + 1.
             + BORDERS_H
             + if self.delegate.title().is_some() {
-                TITLE_H
+                TITLE_H * s
             } else {
                 0.
             }
-            + if footer { FOOTER_H } else { 0. };
-        let body_h = (window_height * MODAL_H_SHARE - chrome).max(size::ROW_H + LIST_PAD);
-        let row_h = size::ROW_H + 1.;
+            + if footer { FOOTER_H * s } else { 0. };
+        let body_h = (window_height * MODAL_H_SHARE - chrome).max(crate::theme::row_h() + LIST_PAD);
+        let row_h = crate::theme::row_h() + 1.;
         let list_h = if compact {
             // As tall as its rows, up to the space a full modal would have.
             let rows = self.delegate.len().max(1) as f32;
@@ -741,7 +742,7 @@ impl Picker {
             .flex_none()
             .items_center()
             .gap(px(space::S2))
-            .h(px(44.))
+            .h(px(INPUT_H * crate::theme::ui_scale()))
             .px(px(space::S3))
             .border_b_1()
             .border_color(Theme::color(p.line))
@@ -840,7 +841,7 @@ fn render_field(
         .flex()
         .flex_none()
         .items_center()
-        .h(px(size::ROW_H))
+        .h(px(crate::theme::row_h()))
         .px(px(space::S2))
         .rounded(px(radius::SM))
         .border_1()
@@ -905,7 +906,7 @@ fn render_row(row: &Row, selected: bool, caret_on: bool, p: &Palette) -> AnyElem
         .flex_none()
         .items_center()
         .gap(px(space::S2))
-        .h(px(size::ROW_H))
+        .h(px(crate::theme::row_h()))
         .px(px(space::S2))
         .rounded(px(radius::SM))
         .whitespace_nowrap()
