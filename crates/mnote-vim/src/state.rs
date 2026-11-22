@@ -484,6 +484,63 @@ impl Vim {
         }
     }
 
+    /// A mouse click at character `pos`: the cursor goes there. A selection
+    /// ends; an insert goes on from there (as a new undo step, like an
+    /// arrow key); NORMAL keeps the cursor on a character.
+    pub fn click(&mut self, pos: usize, buf: &mut Buffer) {
+        let text = buf.text();
+        let pos = pos.min(text.len_chars());
+        if self.cmdline.is_some() {
+            return;
+        }
+        match self.mode {
+            Mode::Insert => {
+                if pos != self.cursor {
+                    buf.end_change(self.cursor);
+                    self.cursor = pos;
+                    buf.begin_change(self.cursor);
+                    if let Some(session) = &mut self.insert {
+                        session.broken = true;
+                    }
+                }
+            }
+            mode => {
+                if mode.is_visual() {
+                    self.set_visual_marks(text);
+                }
+                self.cursor = pos;
+                self.enter(Mode::Normal, text);
+            }
+        }
+        self.want_col = None;
+    }
+
+    /// Selects from `anchor` to `cursor` (characters, both inclusive), by
+    /// line if `linewise`: a mouse drag, double or triple click. An insert
+    /// ends first.
+    pub fn select(&mut self, anchor: usize, cursor: usize, linewise: bool, buf: &mut Buffer) {
+        if self.cmdline.is_some() {
+            return;
+        }
+        if self.mode == Mode::Insert {
+            self.handle_key(Key::Esc, buf);
+        }
+        let text = buf.text();
+        let last = text.len_chars().saturating_sub(1);
+        self.anchor = anchor.min(last);
+        self.cursor = cursor.min(last);
+        let mode = if linewise {
+            Mode::VisualLine
+        } else {
+            Mode::Visual
+        };
+        self.mode = mode;
+        self.pending = Pending::None;
+        self.op = None;
+        self.count = None;
+        self.want_col = None;
+    }
+
     /// Sets how many lines Page Up/Down and `⌃f` `⌃b` move (`⌃d` `⌃u` move
     /// half).
     pub fn set_page_lines(&mut self, lines: usize) {

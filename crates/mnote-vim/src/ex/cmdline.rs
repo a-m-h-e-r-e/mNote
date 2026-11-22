@@ -1486,6 +1486,33 @@ mod mapping_tests {
     }
 
     #[test]
+    fn clicks_and_selections_from_the_mouse() {
+        let mut buf = mnote_core::Buffer::new("one two\nthree\n");
+        let mut vim = crate::Vim::new();
+        vim.click(4, &mut buf);
+        assert_eq!((vim.cursor(), vim.mode()), (4, crate::Mode::Normal));
+        vim.select(4, 6, false, &mut buf);
+        assert_eq!(vim.selection(), Some(4..7), "both ends inclusive");
+        vim.click(0, &mut buf);
+        assert_eq!(
+            (vim.cursor(), vim.mode()),
+            (0, crate::Mode::Normal),
+            "a click ends it"
+        );
+        // In INSERT a click moves the caret and keeps inserting.
+        for key in crate::parse_keys("A") {
+            vim.handle_key(key, &mut buf);
+        }
+        vim.click(3, &mut buf);
+        for key in crate::parse_keys("X<esc>") {
+            vim.handle_key(key, &mut buf);
+        }
+        assert_eq!(buf.to_string(), "oneX two\nthree\n");
+        vim.select(8, 8, true, &mut buf);
+        assert_eq!(vim.mode(), crate::Mode::VisualLine);
+    }
+
+    #[test]
     fn pages_move_by_the_window_height() {
         let text: String = (0..60).map(|i| format!("{i}\n")).collect();
         let mut buf = mnote_core::Buffer::new(&text);

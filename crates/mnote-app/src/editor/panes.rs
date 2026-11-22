@@ -571,6 +571,7 @@ impl Editor {
         }
         self.swap_local(&mut local);
         self.drawing_other = true;
+        self.drawing_pane = id;
         let element = self.render_line(ix, cx);
         self.drawing_other = false;
         self.swap_local(&mut local);

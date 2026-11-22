@@ -165,6 +165,10 @@ pub struct Editor {
     drawing_other: bool,
     /// `⌃w` was pressed: the next key is a pane command.
     pane_key: bool,
+    /// The unfocused pane being drawn (while `drawing_other`).
+    drawing_pane: PaneId,
+    /// Where a mouse drag started (a character), while the button is down.
+    drag_anchor: Option<usize>,
     /// The notes folder, whatever the focused pane shows.
     vault: Option<Vault>,
     /// The focused note's word count, for the status line: its document and
@@ -343,6 +347,8 @@ impl Editor {
             parked: Vec::new(),
             drawing_other: false,
             pane_key: false,
+            drawing_pane: PaneId(0),
+            drag_anchor: None,
             vault: None,
             first_run: None,
             marked: None,
@@ -1509,6 +1515,105 @@ impl Editor {
         }));
     }
 
+    /// A picker row pressed: selected, and opened on a double click.
+    fn picker_click(&mut self, ix: usize, clicks: usize, cx: &mut Context<Self>) {
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+        picker.select(ix);
+        if clicks >= 2 && picker.selected() == ix {
+            self.picker_key(mnote_vim::Key::Enter, cx);
+        }
+        cx.notify();
+    }
+
+    /// The mouse over line `ix` of `pane`, at character `ch` of the line:
+    /// a click places the cursor (⌘ follows a link there), shift extends
+    /// the selection, a double click selects a word, a triple click the
+    /// line, and a drag selects from where it started.
+    fn mouse_on_line(
+        &mut self,
+        pane: PaneId,
+        ix: usize,
+        ch: usize,
+        hit: line::MouseHit,
+        cx: &mut Context<Self>,
+    ) {
+        use line::MouseHit;
+        if self.picker.is_some() || self.folder_edit.is_some() || self.first_run.is_some() {
+            return;
+        }
+        if pane != self.focused {
+            if matches!(hit, MouseHit::Drag) {
+                return;
+            }
+            self.focus_pane(pane, cx);
+        }
+        let rope = self.buffer.text();
+        if ix >= line_count(rope) {
+            return;
+        }
+        let start = line_start(rope, ix);
+        let len = line_len(rope, ix);
+        let pos = start + ch.min(len);
+        let visual = matches!(self.vim.mode(), Mode::Visual | Mode::VisualLine);
+        match hit {
+            MouseHit::Down { command: true, .. } => {
+                self.vim.click(pos, &mut self.buffer);
+                self.follow_link(cx);
+            }
+            MouseHit::Down {
+                clicks: 1,
+                shift: true,
+                ..
+            } => {
+                let anchor = if visual {
+                    self.vim.anchor()
+                } else {
+                    self.vim.cursor()
+                };
+                self.vim.select(anchor, pos, false, &mut self.buffer);
+            }
+            MouseHit::Down { clicks: 1, .. } => {
+                self.vim.click(pos, &mut self.buffer);
+                self.drag_anchor = Some(pos);
+            }
+            MouseHit::Down { clicks: 2, .. } => {
+                // The word under the pointer (or just that character).
+                let chars: Vec<char> = rope.slice(start..start + len).chars().collect();
+                let word = |c: char| c.is_alphanumeric() || c == '_';
+                let at = ch.min(chars.len().saturating_sub(1));
+                let (mut a, mut b) = (at, at);
+                if chars.get(at).is_some_and(|&c| word(c)) {
+                    while a > 0 && word(chars[a - 1]) {
+                        a -= 1;
+                    }
+                    while b + 1 < chars.len() && word(chars[b + 1]) {
+                        b += 1;
+                    }
+                }
+                self.vim
+                    .select(start + a, start + b, false, &mut self.buffer);
+                self.drag_anchor = None;
+            }
+            MouseHit::Down { .. } => {
+                self.vim.select(start, start, true, &mut self.buffer);
+                self.drag_anchor = None;
+            }
+            MouseHit::Drag => {
+                let Some(anchor) = self.drag_anchor else {
+                    return;
+                };
+                if pos == anchor && !visual {
+                    return;
+                }
+                self.vim.select(anchor, pos, false, &mut self.buffer);
+            }
+        }
+        self.restart_blink(cx);
+        cx.notify();
+    }
+
     /// `⌘C` `⌘X` `⌘V` `⌘A`: copy, cut and paste with the system clipboard,
     /// and select all. Returns whether the key was one of them.
     fn clipboard_shortcut(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
@@ -2038,6 +2143,34 @@ impl Editor {
         )
         .styling(styling)
         .highlights(highlights);
+
+        // The mouse: the byte under the pointer back to the note's
+        // character, then a click, drag or selection in this pane.
+        {
+            let pane = if self.drawing_other {
+                self.drawing_pane
+            } else {
+                self.focused
+            };
+            let view = cx.entity().downgrade();
+            let map = Rc::new((content.clone(), look.shown.clone(), substituted));
+            line = line.on_mouse(Rc::new(move |byte, hit, _window, cx| {
+                let (content, shown, substituted) = &*map;
+                let ch = if *substituted {
+                    let mut b = byte.min(content.len());
+                    while !content.is_char_boundary(b) {
+                        b -= 1;
+                    }
+                    content[..b].chars().count()
+                } else {
+                    (0..=content.chars().count())
+                        .take_while(|&c| shown.display_byte(c) <= byte)
+                        .last()
+                        .unwrap_or(0)
+                };
+                let _ = view.update(cx, |this, cx| this.mouse_on_line(pane, ix, ch, hit, cx));
+            }));
+        }
 
         if let Some(chars) = self.selection_on_line(ix, start, len) {
             let to_byte = |c: usize| to_shown(char_to_byte(&content, c));
@@ -2951,10 +3084,26 @@ impl Render for Editor {
         let width = window.viewport_size().width / px(1.);
         let height = window.viewport_size().height / px(1.);
         let caret_on = self.caret_on;
+        let mouse = {
+            let rows = cx.entity().downgrade();
+            let scrim = rows.clone();
+            crate::picker::PickerMouse {
+                on_row: Rc::new(move |ix, clicks, _window, cx| {
+                    let _ = rows.update(cx, |this, cx| this.picker_click(ix, clicks, cx));
+                }),
+                on_scrim: Rc::new(move |_window, cx| {
+                    let _ = scrim.update(cx, |this, cx| {
+                        this.picker = None;
+                        this.restart_blink(cx);
+                        cx.notify();
+                    });
+                }),
+            }
+        };
         let picker = self
             .picker
             .as_mut()
-            .map(|picker| picker.render(width, height, caret_on, p));
+            .map(|picker| picker.render(width, height, caret_on, &mouse, p));
         let folder_edit = self
             .folder_edit
             .as_ref()
@@ -3004,6 +3153,10 @@ impl Render for Editor {
             .bg(Theme::color(p.paper))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, _| this.drag_anchor = None),
+            )
             .child(
                 TopBar::new(self.path_segments())
                     .dirty(self.buffer.is_dirty())

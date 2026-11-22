@@ -14,10 +14,11 @@ pub mod list;
 pub mod palette;
 
 use std::ops::Range;
+use std::rc::Rc;
 
 use gpui::{
-    AnyElement, Font, FontWeight, HighlightStyle, IntoElement, ParentElement, SharedString, Styled,
-    StyledText, div, font, prelude::FluentBuilder, px,
+    AnyElement, Font, FontWeight, HighlightStyle, InteractiveElement, IntoElement, ParentElement,
+    SharedString, Styled, StyledText, div, font, prelude::FluentBuilder, px,
 };
 use mnote_core::NotePath;
 use mnote_core::content::FileHits;
@@ -26,6 +27,18 @@ use mnote_vim::{InputAction, Key, Mode, VimInput};
 use crate::editor::line::{Caret, LineText};
 use crate::theme::{Palette, StyledExt, Theme, radius, size, space, text};
 use crate::ui::{Hint, HintBar};
+
+/// The mouse on a picker: row `ix` pressed (with the click count), or the
+/// scrim around the modal pressed.
+pub struct PickerMouse {
+    pub on_row: RowClick,
+    pub on_scrim: ScrimClick,
+}
+
+/// Row `ix` pressed, with the click count.
+pub type RowClick = Rc<dyn Fn(usize, usize, &mut gpui::Window, &mut gpui::App)>;
+/// The scrim around the modal pressed.
+pub type ScrimClick = Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)>;
 
 /// Below this window width the preview moves under the list.
 const STACK_BELOW: f32 = 700.;
@@ -538,6 +551,7 @@ impl Picker {
         window_width: f32,
         window_height: f32,
         caret_on: bool,
+        mouse: &PickerMouse,
         p: &Palette,
     ) -> AnyElement {
         let stacked = window_width < STACK_BELOW;
@@ -590,9 +604,26 @@ impl Picker {
             .p(px(6.))
             .min_w_0()
             .overflow_hidden()
-            .children(
-                rows.map(|ix| render_row(&self.delegate.row(ix), ix == self.selected, caret_on, p)),
-            );
+            .children(rows.map(|ix| {
+                // Hover tints a row; a click selects it, a double click opens.
+                let on_row = mouse.on_row.clone();
+                div()
+                    .id(("row", ix))
+                    .rounded(px(radius::SM))
+                    .when(self.delegate.selectable(ix), |row| {
+                        row.hover(|style| style.bg(Theme::color(p.well)))
+                    })
+                    .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
+                        cx.stop_propagation();
+                        on_row(ix, event.click_count, window, cx);
+                    })
+                    .child(render_row(
+                        &self.delegate.row(ix),
+                        ix == self.selected,
+                        caret_on,
+                        p,
+                    ))
+            }));
         let preview = self
             .delegate
             .preview(self.selected)
@@ -660,6 +691,8 @@ impl Picker {
         }
 
         let modal = div()
+            // A press inside the modal isn't one on the scrim.
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .flex()
             .flex_col()
             .flex_none()
@@ -702,6 +735,10 @@ impl Picker {
             .justify_center()
             .p(px(space::S4))
             .bg(Theme::color(p.scrim))
+            .on_mouse_down(gpui::MouseButton::Left, {
+                let on_scrim = mouse.on_scrim.clone();
+                move |_, window, cx| on_scrim(window, cx)
+            })
             .child(modal)
             .into_any_element()
     }

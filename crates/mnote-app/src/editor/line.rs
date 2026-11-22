@@ -6,15 +6,20 @@
 //! rows and the character under the block caret takes the `on-cursor` colour.
 //! The bar caret, highlight outlines and the "newline is selected" cell are
 //! quads at positions from the shaped line.
+//!
+//! With [`LineText::on_mouse`], a press or drag over the text reports the
+//! byte under the pointer (in the shown text), for the editor to map back
+//! to the note.
 
 use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    App, AvailableSpace, Bounds, Element, ElementId, Font, GlobalElementId, Hsla,
-    InspectorElementId, IntoElement, LayoutId, Pixels, SharedString, Style, TextAlign, TextRun,
-    Window, WrappedLine, fill, outline, point, px, relative, size,
+    App, AvailableSpace, Bounds, DispatchPhase, Element, ElementId, Font, GlobalElementId, Hsla,
+    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
+    SharedString, Style, TextAlign, TextRun, Window, WrappedLine, fill, outline, point, px,
+    relative, size,
 };
 use mnote_vim::CaretShape;
 
@@ -53,6 +58,23 @@ pub struct Styling {
     pub strike: bool,
 }
 
+/// What the mouse did over a line's text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseHit {
+    /// Pressed: how many clicks in a row, and Shift and ⌘.
+    Down {
+        clicks: usize,
+        shift: bool,
+        command: bool,
+    },
+    /// Moved with the button held.
+    Drag,
+}
+
+/// Called with the byte under the pointer (in the shown text) and what the
+/// mouse did.
+pub type MouseHandler = Rc<dyn Fn(usize, MouseHit, &mut Window, &mut App)>;
+
 /// One rendered line of the note.
 pub struct LineText {
     text: SharedString,
@@ -67,6 +89,7 @@ pub struct LineText {
     highlights: Vec<Highlight>,
     styling: Vec<Styling>,
     shaped: Rc<RefCell<Option<Shaped>>>,
+    on_mouse: Option<MouseHandler>,
 }
 
 struct Shaped {
@@ -93,7 +116,14 @@ impl LineText {
             highlights: Vec::new(),
             styling: Vec::new(),
             shaped: Rc::default(),
+            on_mouse: None,
         }
+    }
+
+    /// Reports presses and drags over the text to `handler`.
+    pub fn on_mouse(mut self, handler: MouseHandler) -> Self {
+        self.on_mouse = Some(handler);
+        self
     }
 
     pub fn selection(mut self, bytes: Range<usize>, color: Hsla) -> Self {
@@ -311,6 +341,45 @@ impl Element for LineText {
         };
         let (origin, lh) = (bounds.origin, self.line_height);
         let len = self.text.len();
+        if let Some(handler) = self.on_mouse.clone() {
+            // The byte nearest the pointer; past the last row, the end.
+            let hit_line = line.clone();
+            let hit = move |position: gpui::Point<Pixels>| {
+                let offset = position - origin;
+                hit_line
+                    .closest_index_for_position(offset, lh)
+                    .unwrap_or_else(|end| end)
+                    .min(len)
+            };
+            let down = handler.clone();
+            let down_hit = hit.clone();
+            window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+                if phase == DispatchPhase::Bubble
+                    && event.button == MouseButton::Left
+                    && bounds.contains(&event.position)
+                {
+                    let mods = event.modifiers;
+                    down(
+                        down_hit(event.position),
+                        MouseHit::Down {
+                            clicks: event.click_count,
+                            shift: mods.shift,
+                            command: mods.platform,
+                        },
+                        window,
+                        cx,
+                    );
+                }
+            });
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                if phase == DispatchPhase::Bubble
+                    && event.pressed_button == Some(MouseButton::Left)
+                    && bounds.contains(&event.position)
+                {
+                    handler(hit(event.position), MouseHit::Drag, window, cx);
+                }
+            });
+        }
         let cell = self.font_size * 0.55;
         let at = |byte: usize| {
             line.position_for_index(byte.min(len), lh)
