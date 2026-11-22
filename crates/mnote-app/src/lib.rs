@@ -5,5 +5,7 @@ pub mod commands;
 pub mod editor;
 pub mod folder_edit;
 pub mod picker;
+#[cfg(target_os = "macos")]
+pub mod summon;
 pub mod theme;
 pub mod ui;

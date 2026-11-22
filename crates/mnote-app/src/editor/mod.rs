@@ -312,6 +312,11 @@ impl Editor {
             self.clipboard.borrow_mut().read =
                 cx.read_from_clipboard().and_then(|item| item.text());
         }
+        if key == mnote_vim::Key::Esc && self.esc_hides() {
+            self.save_now(cx);
+            cx.hide();
+            return true;
+        }
         let mode_before = self.shown_mode();
         let revision_before = self.buffer.revision();
         self.reply = None;
@@ -351,6 +356,15 @@ impl Editor {
         }
         cx.notify();
         true
+    }
+
+    /// Whether `esc` hides mNote: in NORMAL with nothing pending, no
+    /// command-line window and no multi-line message to close first.
+    fn esc_hides(&self) -> bool {
+        self.vim.mode() == Mode::Normal
+            && !self.vim.is_pending()
+            && self.vim.cmd_window().is_none()
+            && !self.vim.message().is_some_and(|m| m.text.contains('\n'))
     }
 
     /// The mode whose caret is showing: the picker field's, or the

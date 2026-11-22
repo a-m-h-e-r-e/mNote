@@ -16,5 +16,9 @@ gpui.workspace = true
 mnote-core.workspace = true
 mnote-vim.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc.workspace = true
+raw-window-handle.workspace = true
+
 [lints]
 workspace = true

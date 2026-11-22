@@ -2796,6 +2796,8 @@ dependencies = [
  "gpui",
  "mnote-core",
  "mnote-vim",
+ "objc",
+ "raw-window-handle",
 ]
 
 [[package]]

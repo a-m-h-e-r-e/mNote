@@ -9,6 +9,11 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+# objc + raw-window-handle: reach the NSWindow behind a gpui window to set its
+# Space behaviour (AMI-173). Both are already in gpui's tree at these versions,
+# so they add no crates and no size.
+objc = "0.2.7"
+raw-window-handle = "0.6.2"
 mnote-core = { path = "crates/mnote-core" }
 mnote-vim = { path = "crates/mnote-vim" }
 # notify: the file watcher behind live reload of notes changed outside mNote (FSEvents on macOS).
@@ -38,7 +43,8 @@ async-channel = "2.5.0"
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# deny, not forbid, so the one macOS integration module can lift it (CLAUDE.md).
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

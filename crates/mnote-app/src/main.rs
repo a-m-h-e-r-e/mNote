@@ -76,11 +76,44 @@ fn main() {
                 })
             },
         );
-        if let Err(err) = opened {
-            eprintln!("mnote: couldn't open the window: {err}");
-            cx.quit();
-            return;
-        }
+        let window = match opened {
+            Ok(window) => window,
+            Err(err) => {
+                eprintln!("mnote: couldn't open the window: {err}");
+                cx.quit();
+                return;
+            }
+        };
+        summon_setup(window.into(), cx);
         cx.activate(true);
     });
 }
+
+/// `⌥M` from any app shows mNote where you are, on any Space. It only ever
+/// brings mNote forward; `esc` in NORMAL hides it.
+#[cfg(target_os = "macos")]
+fn summon_setup(window: gpui::AnyWindowHandle, cx: &mut App) {
+    use mnote_app::summon;
+    let _ = window.update(cx, |_, window, _| summon::join_all_spaces(window));
+    let presses = match summon::register_hotkey() {
+        Ok(presses) => presses,
+        Err(err) => {
+            eprintln!("mnote: no summon key: {err}");
+            return;
+        }
+    };
+    cx.spawn(async move |cx| {
+        while presses.recv().await.is_ok() {
+            let _ = cx.update(|cx| {
+                let _ = window.update(cx, |_, window, cx| {
+                    cx.activate(true);
+                    window.activate_window();
+                });
+            });
+        }
+    })
+    .detach();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn summon_setup(_: gpui::AnyWindowHandle, _: &mut App) {}
