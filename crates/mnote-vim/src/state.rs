@@ -37,6 +37,8 @@ pub enum Operator {
     Outdent,
     Lower,
     Upper,
+    /// `g~`: swaps upper and lower case.
+    Toggle,
 }
 
 impl Operator {
@@ -62,6 +64,7 @@ impl Operator {
             Operator::Outdent => '<',
             Operator::Lower => 'u',
             Operator::Upper => 'U',
+            Operator::Toggle => '~',
         }
     }
 }
@@ -88,6 +91,8 @@ enum Pending {
     JumpMark {
         exact: bool,
     },
+    /// `r`, waiting for the character.
+    Replace,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -105,6 +110,17 @@ struct InsertSession {
     typed: String,
     /// The typed text can't be repeated reliably (backspaced past it).
     broken: bool,
+}
+
+/// A REPLACE-mode session (`R`): what each typed character overwrote, for
+/// Backspace, and the typed text, for a count.
+#[derive(Debug, Clone, Default)]
+struct ReplaceSession {
+    count: usize,
+    typed: String,
+    /// Per typed character: the one it overwrote, or `None` if it was added
+    /// (at the end of the line, or a line break).
+    overwritten: Vec<Option<char>>,
 }
 
 /// Where long lines wrap on screen, supplied by the app for `gj` / `gk`.
@@ -174,6 +190,7 @@ pub struct Vim {
     pub(crate) completer: Option<Box<dyn crate::ex::cmdline::Completer>>,
     pub(crate) cmdwin: Option<Box<crate::ex::cmdwin::CmdWindow>>,
     insert: Option<InsertSession>,
+    replace: Option<ReplaceSession>,
     /// Keys of the command being typed, and of the last change, for `.`.
     keys: Vec<Key>,
     last_change: Option<Vec<Key>>,
@@ -230,6 +247,7 @@ impl Default for Vim {
             completer: None,
             cmdwin: None,
             insert: None,
+            replace: None,
             keys: Vec::new(),
             last_change: None,
             command_revision: 0,
@@ -348,7 +366,7 @@ impl Vim {
 
     /// Handles one key, editing `buf` as needed.
     pub fn handle_key(&mut self, key: Key, buf: &mut Buffer) -> Effect {
-        if self.mode != Mode::Insert && self.is_idle() {
+        if !matches!(self.mode, Mode::Insert | Mode::Replace) && self.is_idle() {
             self.keys.clear();
             self.command_revision = buf.revision();
         }
@@ -360,6 +378,7 @@ impl Vim {
         }
         match self.mode {
             Mode::Insert => self.insert_mapped(key, buf),
+            Mode::Replace => self.replace_key(key, buf),
             Mode::Command => {
                 self.command_key(key, buf);
                 Effect::Handled
@@ -510,6 +529,8 @@ impl Vim {
                     let repeat = unit.repeat(session.count - 1);
                     self.insert_text(buf, &repeat);
                 }
+                // Where INSERT ended, for `gi`.
+                self.marks.insert('^', self.cursor);
                 let start = line_start(buf.text(), line_of(buf.text(), self.cursor));
                 if self.cursor > start {
                     self.cursor -= 1;
@@ -586,6 +607,191 @@ impl Vim {
         if let Some(session) = &mut self.insert {
             session.broken = true;
         }
+    }
+
+    /// A key in REPLACE mode (`R`): characters overwrite the text (at the
+    /// end of a line they're added), Backspace puts back what was
+    /// overwritten, Esc repeats the typing for a count and ends it, as one
+    /// undo step.
+    fn replace_key(&mut self, key: Key, buf: &mut Buffer) -> Effect {
+        match key {
+            Key::Esc => {
+                if let Some(session) = self.replace.clone() {
+                    for _ in 1..session.count {
+                        for c in session.typed.chars() {
+                            self.overwrite(c, buf);
+                        }
+                    }
+                }
+                self.replace = None;
+                self.marks.insert('^', self.cursor);
+                let start = line_start(buf.text(), line_of(buf.text(), self.cursor));
+                if self.cursor > start {
+                    self.cursor -= 1;
+                }
+                buf.end_change(self.cursor);
+                self.enter(Mode::Normal, buf.text());
+                self.done(buf, true);
+            }
+            Key::Char(c) => self.overwrite(c, buf),
+            Key::Tab => self.overwrite('\t', buf),
+            Key::Enter => self.overwrite('\n', buf),
+            Key::Backspace | Key::Ctrl('h') => {
+                let undone = self.replace.as_mut().and_then(|s| {
+                    s.typed.pop();
+                    s.overwritten.pop()
+                });
+                match undone {
+                    // Nothing typed to take back: just move left.
+                    None if self.cursor > 0 => self.cursor -= 1,
+                    None => {}
+                    Some(old) => {
+                        self.cursor -= 1;
+                        let at = self.cursor;
+                        match old {
+                            Some(c) => self.edit(buf, at..at + 1, &c.to_string()),
+                            None => self.edit(buf, at..at + 1, ""),
+                        }
+                    }
+                }
+            }
+            Key::Left | Key::Right | Key::Up | Key::Down | Key::Home | Key::End => {
+                self.insert_move(key, buf);
+                if let Some(s) = &mut self.replace {
+                    s.overwritten.clear();
+                    s.typed.clear();
+                    s.count = 1;
+                }
+            }
+            _ => return Effect::Unhandled(key),
+        }
+        Effect::Handled
+    }
+
+    /// Types `c` over the character at the cursor (a line break, or the
+    /// end of a line, takes nothing).
+    fn overwrite(&mut self, c: char, buf: &mut Buffer) {
+        let text = buf.text();
+        let under = (self.cursor < text.len_chars())
+            .then(|| text.char(self.cursor))
+            .filter(|&u| u != '\n' && c != '\n');
+        let at = self.cursor;
+        let end = if under.is_some() { at + 1 } else { at };
+        self.edit(buf, at..end, &c.to_string());
+        self.cursor += 1;
+        if let Some(s) = &mut self.replace {
+            s.typed.push(c);
+            s.overwritten.push(under);
+        }
+    }
+
+    /// `r{char}`: replaces `count` characters from the cursor with `c` (not
+    /// past the end of the line; a line break replaces them with one), or
+    /// every selected character in VISUAL.
+    fn replace_chars(&mut self, c: char, buf: &mut Buffer) -> Effect {
+        let text = buf.text();
+        if self.mode.is_visual() {
+            let (range, _) = self.visual_range(text);
+            let replaced: String = text
+                .slice(range.clone())
+                .chars()
+                .map(|ch| if ch == '\n' { ch } else { c })
+                .collect();
+            self.leave_visual(text);
+            buf.begin_change(self.cursor);
+            self.edit(buf, range.clone(), &replaced);
+            self.cursor = clamp_normal(buf.text(), range.start);
+            buf.end_change(self.cursor);
+            self.done(buf, false);
+            return Effect::Handled;
+        }
+        let count = self.count.take().unwrap_or(1);
+        let line = line_of(text, self.cursor);
+        let end = line_start(text, line) + line_len(text, line);
+        if self.cursor + count > end {
+            self.cancel();
+            return Effect::Handled;
+        }
+        buf.begin_change(self.cursor);
+        if c == '\n' {
+            self.edit(buf, self.cursor..self.cursor + count, "\n");
+            self.cursor += 1;
+        } else {
+            let with = c.to_string().repeat(count);
+            self.edit(buf, self.cursor..self.cursor + count, &with);
+            self.cursor += count - 1;
+        }
+        buf.end_change(self.cursor);
+        self.done(buf, true);
+        Effect::Handled
+    }
+
+    /// `~`: swaps the case of `count` characters and moves past them.
+    fn toggle_chars(&mut self, buf: &mut Buffer) -> Effect {
+        let count = self.count.take().unwrap_or(1);
+        let text = buf.text();
+        let line = line_of(text, self.cursor);
+        let end = line_start(text, line) + line_len(text, line);
+        let to = (self.cursor + count).min(end);
+        if to <= self.cursor {
+            self.done(buf, false);
+            return Effect::Handled;
+        }
+        let changed = toggle_case(&text.slice(self.cursor..to).to_string());
+        buf.begin_change(self.cursor);
+        self.edit(buf, self.cursor..to, &changed);
+        self.cursor = clamp_normal(buf.text(), to);
+        buf.end_change(self.cursor);
+        self.done(buf, true);
+        Effect::Handled
+    }
+
+    /// `⌃a` / `⌃x`: adds `delta` times the count to the number at or after
+    /// the cursor on its line; the cursor ends on its last digit.
+    fn add_to_number(&mut self, delta: i64, buf: &mut Buffer) -> Effect {
+        let count = self.count.take().unwrap_or(1) as i64;
+        let text = buf.text();
+        let line = line_of(text, self.cursor);
+        let start = line_start(text, line);
+        let chars: Vec<char> = text
+            .slice(start..start + line_len(text, line))
+            .chars()
+            .collect();
+        let col = self.cursor - start;
+        // The digits under the cursor, or the first ones after it.
+        let mut first = if chars.get(col).is_some_and(char::is_ascii_digit) {
+            let mut i = col;
+            while i > 0 && chars[i - 1].is_ascii_digit() {
+                i -= 1;
+            }
+            i
+        } else if let Some(i) = (col..chars.len()).find(|&i| chars[i].is_ascii_digit()) {
+            i
+        } else {
+            self.cancel();
+            return Effect::Handled;
+        };
+        let mut last = first;
+        while last + 1 < chars.len() && chars[last + 1].is_ascii_digit() {
+            last += 1;
+        }
+        if first > 0 && chars[first - 1] == '-' {
+            first -= 1;
+        }
+        let number: String = chars[first..=last].iter().collect();
+        let Ok(value) = number.parse::<i64>() else {
+            self.cancel();
+            return Effect::Handled;
+        };
+        let new = value
+            .saturating_add(delta.saturating_mul(count))
+            .to_string();
+        buf.begin_change(self.cursor);
+        self.edit(buf, start + first..start + last + 1, &new);
+        self.cursor = start + first + new.chars().count() - 1;
+        buf.end_change(self.cursor);
+        self.done(buf, true);
+        Effect::Handled
     }
 
     /// A mouse click at character `pos`: the cursor goes there. A selection
@@ -886,6 +1092,9 @@ impl Vim {
                 self.open_cmd_window(kind, "", buf);
                 return Effect::Handled;
             }
+            (Pending::Replace, Key::Char(c)) => return self.replace_chars(c, buf),
+            (Pending::Replace, Key::Enter) => return self.replace_chars('\n', buf),
+            (Pending::Replace, Key::Tab) => return self.replace_chars('\t', buf),
             (Pending::SetMark, Key::Char(c)) if c.is_ascii_lowercase() => {
                 self.marks.insert(c, self.cursor);
                 self.done(buf, false);
@@ -941,13 +1150,34 @@ impl Vim {
                 self.app_command = Some(crate::ex::AppCommand::FollowLink);
                 return Effect::Handled;
             }
-            (Pending::G, Key::Char(c @ ('u' | 'U'))) => {
-                let op = if c == 'u' {
-                    Operator::Lower
-                } else {
-                    Operator::Upper
+            (Pending::G, Key::Char(c @ ('u' | 'U' | '~'))) => {
+                let op = match c {
+                    'u' => Operator::Lower,
+                    'U' => Operator::Upper,
+                    _ => Operator::Toggle,
                 };
                 return self.operator_key(op, buf);
+            }
+            // `gp` / `gP`: put, leaving the cursor just after the text.
+            (Pending::G, Key::Char(c @ ('p' | 'P')))
+                if self.op.is_none() && !self.mode.is_visual() =>
+            {
+                self.paste_moving(c == 'p', true, buf);
+                return Effect::Handled;
+            }
+            // `gi`: INSERT where it last ended.
+            (Pending::G, Key::Char('i')) if self.op.is_none() && !self.mode.is_visual() => {
+                let at = self.marks.get(&'^').copied().unwrap_or(self.cursor);
+                let line = line_of(text, at.min(text.len_chars()));
+                self.cursor = at.min(line_end(text, line));
+                let count = self.count.take().unwrap_or(1);
+                buf.begin_change(self.cursor);
+                self.start_insert(buf, count, "");
+                return Effect::Handled;
+            }
+            // `g&`: the last `:s` again, with its flags, on every line.
+            (Pending::G, Key::Char('&')) if self.op.is_none() && !self.mode.is_visual() => {
+                return self.repeat_substitute(true, buf);
             }
             (Pending::Bracket { forward }, Key::Char(c))
                 if c == if forward { ']' } else { '[' } =>
@@ -971,6 +1201,13 @@ impl Vim {
     }
 
     fn normal_start(&mut self, key: Key, buf: &mut Buffer) -> Effect {
+        // `⌃a` / `⌃x`: add to or subtract from the number under the cursor.
+        if let Key::Ctrl(c @ ('a' | 'x')) = key
+            && self.op.is_none()
+            && self.mode == Mode::Normal
+        {
+            return self.add_to_number(if c == 'a' { 1 } else { -1 }, buf);
+        }
         // `⌥j` / `⌥k`: the line (or the selected lines) down or up.
         if let Key::Alt(c @ ('j' | 'k')) = key
             && self.op.is_none()
@@ -1067,6 +1304,7 @@ impl Vim {
             '`' => Some(Pending::JumpMark { exact: true }),
             '"' if self.op.is_none() => Some(Pending::Register),
             'm' if self.op.is_none() && !self.mode.is_visual() => Some(Pending::SetMark),
+            'r' if self.op.is_none() => Some(Pending::Replace),
             // Macros aren't recorded yet; `q:` opens the command-line window.
             'q' if self.op.is_none() && !self.mode.is_visual() => Some(Pending::Q),
             'i' | 'a' if self.op.is_some() || self.mode.is_visual() => {
@@ -1168,6 +1406,17 @@ impl Vim {
                 return self.operate_on_lines(buf);
             }
             'p' | 'P' => self.paste(c == 'p', buf),
+            '~' => return self.toggle_chars(buf),
+            'R' => {
+                let count = self.count.take().unwrap_or(1);
+                buf.begin_change(self.cursor);
+                self.replace = Some(ReplaceSession {
+                    count,
+                    ..ReplaceSession::default()
+                });
+                self.enter(Mode::Replace, buf.text());
+            }
+            '&' => return self.repeat_substitute(false, buf),
             'J' => {
                 let lines = self.count.take().unwrap_or(2).max(2);
                 let first = line_of(text, self.cursor);
@@ -1210,6 +1459,7 @@ impl Vim {
             '<' => Some(Operator::Outdent),
             'u' => Some(Operator::Lower),
             'U' => Some(Operator::Upper),
+            '~' => Some(Operator::Toggle),
             _ => None,
         };
         if let Some(op) = op {
@@ -1232,7 +1482,12 @@ impl Vim {
                     buf.begin_change(self.cursor);
                     self.edit(buf, range.clone(), "");
                     self.cursor = range.start;
-                    self.put(&reg, false, buf, 1);
+                    // Replacing the last lines: put after the line before.
+                    let past_end = linewise && range.start > 0 && range.start >= buf.len_chars();
+                    if past_end {
+                        self.cursor = range.start - 1;
+                    }
+                    self.put(&reg, past_end, buf, 1);
                     self.registers.delete(
                         None,
                         Register {
@@ -1488,11 +1743,11 @@ impl Vim {
                 buf.end_change(self.cursor);
                 self.done(buf, true);
             }
-            Operator::Lower | Operator::Upper => {
-                let changed = if op == Operator::Lower {
-                    original.to_lowercase()
-                } else {
-                    original.to_uppercase()
+            Operator::Lower | Operator::Upper | Operator::Toggle => {
+                let changed = match op {
+                    Operator::Lower => original.to_lowercase(),
+                    Operator::Upper => original.to_uppercase(),
+                    _ => toggle_case(&original),
                 };
                 buf.begin_change(self.cursor);
                 if changed != original {
@@ -1507,18 +1762,53 @@ impl Vim {
 
     /// `p` and `P`.
     fn paste(&mut self, after: bool, buf: &mut Buffer) {
+        self.paste_moving(after, false, buf);
+    }
+
+    /// `p` / `P`, or with `past` `gp` / `gP`: the cursor goes just after the
+    /// put text (the line after put lines).
+    fn paste_moving(&mut self, after: bool, past: bool, buf: &mut Buffer) {
         let count = self.count.take().unwrap_or(1);
         let Some(reg) = self.registers.get(self.register.take()) else {
             self.done(buf, false);
             return;
         };
         buf.begin_change(self.cursor);
-        self.put(&reg, after, buf, count);
+        let end = self.put(&reg, after, buf, count);
+        if past {
+            let text = buf.text();
+            self.cursor = end.min(text.len_chars());
+            if reg.linewise {
+                self.cursor = line_start(text, line_of(text, self.cursor));
+            }
+        }
         buf.end_change(self.cursor);
         self.done(buf, true);
     }
 
-    pub(crate) fn put(&mut self, reg: &Register, after: bool, buf: &mut Buffer, count: usize) {
+    /// `&` (`:s` again on this line) and `g&` (with its flags, on every line).
+    fn repeat_substitute(&mut self, everywhere: bool, buf: &mut Buffer) -> Effect {
+        self.count = None;
+        let command = if everywhere { "%&&" } else { "&" };
+        if let Err(err) = self.execute(command, buf) {
+            self.message = Some(crate::ex::cmdline::Message {
+                text: err.to_string(),
+                error: true,
+                line: None,
+            });
+        }
+        self.done(buf, true);
+        Effect::Handled
+    }
+
+    /// Puts `reg` `count` times; returns where the put text ends.
+    pub(crate) fn put(
+        &mut self,
+        reg: &Register,
+        after: bool,
+        buf: &mut Buffer,
+        count: usize,
+    ) -> usize {
         let text = buf.text();
         let len = text.len_chars();
         let line = line_of(text, self.cursor);
@@ -1538,6 +1828,7 @@ impl Vim {
             };
             self.edit(buf, at..at, &insert);
             self.cursor = first_non_blank(buf.text(), target_line);
+            at + insert.chars().count()
         } else {
             let at = if after && line_len(text, line) > 0 {
                 (self.cursor + 1).min(line_end(text, line))
@@ -1547,6 +1838,7 @@ impl Vim {
             self.edit(buf, at..at, &insert);
             let end = at + insert.chars().count();
             self.cursor = clamp_normal(buf.text(), end.saturating_sub(1).max(at));
+            end
         }
     }
 
@@ -1794,4 +2086,18 @@ fn change_word_end(text: &Rope, pos: usize, count: usize, big: bool) -> usize {
         }
     }
     end
+}
+
+/// Swaps upper and lower case (`~`, `g~`).
+fn toggle_case(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| {
+            let swapped: Vec<char> = if c.is_uppercase() {
+                c.to_lowercase().collect()
+            } else {
+                c.to_uppercase().collect()
+            };
+            swapped
+        })
+        .collect()
 }

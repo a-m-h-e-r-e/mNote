@@ -525,6 +525,24 @@ impl LineText {
                 // end (an empty line) it needs a quad.
                 CaretShape::Block if caret.byte >= len => Some(cell),
                 CaretShape::Block => None,
+                CaretShape::Underline => {
+                    // Under the character it will overwrite: a cell wide, 2px.
+                    let next = self.text[caret.byte.min(len)..]
+                        .chars()
+                        .next()
+                        .map_or(caret.byte, |c| caret.byte + c.len_utf8());
+                    let right = if next > caret.byte {
+                        at(next).x
+                    } else {
+                        p.x + cell
+                    };
+                    let w = if right > p.x { right - p.x } else { cell };
+                    window.paint_quad(fill(
+                        Bounds::new(origin + point(p.x, p.y + lh - px(2.)), size(w, px(2.))),
+                        caret.color,
+                    ));
+                    None
+                }
             };
             if let Some(width) = width {
                 window.paint_quad(fill(

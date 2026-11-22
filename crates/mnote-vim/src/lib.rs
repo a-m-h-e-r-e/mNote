@@ -37,6 +37,8 @@ pub enum Mode {
     Visual,
     VisualLine,
     Command,
+    /// `R`: typing overwrites the text.
+    Replace,
 }
 
 /// How the caret is drawn for a mode (design decision D-001: the caret alone
@@ -45,6 +47,8 @@ pub enum Mode {
 pub enum CaretShape {
     Block,
     Bar,
+    /// A line under the character (REPLACE).
+    Underline,
 }
 
 impl Mode {
@@ -56,6 +60,7 @@ impl Mode {
             Mode::Visual => "VISUAL",
             Mode::VisualLine => "V-LINE",
             Mode::Command => "COMMAND",
+            Mode::Replace => "REPLACE",
         }
     }
 
@@ -68,6 +73,7 @@ impl Mode {
         match self {
             Mode::Insert | Mode::Command => CaretShape::Bar,
             Mode::Normal | Mode::Visual | Mode::VisualLine => CaretShape::Block,
+            Mode::Replace => CaretShape::Underline,
         }
     }
 }
@@ -542,5 +548,76 @@ mod budget {
             worst < Duration::from_millis(4),
             "slowest motion took {worst:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod editing_tests {
+    use super::harness::{check, run};
+
+    #[test]
+    fn r_replaces_characters() {
+        check("o|ne\n", "rx", "o|xe\n");
+        check("|abcd\n", "3rx", "xx|xd\n");
+        check("|ab\n", "5rx", "|ab\n");
+        check("a|bc\n", "r<CR>", "a\n|c\n");
+        check("|abc\n", "rxl.", "x|xc\n");
+        check("o|ne\n", "rxu", "o|ne\n");
+        check("|abc\n", "vlrx", "|xxc\n");
+        check("|a\nb\n", "Vjrx", "|x\nx\n");
+        check("o|ne\n", "r<esc>", "o|ne\n");
+    }
+
+    #[test]
+    fn capital_r_overwrites_until_escape() {
+        check("|abc\n", "Rxy<esc>", "x|yc\n");
+        check("|ab\n", "Rxyz<esc>", "xy|z\n");
+        check("|abc\n", "Rxy<bs><esc>", "|xbc\n");
+        check("|ab\n", "Rxyz<bs><bs><esc>", "|xb\n");
+        check("|abcd\n", "2Rx<esc>", "x|xcd\n");
+        check("|abc\n", "Rxy<esc>u", "|abc\n");
+        check("|abc\ndef\n", "Rxy<esc>j0.", "xyc\nx|yf\n");
+        let (_, vim, _) = run("|ab\n", "R");
+        assert_eq!(vim.mode(), crate::Mode::Replace);
+        assert_eq!(vim.mode().caret(), crate::CaretShape::Underline);
+    }
+
+    #[test]
+    fn tilde_and_g_tilde_swap_case() {
+        check("|ab\n", "~", "A|b\n");
+        check("|abc\n", "3~", "AB|C\n");
+        check("a|B\n", "5~", "a|b\n");
+        check("|ab cd\n", "g~w", "|AB cd\n");
+        check("a|b Cd\n", "g~~", "|AB cD\n");
+        check("|aB\n", "vl~", "|Ab\n");
+        check("|ab\n", "~~u", "A|b\n");
+    }
+
+    #[test]
+    fn ctrl_a_and_ctrl_x_change_numbers() {
+        check("|x 5 y\n", "<C-a>", "x |6 y\n");
+        check("|9\n", "<C-a>", "1|0\n");
+        check("|5\n", "3<C-x>", "|2\n");
+        check("|-1\n", "2<C-a>", "|1\n");
+        check("|0\n", "<C-x>", "-|1\n");
+        check("item 1|2 of 30\n", "<C-a>", "item 1|3 of 30\n");
+        check("|no digits\n", "<C-a>", "|no digits\n");
+        check("|1\n", "<C-a>.", "|3\n");
+    }
+
+    #[test]
+    fn gp_gi_and_ampersand() {
+        check("|ab\n", "ylgp", "aa|b\n");
+        check("|ab\n", "ylgP", "a|ab\n");
+        check("|a\nb\n", "yygp", "a\na\n|b\n");
+        check("|a\n", "A b<esc>0gi c<esc>", "a b |c\n");
+        check("|a a\na a\n", ":s/a/b/<CR>j&", "b a\n|b a\n");
+        check("|a a\na a\n", ":s/a/b/g<CR>g&", "b b\n|b b\n");
+    }
+
+    #[test]
+    fn linewise_visual_put_lands_on_the_put_line() {
+        check("|a\nb\n", "yyjVp", "a\n|a\n");
+        check("|a\nb\nc\n", "yyjVp", "a\n|a\nc\n");
     }
 }
