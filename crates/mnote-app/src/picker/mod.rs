@@ -29,10 +29,10 @@ use crate::ui::{Hint, HintBar};
 /// Below this window width the preview moves under the list.
 const STACK_BELOW: f32 = 700.;
 /// Height of the list (and the preview beside it).
-const LIST_H: f32 = 300.;
+const LIST_H: f32 = 340.;
 /// Rows of the list when the preview is stacked under it.
-const STACKED_LIST_H: f32 = 180.;
-const STACKED_PREVIEW_H: f32 = 150.;
+const STACKED_LIST_H: f32 = 200.;
+const STACKED_PREVIEW_H: f32 = 170.;
 /// Space above the modal, between it and the top bar.
 const SCRIM_TOP: f32 = 48.;
 
@@ -454,8 +454,8 @@ impl Picker {
                             .pb(px(10.))
                             .border_t_1()
                             .border_color(Theme::color(p.line))
-                            .text_size(px(12.))
-                            .line_height(px(18.))
+                            .text_size(px(13.))
+                            .line_height(px(20.))
                             .text_color(Theme::color(p.ink_2))
                             .child(about)
                     }),
@@ -592,7 +592,7 @@ impl Picker {
             .flex_none()
             .items_center()
             .gap(px(space::S2))
-            .h(px(40.))
+            .h(px(44.))
             .px(px(space::S3))
             .border_b_1()
             .border_color(Theme::color(p.line))
@@ -699,14 +699,14 @@ fn render_row(row: &Row, selected: bool, p: &Palette) -> AnyElement {
         .overflow_hidden()
         .text_style(text::UI)
         .when(hit_line.is_some(), |row| {
-            row.text_style(text::STATUS).line_height(px(20.))
+            row.text_style(text::STATUS).line_height(px(22.))
         })
         .text_color(Theme::color(ink))
         .when(selected, |row| row.bg(Theme::color(p.select)))
         .children(hit_line.map(|line| {
             div()
                 .flex_none()
-                .min_w(px(22.))
+                .min_w(px(26.))
                 .text_color(Theme::color(quiet))
                 .child(SharedString::from(line.to_string()))
         }))
@@ -742,8 +742,8 @@ fn render_preview(content: PreviewContent, p: &Palette) -> AnyElement {
         .text_color(Theme::color(p.ink_2))
         .child(
             div()
-                .text_size(px(15.))
-                .line_height(px(22.))
+                .text_size(px(17.))
+                .line_height(px(24.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(Theme::color(p.ink))
                 .child(content.title),
@@ -768,7 +768,7 @@ fn render_preview(content: PreviewContent, p: &Palette) -> AnyElement {
                 .flex()
                 .flex_col()
                 .text_style(text::STATUS)
-                .line_height(px(20.))
+                .line_height(px(22.))
                 .children(code.lines.into_iter().map(|(number, line, ranges)| {
                     let current = number == code.current;
                     let styles = marks(&ranges, line.len(), p);
@@ -784,7 +784,7 @@ fn render_preview(content: PreviewContent, p: &Palette) -> AnyElement {
                         .child(
                             div()
                                 .flex_none()
-                                .min_w(px(28.))
+                                .min_w(px(32.))
                                 .text_right()
                                 .text_color(Theme::color(p.ink_3))
                                 .child(SharedString::from(number.to_string())),

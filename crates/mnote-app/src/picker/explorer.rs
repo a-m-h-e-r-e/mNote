@@ -22,8 +22,8 @@ use super::finder::{age, note_preview, plural};
 use super::{Confirm, PickerAction, PickerDelegate, PreviewContent, Row};
 use crate::ui::Hint;
 
-/// The explorer's width (design: 820px).
-const WIDTH: f32 = 820.;
+/// The explorer's width (wider than the finder, for the folder path).
+const WIDTH: f32 = 900.;
 /// Items a folder preview lists.
 const PREVIEW_ITEMS: usize = 12;
 

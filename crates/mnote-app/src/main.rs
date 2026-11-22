@@ -65,7 +65,7 @@ fn main() {
                     title: Some(SharedString::new_static("mNote")),
                     appears_transparent: true,
                     // Centre the 12px buttons in the 28px top bar.
-                    traffic_light_position: Some(point(px(10.), px(8.))),
+                    traffic_light_position: Some(point(px(12.), px(10.))),
                 }),
                 ..Default::default()
             },

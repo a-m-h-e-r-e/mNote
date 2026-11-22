@@ -212,7 +212,7 @@ impl RenderOnce for CompletionPopup {
                     .child(
                         div()
                             .text_style(text::INPUT)
-                            .text_size(px(13.))
+                            .text_size(px(14.))
                             .text_color(Theme::color(ink))
                             .child(name),
                     )

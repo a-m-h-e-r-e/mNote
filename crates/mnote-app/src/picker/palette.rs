@@ -11,8 +11,8 @@ use super::{Confirm, PickerAction, PickerDelegate, PreviewContent, Row};
 use crate::commands::COMMANDS;
 use crate::ui::Hint;
 
-/// The palette's width (design: 600px, narrower than the finder).
-const WIDTH: f32 = 600.;
+/// The palette's width (narrower than the finder).
+const WIDTH: f32 = 660.;
 
 pub struct CommandPalette {
     haystacks: Vec<String>,

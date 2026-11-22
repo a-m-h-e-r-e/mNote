@@ -43,7 +43,7 @@ impl RenderOnce for ModePill {
             .flex()
             .flex_none()
             .items_center()
-            .h(px(18.))
+            .h(px(20.))
             .px(px(space::S2))
             .rounded(px(radius::SM))
             .bg(Theme::color(fill))

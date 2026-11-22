@@ -175,7 +175,7 @@ pub const SHADOW_MODAL_LIGHT: &[ShadowLayer] = &[
 /// Font families: the first family in each design-system stack.
 pub mod family {
     pub const PROSE: &str = "IBM Plex Sans";
-    pub const MONO: &str = "JetBrains Mono";
+    pub const MONO: &str = "IBM Plex Mono";
 }
 
 /// Which family a text style uses.
@@ -200,80 +200,80 @@ pub mod text {
     /// The note's H1, once per note.
     pub const NOTE_TITLE: TextStyle = TextStyle {
         family: Family::Prose,
-        size: 30.0,
-        line_height: 38.0,
+        size: 28.0,
+        line_height: 36.0,
         weight: 600,
         letter_spacing: -0.01,
     };
     /// ## headings.
     pub const NOTE_H2: TextStyle = TextStyle {
         family: Family::Prose,
-        size: 23.0,
-        line_height: 32.0,
+        size: 21.0,
+        line_height: 30.0,
         weight: 600,
         letter_spacing: 0.0,
     };
     /// ### headings and deeper.
     pub const NOTE_H3: TextStyle = TextStyle {
         family: Family::Prose,
-        size: 19.0,
-        line_height: 28.0,
+        size: 18.0,
+        line_height: 26.0,
         weight: 600,
-        letter_spacing: 0.0,
-    };
-    /// All note text: paragraphs, lists, quotes, table cells. Sized so Plex Sans reads like a 16px mono editor font.
-    pub const NOTE_BODY: TextStyle = TextStyle {
-        family: Family::Prose,
-        size: 17.0,
-        line_height: 28.0,
-        weight: 400,
         letter_spacing: 0.0,
     };
     /// List rows, preview text, dialog body.
     pub const UI: TextStyle = TextStyle {
         family: Family::Prose,
-        size: 13.0,
-        line_height: 20.0,
+        size: 15.0,
+        line_height: 22.0,
         weight: 400,
         letter_spacing: 0.0,
     };
     /// Dialog titles, file names in grouped results.
     pub const UI_STRONG: TextStyle = TextStyle {
         family: Family::Prose,
-        size: 13.0,
-        line_height: 20.0,
+        size: 15.0,
+        line_height: 22.0,
         weight: 500,
+        letter_spacing: 0.0,
+    };
+    /// All note text: paragraphs, lists, quotes, table cells, and the line numbers beside them. Mono, sized like Zed's editor.
+    pub const NOTE_BODY: TextStyle = TextStyle {
+        family: Family::Mono,
+        size: 16.0,
+        line_height: 26.0,
+        weight: 400,
         letter_spacing: 0.0,
     };
     /// Code blocks, inline code, the oil-style folder buffer.
     pub const CODE: TextStyle = TextStyle {
         family: Family::Mono,
-        size: 13.0,
-        line_height: 21.0,
+        size: 14.0,
+        line_height: 22.0,
         weight: 400,
         letter_spacing: 0.0,
     };
     /// The query line of every picker.
     pub const INPUT: TextStyle = TextStyle {
         family: Family::Mono,
-        size: 14.0,
-        line_height: 20.0,
+        size: 15.0,
+        line_height: 22.0,
         weight: 400,
         letter_spacing: 0.0,
     };
     /// Status line, breadcrumbs, paths.
     pub const STATUS: TextStyle = TextStyle {
         family: Family::Mono,
-        size: 12.0,
-        line_height: 16.0,
+        size: 13.0,
+        line_height: 18.0,
         weight: 400,
         letter_spacing: 0.0,
     };
     /// Mode pills, keycaps and hint bars.
     pub const HINT: TextStyle = TextStyle {
         family: Family::Mono,
-        size: 11.0,
-        line_height: 14.0,
+        size: 12.0,
+        line_height: 16.0,
         weight: 500,
         letter_spacing: 0.02,
     };
@@ -307,16 +307,16 @@ pub mod radius {
 
 /// Size tokens in px.
 pub mod size {
-    /// Max width of the note column (about 70 characters of note-body at 17px).
-    pub const MEASURE: f32 = 720.0;
+    /// Max width of the note column (80 characters of note-body).
+    pub const MEASURE: f32 = 768.0;
     /// Finder, explorer and palette width; below 700px of window they go full width and stack the preview.
-    pub const MODAL_W: f32 = 760.0;
+    pub const MODAL_W: f32 = 840.0;
     /// Quick capture panel width.
-    pub const CAPTURE_W: f32 = 520.0;
+    pub const CAPTURE_W: f32 = 560.0;
     /// Top bar, status line and hint bar height.
-    pub const BAR_H: f32 = 28.0;
+    pub const BAR_H: f32 = 32.0;
     /// One list row in any picker or column.
-    pub const ROW_H: f32 = 28.0;
+    pub const ROW_H: f32 = 32.0;
     /// Line-number column: numbers right-aligned, then a 32px gap (space-8) before the text, so numbers never crowd the note.
     pub const GUTTER_W: f32 = 80.0;
 }

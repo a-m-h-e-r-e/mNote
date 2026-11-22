@@ -772,7 +772,7 @@ impl Editor {
         let (shown, highlights) = self.decorate(ix, start, len, &content, p);
         let mut line = LineText::new(
             shown,
-            prose_font(body),
+            note_font(body),
             body.size(),
             body.line_height(),
             Theme::color(p.ink),
@@ -799,7 +799,8 @@ impl Editor {
             }));
         }
 
-        let gutter = text::STATUS;
+        // Line numbers in the note's own font and size, as in Zed.
+        let gutter = text::NOTE_BODY;
         div()
             .flex()
             .w_full()
@@ -949,10 +950,11 @@ impl Editor {
     }
 }
 
-fn prose_font(style: crate::theme::TextStyle) -> Font {
+/// The font of a note text style (IBM Plex Mono for the body).
+fn note_font(style: crate::theme::TextStyle) -> Font {
     Font {
         weight: style.font_weight(),
-        ..font(family::PROSE)
+        ..font(style.font_family())
     }
 }
 

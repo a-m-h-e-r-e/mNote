@@ -1,5 +1,6 @@
-//! The two font families mNote ships inside the binary: IBM Plex Sans for note
-//! text and JetBrains Mono for everything the app says about itself.
+//! The two font families mNote ships inside the binary: IBM Plex Mono for note
+//! text and the app's mono labels (Zed's editor font is a version of it), and
+//! IBM Plex Sans for lists and dialogs.
 //!
 //! Both are under the SIL Open Font License 1.1; the licence texts sit next to
 //! the files in `assets/fonts/`.
@@ -20,19 +21,17 @@ macro_rules! font {
 
 /// Every embedded font file, by file name.
 pub const FILES: &[(&str, &[u8])] = &[
+    ("IBMPlexMono-Regular.ttf", font!("IBMPlexMono-Regular.ttf")),
+    ("IBMPlexMono-Medium.ttf", font!("IBMPlexMono-Medium.ttf")),
+    (
+        "IBMPlexMono-SemiBold.ttf",
+        font!("IBMPlexMono-SemiBold.ttf"),
+    ),
     ("IBMPlexSans-Regular.ttf", font!("IBMPlexSans-Regular.ttf")),
     ("IBMPlexSans-Medium.ttf", font!("IBMPlexSans-Medium.ttf")),
     (
         "IBMPlexSans-SemiBold.ttf",
         font!("IBMPlexSans-SemiBold.ttf"),
-    ),
-    (
-        "JetBrainsMono-Regular.ttf",
-        font!("JetBrainsMono-Regular.ttf"),
-    ),
-    (
-        "JetBrainsMono-Medium.ttf",
-        font!("JetBrainsMono-Medium.ttf"),
     ),
 ];
 
