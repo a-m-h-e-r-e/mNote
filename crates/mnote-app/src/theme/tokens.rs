@@ -309,8 +309,8 @@ pub mod radius {
 pub mod size {
     /// Max width of the note column (80 characters of note-body).
     pub const MEASURE: f32 = 768.0;
-    /// Finder, explorer and palette width; below 700px of window they go full width and stack the preview.
-    pub const MODAL_W: f32 = 840.0;
+    /// Most a modal grows to: modals are centered, 80% of the window wide (up to this) and 72% tall; below 700px of window the preview stacks under the list.
+    pub const MODAL_W: f32 = 1100.0;
     /// Quick capture panel width.
     pub const CAPTURE_W: f32 = 560.0;
     /// Top bar, status line and hint bar height.

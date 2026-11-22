@@ -11,9 +11,6 @@ use super::{Confirm, PickerAction, PickerDelegate, PreviewContent, Row};
 use crate::commands::COMMANDS;
 use crate::ui::Hint;
 
-/// The palette's width (narrower than the finder).
-const WIDTH: f32 = 660.;
-
 pub struct CommandPalette {
     haystacks: Vec<String>,
     search: NoteSearch,
@@ -81,8 +78,8 @@ impl PickerDelegate for CommandPalette {
         Some(COMMANDS[self.hits.get(ix)?.item].about.into())
     }
 
-    fn width(&self) -> Option<f32> {
-        Some(WIDTH)
+    fn compact(&self) -> bool {
+        true
     }
 
     fn confirm(&mut self, ix: usize) -> Confirm {

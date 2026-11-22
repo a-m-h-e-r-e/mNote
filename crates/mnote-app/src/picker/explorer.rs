@@ -35,8 +35,6 @@ use super::{
 };
 use crate::ui::Hint;
 
-/// The explorer's width (wider than the finder, for the folder path).
-const WIDTH: f32 = 900.;
 /// Items a folder preview lists.
 const PREVIEW_ITEMS: usize = 12;
 
@@ -659,10 +657,6 @@ impl PickerDelegate for Explorer {
 
     fn clear_on_escape(&self) -> bool {
         true
-    }
-
-    fn width(&self) -> Option<f32> {
-        Some(WIDTH)
     }
 
     fn take_job(&mut self) -> Option<Job> {

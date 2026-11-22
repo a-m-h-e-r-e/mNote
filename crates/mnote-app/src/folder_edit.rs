@@ -19,9 +19,14 @@ use crate::theme::{Palette, StyledExt, Theme, radius, size, space, text};
 use crate::ui::{Hint, HintBar};
 
 /// Height of the two panes.
-const BODY_H: f32 = 340.;
-/// Lines of the buffer shown at once.
-const VISIBLE_LINES: usize = 13;
+/// The dialog's share of the window, as every modal: 80% × 72%.
+const MODAL_W_SHARE: f32 = 0.8;
+const MODAL_H_SHARE: f32 = 0.72;
+/// Heights around the body: the title row, the hint bar, the border.
+const CHROME_H: f32 = 47. + size::BAR_H + 1. + 2.;
+/// A buffer line, and the pane's header and padding above the lines.
+const LINE_H: f32 = 24.;
+const PANE_TOP: f32 = 33. + 16.;
 
 enum State {
     Editing,
@@ -100,13 +105,16 @@ impl FolderEditor {
                     self.state = State::Editing;
                     FolderOutcome::Open
                 }
-                Key::Esc => FolderOutcome::Close,
+                Key::Esc | Key::Char('q') => FolderOutcome::Close,
                 _ => FolderOutcome::Open,
             };
         }
 
-        // `esc` in NORMAL: close if nothing changed, else review.
-        if key == Key::Esc && self.vim.mode() == Mode::Normal && !self.vim.is_pending() {
+        // `esc` or `q` in NORMAL: close if nothing changed, else review.
+        if matches!(key, Key::Esc | Key::Char('q'))
+            && self.vim.mode() == Mode::Normal
+            && !self.vim.is_pending()
+        {
             return self.review();
         }
         let revision = self.buffer.revision();
@@ -155,8 +163,18 @@ impl FolderEditor {
         }
     }
 
-    /// The dialog over the window.
-    pub fn render(&self, caret_on: bool, p: &Palette) -> AnyElement {
+    /// The dialog over the window: centered, sized to a `window_width` ×
+    /// `window_height` window like every modal.
+    pub fn render(
+        &self,
+        window_width: f32,
+        window_height: f32,
+        caret_on: bool,
+        p: &Palette,
+    ) -> AnyElement {
+        let modal_w = (window_width * MODAL_W_SHARE).min(size::MODAL_W);
+        let body_h = (window_height * MODAL_H_SHARE - CHROME_H).max(PANE_TOP + LINE_H);
+        let visible = (((body_h - PANE_TOP) / LINE_H).floor() as usize).max(1);
         let (title, changes, links) = match &self.state {
             State::Editing => (
                 "Edit folder as text".to_owned(),
@@ -213,7 +231,7 @@ impl FolderEditor {
                         )
                     }),
             )
-            .child(self.render_lines(caret_on && !reviewing, p));
+            .child(self.render_lines(visible, caret_on && !reviewing, p));
 
         let mut change_rows: Vec<AnyElement> = changes
             .iter()
@@ -322,8 +340,8 @@ impl FolderEditor {
         let modal = div()
             .flex()
             .flex_col()
-            .w_full()
-            .max_w(px(size::MODAL_W))
+            .flex_none()
+            .w(px(modal_w))
             .bg(Theme::color(p.overlay))
             .border_1()
             .border_color(Theme::color(p.line_strong))
@@ -350,7 +368,7 @@ impl FolderEditor {
             .child(
                 div()
                     .flex()
-                    .h(px(BODY_H))
+                    .h(px(body_h))
                     .child(buffer_pane)
                     .child(changes_pane),
             )
@@ -364,23 +382,23 @@ impl FolderEditor {
             .flex()
             .flex_col()
             .items_center()
-            .pt(px(48.))
-            .px(px(space::S4))
+            .justify_center()
+            .p(px(space::S4))
             .bg(Theme::color(p.scrim))
             .child(modal)
             .into_any_element()
     }
 
     /// The buffer's lines around the cursor, numbered, with the caret.
-    fn render_lines(&self, caret_on: bool, p: &Palette) -> impl IntoElement {
+    fn render_lines(&self, visible: usize, caret_on: bool, p: &Palette) -> impl IntoElement {
         let rope = self.buffer.text();
         let count = line_count(rope).max(1);
         let cursor = self.vim.cursor();
         let cursor_line = line_of(rope, cursor);
         let first = (cursor_line + 1)
-            .saturating_sub(VISIBLE_LINES)
-            .min(count.saturating_sub(VISIBLE_LINES));
-        let last = (first + VISIBLE_LINES).min(count);
+            .saturating_sub(visible)
+            .min(count.saturating_sub(visible));
+        let last = (first + visible).min(count);
         let code = text::CODE;
         let mono = Font {
             weight: code.font_weight(),

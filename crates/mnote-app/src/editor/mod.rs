@@ -1900,8 +1900,13 @@ impl Editor {
             })
             .collect();
 
-        // Text still being composed shows at the caret, underlined.
-        let caret_byte = to_shown(char_to_byte(&content, cursor - start));
+        // Text still being composed shows at the caret, underlined. Only the
+        // cursor line has a caret (elsewhere the cursor may be before `start`).
+        let caret_byte = if current {
+            to_shown(char_to_byte(&content, cursor - start))
+        } else {
+            0
+        };
         let marked = self
             .marked
             .clone()
@@ -2859,15 +2864,16 @@ impl Render for Editor {
         self.vim.set_page_lines(page.max(1.) as usize);
         let p = cx.theme().palette;
         let width = window.viewport_size().width / px(1.);
+        let height = window.viewport_size().height / px(1.);
         let caret_on = self.caret_on;
         let picker = self
             .picker
             .as_mut()
-            .map(|picker| picker.render(width, caret_on, p));
+            .map(|picker| picker.render(width, height, caret_on, p));
         let folder_edit = self
             .folder_edit
             .as_ref()
-            .map(|editor| editor.render(caret_on, p));
+            .map(|editor| editor.render(width, height, caret_on, p));
         let rope = self.buffer.text();
         let cursor = self.vim.cursor();
         let line = line_of(rope, cursor);

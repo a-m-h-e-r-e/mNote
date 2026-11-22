@@ -29,13 +29,23 @@ use crate::ui::{Hint, HintBar};
 
 /// Below this window width the preview moves under the list.
 const STACK_BELOW: f32 = 700.;
-/// Height of the list (and the preview beside it).
-const LIST_H: f32 = 340.;
-/// Rows of the list when the preview is stacked under it.
-const STACKED_LIST_H: f32 = 200.;
-const STACKED_PREVIEW_H: f32 = 170.;
-/// Space above the modal, between it and the top bar.
-const SCRIM_TOP: f32 = 48.;
+/// A modal's share of the window: 80% wide (up to `modal-w`), 72% tall.
+const MODAL_W_SHARE: f32 = 0.8;
+const MODAL_H_SHARE: f32 = 0.72;
+/// A compact modal (the palette): 60% wide, up to this.
+const COMPACT_W_SHARE: f32 = 0.6;
+const COMPACT_W: f32 = 720.;
+/// When the preview stacks under the list, the list's share of the height.
+const STACKED_LIST_SHARE: f32 = 0.45;
+/// Heights around the list: the field, the hint bar (with its rule), the
+/// title row, a footer, and the modal's border.
+const INPUT_H: f32 = 44.;
+const HINTS_H: f32 = size::BAR_H + 1.;
+const TITLE_H: f32 = 47.;
+const FOOTER_H: f32 = 39.;
+const BORDERS_H: f32 = 2.;
+/// The list's own padding, top and bottom.
+const LIST_PAD: f32 = 12.;
 
 /// One result row.
 #[derive(Debug, Clone, Default)]
@@ -255,9 +265,10 @@ pub trait PickerDelegate {
         None
     }
 
-    /// The dialog's width, if narrower than `modal-w`.
-    fn width(&self) -> Option<f32> {
-        None
+    /// A compact dialog (the palette): narrower, and only as tall as its
+    /// rows, since it has no preview.
+    fn compact(&self) -> bool {
+        false
     }
 
     /// NORMAL-mode letters this picker handles itself (the explorer's `h`).
@@ -508,12 +519,55 @@ impl Picker {
         self.scroll..(self.scroll + rows).min(self.delegate.len())
     }
 
-    /// The scrim, the modal and everything in it, for a window
-    /// `window_width` wide. `caret_on` is the blink phase of the bar caret.
-    pub fn render(&mut self, window_width: f32, caret_on: bool, p: &Palette) -> AnyElement {
+    /// The scrim, the modal and everything in it, for a window of
+    /// `window_width` × `window_height`: centered both ways, sized to the
+    /// window, the list and preview taking the height left after the field,
+    /// title and hints. `caret_on` is the blink phase of the bar caret.
+    pub fn render(
+        &mut self,
+        window_width: f32,
+        window_height: f32,
+        caret_on: bool,
+        p: &Palette,
+    ) -> AnyElement {
         let stacked = window_width < STACK_BELOW;
-        let list_h = if stacked { STACKED_LIST_H } else { LIST_H };
-        let rows_fit = ((list_h - 12.) / (size::ROW_H + 1.)).floor() as usize;
+        let compact = self.delegate.compact();
+        let modal_w = if compact {
+            (window_width * COMPACT_W_SHARE).min(COMPACT_W)
+        } else {
+            (window_width * MODAL_W_SHARE).min(size::MODAL_W)
+        };
+        // Narrow windows give the modal all the width there is.
+        let modal_w = if stacked {
+            window_width - 2. * space::S4
+        } else {
+            modal_w
+        };
+        let footer = !self.delegate.has_preview()
+            && !self.delegate.is_empty()
+            && self.delegate.footer(self.selected).is_some();
+        let chrome = INPUT_H
+            + HINTS_H
+            + BORDERS_H
+            + if self.delegate.title().is_some() {
+                TITLE_H
+            } else {
+                0.
+            }
+            + if footer { FOOTER_H } else { 0. };
+        let body_h = (window_height * MODAL_H_SHARE - chrome).max(size::ROW_H + LIST_PAD);
+        let row_h = size::ROW_H + 1.;
+        let list_h = if compact {
+            // As tall as its rows, up to the space a full modal would have.
+            let rows = self.delegate.len().max(1) as f32;
+            (rows * row_h + LIST_PAD).min(body_h)
+        } else if stacked && self.delegate.has_preview() {
+            body_h * STACKED_LIST_SHARE
+        } else {
+            body_h
+        };
+        let preview_h = body_h - list_h;
+        let rows_fit = ((list_h - LIST_PAD) / row_h).floor() as usize;
         let rows = self.visible_rows(rows_fit);
         let mode = self.input.mode();
 
@@ -560,7 +614,7 @@ impl Picker {
                         .border_b_1()
                         .border_color(Theme::color(p.line)),
                 )
-                .children(preview.map(|pv| div().h(px(STACKED_PREVIEW_H)).child(pv)))
+                .children(preview.map(|pv| div().h(px(preview_h)).overflow_hidden().child(pv)))
         } else {
             div()
                 .flex()
@@ -584,7 +638,7 @@ impl Picker {
         hints.extend(self.delegate.hints(mode));
         if !capturing {
             hints.push(match mode {
-                Mode::Normal => Hint::new("esc", "close"),
+                Mode::Normal => Hint::new("esc q", "close"),
                 _ => Hint::new("esc", "normal mode"),
             });
         }
@@ -596,8 +650,8 @@ impl Picker {
         let modal = div()
             .flex()
             .flex_col()
-            .w_full()
-            .max_w(px(self.delegate.width().unwrap_or(size::MODAL_W)))
+            .flex_none()
+            .w(px(modal_w))
             .bg(Theme::color(p.overlay))
             .border_1()
             .border_color(Theme::color(p.line_strong))
@@ -633,8 +687,8 @@ impl Picker {
             .flex()
             .flex_col()
             .items_center()
-            .pt(px(SCRIM_TOP))
-            .px(px(space::S4))
+            .justify_center()
+            .p(px(space::S4))
             .bg(Theme::color(p.scrim))
             .child(modal)
             .into_any_element()

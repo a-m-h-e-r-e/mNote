@@ -2,7 +2,8 @@
 //! picker queries, quick capture and inline rename.
 //!
 //! It opens in INSERT, so typing goes straight in. `esc` goes to NORMAL, where
-//! the usual motions and edits work on the text; `esc` again closes. The keys
+//! the usual motions and edits work on the text; `esc` again (or `q`) closes.
+//! The keys
 //! that move a list come back as [`InputAction::Move`]: `⌃n` / `⌃p` (and the
 //! arrows) in any mode, `j` / `k` in NORMAL.
 
@@ -98,12 +99,12 @@ impl VimInput {
         }
         if mode == Mode::Normal && idle {
             match key {
-                Key::Esc => return InputAction::Close,
+                Key::Esc | Key::Char('q') => return InputAction::Close,
                 Key::Char('j') => return InputAction::Select(1),
                 Key::Char('k') => return InputAction::Select(-1),
                 Key::Char(c) if claims(c) => return InputAction::Claimed(c),
                 // One line: no new lines, and no command line inside a field.
-                Key::Char('o' | 'O' | ':' | '/' | '?' | 'q') => return InputAction::Moved,
+                Key::Char('o' | 'O' | ':' | '/' | '?') => return InputAction::Moved,
                 _ => {}
             }
         }
@@ -235,6 +236,17 @@ mod tests {
             run(&mut input, "<esc>"),
             [InputAction::Close],
             "esc again closes"
+        );
+        let mut input = VimInput::new("gpu");
+        assert_eq!(
+            run(&mut input, "q"),
+            [InputAction::Edited],
+            "q types in INSERT"
+        );
+        assert_eq!(
+            run(&mut input, "<esc>q"),
+            [InputAction::Moved, InputAction::Close],
+            "q closes from NORMAL"
         );
     }
 
