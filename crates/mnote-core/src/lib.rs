@@ -13,6 +13,7 @@ pub mod folder_edit;
 pub mod frontmatter;
 pub mod index;
 pub mod links;
+pub mod mentions;
 mod note_path;
 pub mod styled;
 pub mod text;

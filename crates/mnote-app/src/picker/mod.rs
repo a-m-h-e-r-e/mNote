@@ -139,6 +139,8 @@ pub enum JobResult {
         generation: u64,
         files: Vec<FileHits>,
     },
+    /// Plain-text mentions of a note, for backlinks.
+    Mentions(Vec<(NotePath, mnote_core::mentions::Mention)>),
     /// Links rewritten after a rename or move; `message` is the toast to
     /// show, with the link count added.
     Relinked {
@@ -253,7 +255,7 @@ pub trait PickerDelegate {
     }
 
     /// NORMAL-mode letters this picker handles itself (the explorer's `h`).
-    /// `l` always opens.
+    /// `l` opens unless the picker claims it too.
     fn claims(&self, _c: char) -> bool {
         false
     }
@@ -355,6 +357,10 @@ impl Picker {
             }
             InputAction::Moved => {}
             InputAction::Select(by) => self.move_selection(by),
+            InputAction::Claimed('l') if self.delegate.claims('l') => {
+                let confirm = self.delegate.claimed('l', self.selected);
+                return self.apply(confirm);
+            }
             InputAction::Submit | InputAction::Claimed('l') => {
                 if self.delegate.is_empty() || !self.delegate.selectable(self.selected) {
                     return PickerOutcome::Open;

@@ -800,6 +800,13 @@ impl Editor {
                     }
                 }
                 PickerEffect::Relinked(done) => {
+                    // The watcher skips mNote's own writes: index them here.
+                    {
+                        let mut index = self.index.borrow_mut();
+                        for relinked in &done {
+                            index.note_saved(relinked.note.clone(), &relinked.text);
+                        }
+                    }
                     let Source::Note { note, .. } = &self.source else {
                         continue;
                     };
