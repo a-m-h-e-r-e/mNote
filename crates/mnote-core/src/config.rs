@@ -124,6 +124,8 @@ pub struct Config {
     pub relative_numbers: bool,
     /// Today's note, with `{date}` (or `{year}`, `{month}`, `{day}`).
     pub daily_note: String,
+    /// Who last changed the cursor line, and when, from git.
+    pub git_blame: bool,
 }
 
 impl Default for Config {
@@ -136,6 +138,7 @@ impl Default for Config {
             view: ViewChoice::Styled,
             relative_numbers: true,
             daily_note: "journal/{date}.md".into(),
+            git_blame: false,
         }
     }
 }
@@ -227,6 +230,9 @@ impl Config {
                         _ => return Err(wrong("\"styled\", \"source\" or \"plain\"")),
                     }
                 }
+                "git_blame" => {
+                    config.git_blame = value.as_bool().ok_or_else(|| wrong("true or false"))?;
+                }
                 "relative_numbers" => {
                     config.relative_numbers =
                         value.as_bool().ok_or_else(|| wrong("true or false"))?;
@@ -294,11 +300,15 @@ impl Config {
              \n\
              # Today's note for :daily and quick capture. {{date}} is 2026-11-22;\n\
              # {{year}}, {{month}} and {{day}} work too.\n\
-             daily_note = \"{daily}\"\n",
+             daily_note = \"{daily}\"\n\
+             \n\
+             # Who last changed the cursor line, and when, if the vault is in git.\n\
+             git_blame = {blame}\n",
             summon = key_words(&self.summon),
             capture = key_words(&self.capture),
             rnu = self.relative_numbers,
             daily = self.daily_note,
+            blame = self.git_blame,
         )
     }
 }
@@ -404,6 +414,7 @@ mod tests {
             theme: ThemeChoice::Light,
             view: ViewChoice::Source,
             relative_numbers: false,
+            git_blame: true,
             ..Config::default()
         };
         assert_eq!(Config::parse(&config.template()), Ok(config));

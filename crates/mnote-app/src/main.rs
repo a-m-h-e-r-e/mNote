@@ -113,6 +113,14 @@ fn main() {
                     if let Some(problem) = problem {
                         editor.show_notice(problem, cx);
                     }
+                    // `MNOTE_LATENCY_BENCH=200`: types into the window and
+                    // prints keystroke-to-pixels times.
+                    if let Some(keys) = std::env::var("MNOTE_LATENCY_BENCH")
+                        .ok()
+                        .and_then(|n| n.parse().ok())
+                    {
+                        editor.run_latency_bench(keys, cx);
+                    }
                     editor
                 })
             },

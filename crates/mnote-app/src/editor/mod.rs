@@ -11,6 +11,7 @@
 //! preview; nothing changes until `enter`.
 
 mod first_run;
+mod ime;
 pub(crate) mod keys;
 pub(crate) mod line;
 mod panes;
@@ -58,6 +59,8 @@ type CodeLines = Vec<Vec<(std::ops::Range<usize>, CodeStyle)>>;
 
 /// Width left for the macOS traffic-light buttons in the top bar.
 const TRAFFIC_LIGHT_INSET: f32 = 76.;
+/// How long the cursor rests on a line before git blame runs.
+const BLAME_DELAY: Duration = Duration::from_millis(300);
 /// How long typing pauses before the word count catches up.
 const WORD_COUNT_DELAY: Duration = Duration::from_millis(400);
 /// Half a blink cycle of the insert-mode bar caret (about 1 Hz).
@@ -166,8 +169,19 @@ pub struct Editor {
     words: Option<(DocKey, u64, usize)>,
     /// The next word count, waiting for typing to pause.
     words_task: Option<Task<()>>,
+    /// The cursor line's git blame: its document, line and label (`None`
+    /// when git has nothing to say).
+    blame: Option<(DocKey, usize, Option<SharedString>)>,
+    blame_task: Option<Task<()>>,
+    /// Keystroke-to-pixels timing (`MNOTE_LATENCY=1`): when the last key
+    /// arrived, and the times measured so far.
+    key_at: Option<Instant>,
+    latency: Option<Rc<RefCell<Vec<f32>>>>,
     /// The first-run screen, until a notes folder is chosen.
     first_run: Option<first_run::FirstRun>,
+    /// Text the input system is still composing (an accent, Chinese or
+    /// Japanese input), drawn under the caret until it's committed.
+    marked: Option<String>,
     /// The settings in use, and where they're kept.
     config: Config,
     config_path: Option<std::path::PathBuf>,
@@ -326,8 +340,13 @@ impl Editor {
             pane_key: false,
             vault: None,
             first_run: None,
+            marked: None,
             words: None,
             words_task: None,
+            blame: None,
+            blame_task: None,
+            key_at: None,
+            latency: std::env::var_os("MNOTE_LATENCY").map(|_| Rc::default()),
             config: Config::default(),
             config_path: Config::path(),
             _watcher: None,
@@ -339,9 +358,23 @@ impl Editor {
     // ---- input ------------------------------------------------------------
 
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.latency.is_some() {
+            self.key_at = Some(Instant::now());
+        }
         let stroke = &event.keystroke;
         if self.first_run_key(stroke, cx) {
             cx.stop_propagation();
+            return;
+        }
+        // While inserting, typed characters go through the system's input
+        // (see `ime`), so accents and composed input work: let them pass.
+        if self.takes_text()
+            && !self.leader
+            && !self.pane_key
+            && !stroke.modifiers.control
+            && stroke.key_char.is_some()
+            && matches!(keys::vim_key(stroke), Some(mnote_vim::Key::Char(_)))
+        {
             return;
         }
         if stroke.modifiers.platform && stroke.key == "k" && self.picker.is_none() {
@@ -428,6 +461,9 @@ impl Editor {
         }
         if let Some(command) = self.vim.take_app_command() {
             self.run_app_command(command, cx);
+        }
+        if self.vim.mode() != Mode::Insert {
+            self.marked = None;
         }
         if self.shown_mode() != mode_before || has_bar_caret(self.shown_mode()) {
             self.restart_blink(cx);
@@ -1315,6 +1351,97 @@ impl Editor {
         }));
     }
 
+    /// Asks git who last changed the cursor line, once the cursor rests on
+    /// it (not while typing), off the UI thread.
+    fn blame_soon(&mut self, cx: &mut Context<Self>) {
+        if !self.config.git_blame || self.vim.mode() == Mode::Insert || self.blame_task.is_some() {
+            return;
+        }
+        let Source::Note { .. } = &self.source else {
+            return;
+        };
+        let key = self.source.doc_key();
+        let line = line_of(self.buffer.text(), self.vim.cursor());
+        if self
+            .blame
+            .as_ref()
+            .is_some_and(|(k, l, _)| *k == key && *l == line)
+        {
+            return;
+        }
+        self.blame_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(BLAME_DELAY).await;
+            let Ok(Some((path, text, line, key))) = this.update(cx, |this, _| {
+                let Source::Note { vault, note } = &this.source else {
+                    return None;
+                };
+                let line = line_of(this.buffer.text(), this.vim.cursor());
+                Some((
+                    vault.path_of(note),
+                    this.buffer.text().clone(),
+                    line,
+                    this.source.doc_key(),
+                ))
+            }) else {
+                let _ = this.update(cx, |this, _| this.blame_task = None);
+                return;
+            };
+            let label = cx
+                .background_executor()
+                .spawn(async move {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs() as i64);
+                    mnote_core::blame::blame_line(&path, &text.to_string(), line)
+                        .map(|b| SharedString::from(b.label(now)))
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.blame = Some((key, line, label));
+                this.blame_task = None;
+                cx.notify();
+            });
+        }));
+    }
+
+    /// `MNOTE_LATENCY_BENCH=n`: types `n` characters into this window, one
+    /// per frame or so, and prints keystroke-to-pixels times (with
+    /// `MNOTE_LATENCY`), then quits.
+    pub fn run_latency_bench(&mut self, keys: usize, cx: &mut Context<Self>) {
+        let log = self.latency.get_or_insert_with(Rc::default).clone();
+        self._tasks.push(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.press(mnote_vim::Key::Char('G'), cx);
+                this.press(mnote_vim::Key::Char('o'), cx);
+            });
+            for i in 0..keys {
+                let c = if i % 8 == 7 { ' ' } else { (b'a' + (i % 26) as u8) as char };
+                let _ = this.update(cx, |this, cx| {
+                    this.key_at = Some(Instant::now());
+                    this.press(mnote_vim::Key::Char(c), cx);
+                });
+                cx.background_executor().timer(Duration::from_millis(25)).await;
+            }
+            cx.background_executor().timer(Duration::from_millis(200)).await;
+            let raw = log.borrow().clone();
+            if std::env::var_os("MNOTE_LATENCY_RAW").is_some() {
+                eprintln!("mnote latency raw: {raw:?}");
+            }
+            let mut times = raw;
+            times.sort_by(f32::total_cmp);
+            let at = |q: f32| times.get(((times.len() as f32 - 1.) * q) as usize).copied().unwrap_or(0.);
+            eprintln!(
+                "mnote latency: {} keys, keystroke to painted frame: p50 {:.2} ms, p95 {:.2} ms, max {:.2} ms",
+                times.len(),
+                at(0.5),
+                at(0.95),
+                times.last().copied().unwrap_or(0.)
+            );
+            let _ = this.update(cx, |_, cx| cx.quit());
+        }));
+    }
+
     /// Shows the first-run screen (no config.toml yet, no folder given):
     /// `config` holds the keys it starts with.
     pub fn start_first_run(&mut self, config: Config, cx: &mut Context<Self>) {
@@ -1731,7 +1858,7 @@ impl Editor {
                     .display_byte(content[..byte.min(content.len())].chars().count())
             }
         };
-        let highlights = highlights
+        let mut highlights: Vec<Highlight> = highlights
             .into_iter()
             .map(|mut h| {
                 if !substituted {
@@ -1741,14 +1868,53 @@ impl Editor {
             })
             .collect();
 
+        // Text still being composed shows at the caret, underlined.
+        let caret_byte = to_shown(char_to_byte(&content, cursor - start));
+        let marked = self
+            .marked
+            .clone()
+            .filter(|_| current && self.vim.mode() == Mode::Insert);
+        let mut text: String = look.shown.text.to_string();
+        let mut styling = look.styling.clone();
+        let marked_len = marked.as_ref().map_or(0, String::len);
+        if let Some(marked) = &marked {
+            let at = caret_byte.min(text.len());
+            text.insert_str(at, marked);
+            let shift = |r: std::ops::Range<usize>| {
+                let from = if r.start >= at {
+                    r.start + marked_len
+                } else {
+                    r.start
+                };
+                let to = if r.end > at {
+                    r.end + marked_len
+                } else {
+                    r.end
+                };
+                from..to
+            };
+            for s in &mut styling {
+                s.bytes = shift(s.bytes.clone());
+            }
+            for h in &mut highlights {
+                h.bytes = shift(h.bytes.clone());
+            }
+            styling.push(line::Styling {
+                bytes: at..at + marked_len,
+                color: Some(Theme::color(p.cursor)),
+                underline: true,
+                ..line::Styling::default()
+            });
+        }
+
         let mut line = LineText::new(
-            look.shown.text.clone().into(),
+            text.into(),
             look.font(),
             look.style.size(),
             look.style.line_height(),
             look.color,
         )
-        .styling(look.styling.clone())
+        .styling(styling)
         .highlights(highlights);
 
         if let Some(chars) = self.selection_on_line(ix, start, len) {
@@ -1764,7 +1930,7 @@ impl Editor {
         // In command mode the caret is in the command line.
         if current && mode != Mode::Command && (self.caret_on || mode != Mode::Insert) {
             line = line.caret(Some(Caret {
-                byte: to_shown(char_to_byte(&content, cursor - start)),
+                byte: caret_byte + marked_len,
                 shape: self.vim.mode().caret(),
                 color: Theme::color(p.cursor),
                 on_color: Theme::color(p.on_cursor),
@@ -1860,10 +2026,19 @@ impl Editor {
                 .into_any_element()
         };
 
+        // Who last changed the cursor line (`git_blame`), at its right.
+        let blame = current
+            .then_some(self.blame.as_ref())
+            .flatten()
+            .filter(|(key, line, _)| *key == self.source.doc_key() && *line == ix)
+            .and_then(|(_, _, label)| label.clone())
+            .filter(|_| self.config.git_blame && self.vim.mode() != Mode::Insert);
+
         // Line numbers in the note's own font and size, as in Zed, centred
         // on the first row of the line.
         div()
             .flex()
+            .relative()
             .w_full()
             .when(current, |row| row.bg(Theme::color(p.well)))
             .when(self.in_visual_range(ix), |row| {
@@ -1887,6 +2062,21 @@ impl Editor {
                     .max_w(px(size::MEASURE))
                     .child(body),
             )
+            .children(blame.map(|label| {
+                div()
+                    .absolute()
+                    .right_0()
+                    .top_0()
+                    .h(line_height)
+                    .flex()
+                    .items_center()
+                    .pl(px(space::S4))
+                    .pr(px(space::S2))
+                    .bg(Theme::color(p.well))
+                    .text_style(text::HINT)
+                    .text_color(Theme::color(p.ink_3))
+                    .child(label)
+            }))
             .into_any_element()
     }
 
@@ -2626,6 +2816,7 @@ impl Render for Editor {
         self.tree = self.buffer.syntax_tree().cloned();
         self.refresh_parked_trees();
         self.count_words_soon(cx);
+        self.blame_soon(cx);
         // A page for Page Up/Down and ⌃f ⌃b: the lines that fit the window.
         let text_h = window.viewport_size().height / px(1.) - 4. * size::BAR_H;
         let page = (text_h / (text::NOTE_BODY.line_height().max(px(1.)) / px(1.))).floor();
@@ -2701,6 +2892,24 @@ impl Render for Editor {
                         |bar| bar.hint(format!("space m view: {}", self.view.next().name())),
                     ),
             )
+            .child({
+                // Registers the editor with the system's text input each
+                // frame (accents, IME); see `ime`.
+                let focus = self.focus.clone();
+                let input = view.clone();
+                gpui::canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, cx| {
+                        window.handle_input(
+                            &focus,
+                            gpui::ElementInputHandler::new(bounds, input),
+                            cx,
+                        );
+                    },
+                )
+                .absolute()
+                .size_full()
+            })
             .child(self.render_layout(&self.layout.clone(), &view, p))
             // The command line takes the status line's place while it's
             // typed, and while it shows the result.
@@ -2739,6 +2948,21 @@ impl Render for Editor {
                     .flex()
                     .justify_center()
                     .child(toast)
+            }))
+            .children(self.latency.clone().map(|log| {
+                // Painted last: the time from the key to here is the key's
+                // handling, render, layout and paint.
+                let key_at = self.key_at.take();
+                gpui::canvas(
+                    |_, _, _| (),
+                    move |_, _, _, _| {
+                        if let Some(at) = key_at {
+                            log.borrow_mut().push(at.elapsed().as_secs_f32() * 1000.);
+                        }
+                    },
+                )
+                .absolute()
+                .size_0()
             }))
             .into_any_element()
     }
