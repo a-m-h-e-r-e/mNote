@@ -73,3 +73,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```bash
 cargo build --release -p mnote-app
 ```
+
+A shareable `mNote.app` and `.dmg` in `dist/` (see the script for universal builds and Developer ID signing):
+
+```bash
+tools/package-macos.sh
+```
+
+Keystroke-to-pixels in the real window (types into a note, prints p50/p95/max):
+
+```bash
+MNOTE_LATENCY=1 MNOTE_LATENCY_BENCH=300 target/release/mnote ~/notes/some-note.md
+```
