@@ -29,8 +29,10 @@ use mnote_vim::ex::cmdwin::CmdWindow;
 use mnote_vim::text::{clamp_normal, line_count, line_len, line_of, line_start};
 use mnote_vim::{Clipboard, Effect, Mode, Vim};
 
+use crate::commands::{COMMANDS, Run};
 use crate::picker::finder::{CurrentNote, Finder};
 use crate::picker::list::ListPicker;
+use crate::picker::palette::CommandPalette;
 use crate::picker::{ListEntry, Picker, PickerAction, PickerOutcome};
 use crate::theme::{ActiveTheme, Palette, StyledExt, Theme, family, size, space, text};
 use crate::ui::{CommandLine, CompletionPopup, MessagePanel, StatusLine, TopBar};
@@ -212,16 +214,29 @@ impl Editor {
     // ---- input ------------------------------------------------------------
 
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(key) = keys::vim_key(&event.keystroke) else {
+        let stroke = &event.keystroke;
+        if stroke.modifiers.platform && stroke.key == "k" && self.picker.is_none() {
+            cx.stop_propagation();
+            return self.open_picker(Picker::new(Box::new(CommandPalette::default())), cx);
+        }
+        let Some(key) = keys::vim_key(stroke) else {
             return;
         };
-        if self.picker.is_some() {
+        if self.press(key, cx) {
             cx.stop_propagation();
-            return self.picker_key(key, cx);
+        }
+    }
+
+    /// One key, as typed: to the open picker, the leader, or Vim. Returns
+    /// whether it was used (unused keys go on to the app).
+    fn press(&mut self, key: mnote_vim::Key, cx: &mut Context<Self>) -> bool {
+        if self.picker.is_some() {
+            self.picker_key(key, cx);
+            return true;
         }
         if std::mem::take(&mut self.leader) {
-            cx.stop_propagation();
-            return self.leader_key(key, cx);
+            self.leader_key(key, cx);
+            return true;
         }
         let clipboard_paste = matches!(self.vim.pending_register(), Some('+' | '*'))
             || (self.vim.awaits_register() && matches!(key, mnote_vim::Key::Char('+' | '*')));
@@ -241,12 +256,11 @@ impl Editor {
         if let Effect::Unhandled(key) = effect {
             if key == mnote_vim::Key::Char(' ') && self.vim.mode() == Mode::Normal {
                 self.leader = true;
-                cx.stop_propagation();
+                return true;
             }
             // Anything else is the app's (⌘ shortcuts).
-            return;
+            return false;
         }
-        cx.stop_propagation();
 
         self.sync_lines();
         // While a pattern is typed, the view follows its next match.
@@ -268,6 +282,7 @@ impl Editor {
             self.restart_blink(cx);
         }
         cx.notify();
+        true
     }
 
     /// The mode whose caret is showing: the picker field's, or the
@@ -282,23 +297,59 @@ impl Editor {
     }
 
     /// The key after `space` in NORMAL mode.
+    /// The key after `space` in NORMAL mode: `f` finds notes, `/` searches
+    /// text, `@` lists this note's headings, `#` lists tags.
     fn leader_key(&mut self, key: mnote_vim::Key, cx: &mut Context<Self>) {
-        if key == mnote_vim::Key::Char('f') {
-            let current = CurrentNote {
-                path: match &self.source {
-                    Source::Note { note, .. } => Some(note.clone()),
-                    Source::Scratch => None,
-                },
-                text: self.buffer.to_string(),
-            };
-            let vault = match &self.source {
-                Source::Note { vault, .. } => Some(vault.clone()),
+        let query = match key {
+            mnote_vim::Key::Char('f') => "",
+            mnote_vim::Key::Char('/') => "/",
+            mnote_vim::Key::Char('@') => "@",
+            mnote_vim::Key::Char('#') => "#",
+            _ => return,
+        };
+        self.open_finder(query, cx);
+    }
+
+    /// Opens the finder with `query` already typed.
+    fn open_finder(&mut self, query: &str, cx: &mut Context<Self>) {
+        let current = CurrentNote {
+            path: match &self.source {
+                Source::Note { note, .. } => Some(note.clone()),
                 Source::Scratch => None,
-            };
-            let finder = Finder::new(self.index.clone(), current, vault);
-            self.picker = Some(Picker::new(Box::new(finder)));
-            self.restart_blink(cx);
-            cx.notify();
+            },
+            text: self.buffer.to_string(),
+        };
+        let vault = match &self.source {
+            Source::Note { vault, .. } => Some(vault.clone()),
+            Source::Scratch => None,
+        };
+        let mut picker = Picker::new(Box::new(Finder::new(self.index.clone(), current, vault)));
+        if !query.is_empty() {
+            picker.set_query(query);
+        }
+        self.open_picker(picker, cx);
+    }
+
+    fn open_picker(&mut self, picker: Picker, cx: &mut Context<Self>) {
+        self.picker = Some(picker);
+        self.restart_blink(cx);
+        self.run_picker_job(cx);
+        cx.notify();
+    }
+
+    /// Runs a command from the palette or the finder's `>` scope.
+    fn run_command(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(command) = COMMANDS.get(ix) else {
+            return;
+        };
+        match command.run {
+            Run::Ex(ex) => self.picker_action(PickerAction::RunEx(ex.to_owned()), cx),
+            Run::Finder(query) => self.open_finder(query, cx),
+            Run::Keys(keys) => {
+                for key in mnote_vim::parse_keys(keys) {
+                    self.press(key, cx);
+                }
+            }
         }
     }
 
@@ -420,6 +471,7 @@ impl Editor {
                 self.list_go(0, cx);
             }
             PickerAction::ListGo(n) => self.list_go(n, cx),
+            PickerAction::Command(n) => self.run_command(n, cx),
             PickerAction::RunEx(command) => {
                 let revision = self.buffer.revision();
                 match self.vim.execute(&command, &mut self.buffer) {
@@ -683,7 +735,7 @@ impl Editor {
         let cursor = self.vim.cursor();
         let cursor_line = line_of(rope, cursor);
         let current = ix == cursor_line;
-        let number = if current {
+        let number = if current || !self.vim.options().relativenumber {
             ix + 1
         } else {
             ix.abs_diff(cursor_line)

@@ -9,6 +9,7 @@
 
 pub mod finder;
 pub mod list;
+pub mod palette;
 
 use std::ops::Range;
 
@@ -99,6 +100,8 @@ pub enum PickerAction {
     SendToList(Vec<ListEntry>),
     /// Go to entry `n` of the results list (`:copen`).
     ListGo(usize),
+    /// Run [`crate::commands::COMMANDS`]`[n]`.
+    Command(usize),
 }
 
 /// A place in the results list.
@@ -187,6 +190,22 @@ pub trait PickerDelegate {
 
     /// The count at the right of the hint bar.
     fn count(&self) -> Option<SharedString> {
+        None
+    }
+
+    /// Whether the dialog has a preview pane beside (or under) the list.
+    fn has_preview(&self) -> bool {
+        true
+    }
+
+    /// A line under the list about the selected row (the palette's
+    /// description), for dialogs without a preview.
+    fn footer(&self, _ix: usize) -> Option<SharedString> {
+        None
+    }
+
+    /// The dialog's width, if narrower than `modal-w`.
+    fn width(&self) -> Option<f32> {
         None
     }
 
@@ -356,7 +375,25 @@ impl Picker {
             .filter(|_| !self.delegate.is_empty())
             .map(|content| render_preview(content, p));
 
-        let body = if stacked {
+        let body = if !self.delegate.has_preview() {
+            div().flex().flex_col().child(list.h(px(list_h))).children(
+                self.delegate
+                    .footer(self.selected)
+                    .filter(|_| !self.delegate.is_empty())
+                    .map(|about| {
+                        div()
+                            .px(px(14.))
+                            .pt(px(space::S2))
+                            .pb(px(10.))
+                            .border_t_1()
+                            .border_color(Theme::color(p.line))
+                            .text_size(px(12.))
+                            .line_height(px(18.))
+                            .text_color(Theme::color(p.ink_2))
+                            .child(about)
+                    }),
+            )
+        } else if stacked {
             div()
                 .flex()
                 .flex_col()
@@ -398,7 +435,7 @@ impl Picker {
             .flex()
             .flex_col()
             .w_full()
-            .max_w(px(size::MODAL_W))
+            .max_w(px(self.delegate.width().unwrap_or(size::MODAL_W)))
             .bg(Theme::color(p.overlay))
             .border_1()
             .border_color(Theme::color(p.line_strong))

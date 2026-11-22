@@ -27,6 +27,7 @@ use super::{
     CodePreview, Confirm, Job, JobResult, ListEntry, PickerAction, PickerDelegate, PreviewContent,
     Row, RowKind,
 };
+use crate::commands::COMMANDS;
 use crate::ui::Hint;
 
 /// Results kept per query; more than anyone scrolls through.
@@ -39,20 +40,6 @@ const CONTENT_LIMIT: usize = 500;
 const HIT_CHARS: usize = 160;
 /// Lines shown above a hit in the preview.
 const CONTEXT_ABOVE: usize = 3;
-
-/// Commands the `>` scope offers: label and the ex command that runs it. The
-/// full command palette is AMI-167.
-const COMMANDS: &[(&str, &str)] = &[
-    ("Save note", "w"),
-    ("Clear search highlights", "nohlsearch"),
-    ("Toggle relative line numbers", "set relativenumber!"),
-    ("Toggle ignore case in search", "set ignorecase!"),
-    ("Sort lines", "%sort"),
-    ("Undo", "undo"),
-    ("Redo", "redo"),
-    ("Show registers", "registers"),
-    ("Quit", "q"),
-];
 
 /// The open note, for the `@` scope and the create row.
 pub struct CurrentNote {
@@ -108,7 +95,7 @@ pub struct Finder {
     current_text: String,
     search: NoteSearch,
     results: Results,
-    /// `label :ex` for each command.
+    /// Label, keys and ex form of each command, what `>` matches.
     command_haystacks: Vec<String>,
     /// Where `/` searches; `None` for a scratch note.
     vault: Option<Vault>,
@@ -129,10 +116,7 @@ impl Finder {
             current: NoteIndex::from_entries(vec![entry]),
             current_text: current.text,
             search: NoteSearch::new(),
-            command_haystacks: COMMANDS
-                .iter()
-                .map(|(label, ex)| format!("{label} :{ex}"))
-                .collect(),
+            command_haystacks: COMMANDS.iter().map(|c| c.haystack()).collect(),
             results: Results::Notes {
                 hits: Vec::new(),
                 create: None,
@@ -277,7 +261,7 @@ impl PickerDelegate for Finder {
                 self.results = Results::Headings(hits);
             }
             Some('>') => {
-                // Commands match by label or ex name (`>noh`).
+                // Commands match by label, keys or ex form (`>noh`).
                 let haystacks = self.command_haystacks.iter().map(String::as_str);
                 let hits = self.search.strings(&query[1..], haystacks, LIMIT);
                 self.results = Results::Commands(hits);
@@ -372,18 +356,18 @@ impl PickerDelegate for Finder {
             }
             Results::Commands(hits) => {
                 let hit = &hits[ix];
-                let (label, ex) = COMMANDS[hit.item];
-                let len = label.chars().count();
+                let command = &COMMANDS[hit.item];
+                let len = command.label.chars().count();
                 Row {
-                    label: label.into(),
-                    // Letters matched in the ex name aren't in the label.
+                    label: command.label.into(),
+                    // Letters matched in the keys or ex form aren't in the label.
                     matches: hit
                         .indices
                         .iter()
                         .map(|&i| i as usize)
                         .filter(|&i| i < len)
                         .collect(),
-                    detail: Some(format!(":{ex}").into()),
+                    detail: Some(command.detail().into()),
                     quiet: false,
                     ..Row::default()
                 }
@@ -454,11 +438,11 @@ impl PickerDelegate for Finder {
                 })
             }
             Results::Commands(hits) => {
-                let (label, ex) = COMMANDS[hits.get(ix)?.item];
+                let command = &COMMANDS[hits.get(ix)?.item];
                 Some(PreviewContent {
-                    title: label.into(),
-                    meta: Some(format!(":{ex}").into()),
-                    lines: vec!["Runs as if typed on the command line.".into()],
+                    title: command.label.into(),
+                    meta: Some(command.detail().into()),
+                    lines: vec![command.about.into()],
                     code: None,
                 })
             }
@@ -519,9 +503,7 @@ impl PickerDelegate for Finder {
                 let line = self.current.notes()[hit.note].headings[hit.heading].line;
                 Confirm::Act(PickerAction::GoToLine(line))
             }
-            Results::Commands(hits) => {
-                Confirm::Act(PickerAction::RunEx(COMMANDS[hits[ix].item].1.to_owned()))
-            }
+            Results::Commands(hits) => Confirm::Act(PickerAction::Command(hits[ix].item)),
             Results::Content(c) => match c.rows.get(ix) {
                 Some(&(f, Some(h))) => Confirm::Act(PickerAction::JumpTo {
                     path: c.files[f].path.clone(),
@@ -742,14 +724,12 @@ mod tests {
         assert_eq!(preview.meta.as_ref().map(|m| m.as_ref()), Some("line 5"));
 
         f.set_query(">noh");
-        assert_eq!(
-            f.confirm(0),
-            Confirm::Act(PickerAction::RunEx("nohlsearch".into()))
-        );
-        assert_eq!(
-            f.row(0).detail.as_ref().map(|d| d.as_ref()),
-            Some(":nohlsearch")
-        );
+        let noh = COMMANDS
+            .iter()
+            .position(|c| c.ex == Some("noh"))
+            .expect("listed");
+        assert_eq!(f.confirm(0), Confirm::Act(PickerAction::Command(noh)));
+        assert_eq!(f.row(0).detail.as_ref().map(|d| d.as_ref()), Some(":noh"));
     }
 
     #[test]
