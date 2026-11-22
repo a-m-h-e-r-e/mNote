@@ -19,6 +19,14 @@ ropey = { version = "1.6.1", default-features = false, features = ["simd"] }
 # code fences) and source-view highlighting. Grammars only, no bundled parser wrapper.
 tree-sitter = "0.27.1"
 tree-sitter-md = { version = "0.5.4", default-features = false }
+# Grammars for coloring code blocks in the styled view: a short list of common
+# languages; others show plain. Grammars only (no bundled parser wrappers).
+tree-sitter-rust = { version = "=0.24.2", default-features = false }
+tree-sitter-python = { version = "=0.25.0", default-features = false }
+tree-sitter-javascript = { version = "=0.25.0", default-features = false }
+tree-sitter-typescript = { version = "=0.23.2", default-features = false }
+tree-sitter-bash = { version = "=0.25.1", default-features = false }
+tree-sitter-json = { version = "=0.24.8", default-features = false }
 # regex: Vim search patterns and :s, and full-text note search. Already in the tree
 # through tree-sitter and gpui.
 regex = { version = "1.13.2", default-features = false, features = ["std", "perf", "unicode"] }

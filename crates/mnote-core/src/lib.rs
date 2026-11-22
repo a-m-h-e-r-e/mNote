@@ -4,6 +4,7 @@
 //! This crate has no UI dependencies, so it can be tested on its own and reused
 //! by a future CLI.
 
+pub mod code;
 pub mod content;
 mod error;
 pub mod files;
@@ -12,6 +13,7 @@ pub mod frontmatter;
 pub mod index;
 pub mod links;
 mod note_path;
+pub mod styled;
 pub mod text;
 mod vault;
 mod watch;
@@ -23,6 +25,8 @@ pub use frontmatter::Frontmatter;
 pub use index::{FolderItem, NoteEntry, NoteIndex, NoteSearch};
 pub use note_path::NotePath;
 pub use text::{Autosave, Buffer, ChangedLines, Reload};
+/// The Markdown syntax tree a [`Buffer`] keeps, for the styled view.
+pub use tree_sitter::Tree as SyntaxTree;
 pub use vault::Vault;
 pub use watch::{VaultEvent, VaultWatcher};
 

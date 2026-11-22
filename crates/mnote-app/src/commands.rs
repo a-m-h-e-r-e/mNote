@@ -99,6 +99,13 @@ pub const COMMANDS: &[Command] = &[
         Run::Finder("#"),
     ),
     cmd(
+        "Toggle task",
+        Some("space x"),
+        None,
+        "Checks or unchecks the task on the cursor line.",
+        Run::Keys(" x"),
+    ),
+    cmd(
         "Save note",
         None,
         Some("w"),

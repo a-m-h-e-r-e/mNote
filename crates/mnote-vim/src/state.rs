@@ -249,6 +249,14 @@ impl Vim {
     }
 
     /// Moves the cursor, for example after a mouse click.
+    /// Replaces `range` with `text` as one undo step, keeping marks in
+    /// place (for edits the app makes, such as toggling a task).
+    pub fn replace(&mut self, buf: &mut Buffer, range: Range<usize>, text: &str) {
+        buf.begin_change(self.cursor);
+        self.edit(buf, range, text);
+        buf.end_change(self.cursor);
+    }
+
     pub fn set_cursor(&mut self, pos: usize) {
         self.cursor = pos;
         self.want_col = None;

@@ -12,6 +12,7 @@
 
 mod keys;
 pub(crate) mod line;
+mod styled;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -22,9 +23,11 @@ use gpui::{
     ListAlignment, ListState, ParentElement, Render, SharedString, Styled, Subscription, Task,
     Window, div, font, list, prelude::*, px,
 };
+use mnote_core::code::CodeStyle;
 use mnote_core::files::FileOp;
 use mnote_core::folder_edit::{Change, FolderEntry};
 use mnote_core::links::{LinkMove, count_relinks, relink_vault};
+use mnote_core::styled::{LineKind, StyledLine, line_kind};
 use mnote_core::{Autosave, Buffer, NoteIndex, NotePath, Reload, Vault, VaultEvent, VaultWatcher};
 use mnote_vim::ex::AppCommand;
 use mnote_vim::ex::cmdline::{Completer, line_matches};
@@ -39,9 +42,12 @@ use crate::picker::finder::{CurrentNote, Finder};
 use crate::picker::list::ListPicker;
 use crate::picker::palette::CommandPalette;
 use crate::picker::{Job, JobResult, ListEntry, Picker, PickerAction, PickerEffect, PickerOutcome};
-use crate::theme::{ActiveTheme, Palette, StyledExt, Theme, family, size, space, text};
+use crate::theme::{ActiveTheme, Palette, StyledExt, Theme, family, radius, size, space, text};
 use crate::ui::{CommandLine, CompletionPopup, MessagePanel, StatusLine, Toast, TopBar};
 use line::{Caret, Highlight, LineText};
+
+/// A code block's colours, line by line: byte ranges and their style.
+type CodeLines = Vec<Vec<(std::ops::Range<usize>, CodeStyle)>>;
 
 /// Width left for the macOS traffic-light buttons in the top bar.
 const TRAFFIC_LIGHT_INSET: f32 = 76.;
@@ -125,6 +131,12 @@ pub struct Editor {
     /// offers `u undo`. It goes after a few seconds.
     toast: Option<(SharedString, bool)>,
     toast_task: Option<Task<()>>,
+    /// The Markdown tree for this frame (cheap to clone), for line kinds.
+    tree: Option<mnote_core::SyntaxTree>,
+    /// Code block colours by the block's first row, for one text revision.
+    code_cache: std::collections::HashMap<usize, (u64, Rc<CodeLines>)>,
+    /// Wakes the editor when a background parse lands.
+    syntax_ready: async_channel::Sender<()>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -188,6 +200,24 @@ impl Editor {
         let focus = cx.focus_handle();
         window.focus(&focus);
 
+        // A finished background parse redraws, so blocks and code styling
+        // catch up with the text.
+        let (syntax_ready, ready) = async_channel::unbounded::<()>();
+        let mut buffer = buffer;
+        {
+            let tx = syntax_ready.clone();
+            buffer.on_syntax_ready(move || {
+                let _ = tx.try_send(());
+            });
+        }
+        let redraw = cx.spawn(async move |this, cx| {
+            while ready.recv().await.is_ok() {
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        });
+
         let subscriptions = vec![
             cx.observe_window_appearance(window, |_, window, cx| {
                 if Theme::sync_with(window, cx) {
@@ -224,7 +254,10 @@ impl Editor {
             file_history: FileHistory::default(),
             toast: None,
             toast_task: None,
-            _tasks: Vec::new(),
+            tree: None,
+            code_cache: std::collections::HashMap::new(),
+            syntax_ready,
+            _tasks: vec![redraw],
             _subscriptions: subscriptions,
         }
     }
@@ -328,6 +361,9 @@ impl Editor {
         if key == mnote_vim::Key::Char('e') {
             return self.open_explorer(None, cx);
         }
+        if key == mnote_vim::Key::Char('x') {
+            return self.toggle_task(cx);
+        }
         let query = match key {
             mnote_vim::Key::Char('f') => "",
             mnote_vim::Key::Char('/') => "/",
@@ -336,6 +372,28 @@ impl Editor {
             _ => return,
         };
         self.open_finder(query, cx);
+    }
+
+    /// `space x`: checks or unchecks the task on the cursor line.
+    fn toggle_task(&mut self, cx: &mut Context<Self>) {
+        let rope = self.buffer.text();
+        let line = line_of(rope, self.vim.cursor());
+        let start = line_start(rope, line);
+        let text: String = rope.slice(start..start + line_len(rope, line)).to_string();
+        let LineKind::Task { checked, .. } = line_kind(None, rope, line) else {
+            self.reply = Some(("Not a task line. Tasks look like - [ ] item".into(), true));
+            return;
+        };
+        let Some(open) = text.find(['[']) else { return };
+        let at = start + text[..open].chars().count() + 1;
+        self.vim.replace(
+            &mut self.buffer,
+            at..at + 1,
+            if checked { " " } else { "x" },
+        );
+        self.sync_lines();
+        self.schedule_autosave(cx);
+        cx.notify();
     }
 
     /// Opens the finder with `query` already typed.
@@ -828,6 +886,11 @@ impl Editor {
         };
         *note = target;
         self.buffer = buffer;
+        let tx = self.syntax_ready.clone();
+        self.buffer.on_syntax_ready(move || {
+            let _ = tx.try_send(());
+        });
+        self.code_cache.clear();
         self.vim.set_cursor(0);
         self.autosave_task = None;
         self.notice = None;
@@ -1057,21 +1120,75 @@ impl Editor {
             ix.abs_diff(cursor_line)
         };
 
-        let body = text::NOTE_BODY;
+        let kind = line_kind(self.tree.as_ref(), rope, ix);
+        let in_frontmatter = |line: usize| {
+            matches!(
+                line_kind(self.tree.as_ref(), rope, line),
+                LineKind::Frontmatter { .. }
+            )
+        };
         let (shown, highlights) = self.decorate(ix, start, len, &content, p);
+        let substituted = shown != content;
+        let raw = current || substituted;
+        let gutter_number = SharedString::from(number.to_string());
+
+        // Frontmatter collapses to its tags unless the cursor is inside it.
+        if let LineKind::Frontmatter { first } = kind
+            && !in_frontmatter(cursor_line)
+        {
+            if !first {
+                return div().h(px(0.)).into_any_element();
+            }
+            let head: String = rope.slice(..rope.len_chars().min(8192)).to_string();
+            let fm = mnote_core::Frontmatter::parse(&head);
+            return self.frontmatter_row(gutter_number, current, &fm.tags, p);
+        }
+
+        let mut look = styled::look(&kind, if substituted { &shown } else { &content }, raw, p);
+        if substituted {
+            look.shown = StyledLine::plain(&shown);
+            look.styling.clear();
+        }
+        if let LineKind::Code { lang, block } = &kind
+            && let Some(spans) = self.code_spans(lang, block.clone(), ix)
+        {
+            look.styling = styled::code_styling(&spans, p);
+        }
+
+        // Source positions (bytes of `content`) to positions in the shown
+        // text, where markers may be hidden.
+        let to_shown = |byte: usize| {
+            if substituted {
+                byte
+            } else {
+                look.shown
+                    .display_byte(content[..byte.min(content.len())].chars().count())
+            }
+        };
+        let highlights = highlights
+            .into_iter()
+            .map(|mut h| {
+                if !substituted {
+                    h.bytes = to_shown(h.bytes.start)..to_shown(h.bytes.end);
+                }
+                h
+            })
+            .collect();
+
         let mut line = LineText::new(
-            shown,
-            note_font(body),
-            body.size(),
-            body.line_height(),
-            Theme::color(p.ink),
+            look.shown.text.clone().into(),
+            look.font(),
+            look.style.size(),
+            look.style.line_height(),
+            look.color,
         )
+        .styling(look.styling.clone())
         .highlights(highlights);
 
         if let Some(chars) = self.selection_on_line(ix, start, len) {
-            let to_byte = |c: usize| char_to_byte(&content, c);
+            let to_byte = |c: usize| to_shown(char_to_byte(&content, c));
             let end = if chars.end > len {
-                content.len() + 1
+                look.shown.text.len() + 1
             } else {
                 to_byte(chars.end)
             };
@@ -1081,15 +1198,104 @@ impl Editor {
         // In command mode the caret is in the command line.
         if current && mode != Mode::Command && (self.caret_on || mode != Mode::Insert) {
             line = line.caret(Some(Caret {
-                byte: char_to_byte(&content, cursor - start),
+                byte: to_shown(char_to_byte(&content, cursor - start)),
                 shape: self.vim.mode().caret(),
                 color: Theme::color(p.cursor),
                 on_color: Theme::color(p.on_cursor),
             }));
         }
 
-        // Line numbers in the note's own font and size, as in Zed.
-        let gutter = text::NOTE_BODY;
+        let line_height = look.style.line_height();
+        let prefix: Option<AnyElement> = match &look.prefix {
+            styled::Prefix::None => None,
+            styled::Prefix::Bullet => Some(
+                div()
+                    .flex_none()
+                    .w(px(2. * styled::CHAR_W))
+                    .text_style(text::NOTE_BODY)
+                    .text_color(Theme::color(p.ink_3))
+                    .child(SharedString::new_static("•"))
+                    .into_any_element(),
+            ),
+            styled::Prefix::Checkbox { checked } => Some(
+                div()
+                    .flex_none()
+                    .w(px(2. * styled::CHAR_W))
+                    .h(line_height)
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .size(px(14.))
+                            .rounded(px(3.))
+                            .border_1()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(11.))
+                            .line_height(px(14.))
+                            .when(*checked, |b| {
+                                b.bg(Theme::color(p.cursor))
+                                    .border_color(Theme::color(p.cursor))
+                                    .text_color(Theme::color(p.on_cursor))
+                                    .child(SharedString::new_static("✓"))
+                            })
+                            .when(!checked, |b| b.border_color(Theme::color(p.line_strong))),
+                    )
+                    .into_any_element(),
+            ),
+            styled::Prefix::Callout { label, color } => Some(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .pr(px(space::S2))
+                    .h(line_height)
+                    .text_style(text::HINT)
+                    .text_color(*color)
+                    .child(div().size(px(6.)).rounded(px(1.)).bg(*color))
+                    .child(SharedString::from(label.clone()))
+                    .into_any_element(),
+            ),
+        };
+
+        let body: AnyElement = if look.rule {
+            div()
+                .h(line_height)
+                .flex()
+                .items_center()
+                .child(div().w_full().h(px(1.)).bg(Theme::color(p.line)))
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .items_start()
+                .pl(px(look.indent))
+                .when(look.background.is_some(), |row| row.px(px(space::S3)))
+                .when_some(look.background, |row, bg| row.bg(bg))
+                .when(look.round_top, |row| row.rounded_t(px(radius::MD)))
+                .when(look.round_bottom, |row| row.rounded_b(px(radius::MD)))
+                .when_some(look.height, |row, h| row.h(h).overflow_hidden())
+                .children(prefix)
+                .child(div().flex_1().min_w_0().child(line))
+                .children(look.label.clone().map(|label| {
+                    div()
+                        .flex_none()
+                        .pl(px(space::S2))
+                        .h(px(28.))
+                        .flex()
+                        .items_center()
+                        .text_style(text::HINT)
+                        .font_weight(gpui::FontWeight::NORMAL)
+                        .text_color(Theme::color(p.ink_3))
+                        .child(label)
+                }))
+                .into_any_element()
+        };
+
+        // Line numbers in the note's own font and size, as in Zed, centred
+        // on the first row of the line.
         div()
             .flex()
             .w_full()
@@ -1103,19 +1309,129 @@ impl Editor {
                     .w(px(size::GUTTER_W))
                     .pr(px(space::S8))
                     .text_right()
-                    .text_style(gutter)
-                    .line_height(body.line_height())
+                    .text_style(text::NOTE_BODY)
+                    .line_height(look.height.unwrap_or(line_height))
                     .text_color(Theme::color(if current { p.ink } else { p.ink_3 }))
-                    .child(SharedString::from(number.to_string())),
+                    .child(gutter_number),
             )
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .max_w(px(size::MEASURE))
-                    .child(line),
+                    .child(body),
             )
             .into_any_element()
+    }
+
+    /// The frontmatter's first line, collapsed to its tags.
+    fn frontmatter_row(
+        &self,
+        number: SharedString,
+        current: bool,
+        tags: &[String],
+        p: &Palette,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .w_full()
+            .when(current, |row| row.bg(Theme::color(p.well)))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(size::GUTTER_W))
+                    .pr(px(space::S8))
+                    .text_right()
+                    .text_style(text::NOTE_BODY)
+                    .text_color(Theme::color(p.ink_3))
+                    .child(number),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .py(px(2.))
+                    .max_w(px(size::MEASURE))
+                    .children(tags.iter().map(|tag| {
+                        div()
+                            .h(px(22.))
+                            .px(px(space::S2))
+                            .flex()
+                            .items_center()
+                            .rounded(px(11.))
+                            .bg(Theme::color(p.well))
+                            .text_style(text::UI)
+                            .text_size(px(13.))
+                            .text_color(Theme::color(p.ink_2))
+                            .child(SharedString::from(format!("#{tag}")))
+                    }))
+                    .when(tags.is_empty(), |row| {
+                        row.text_style(text::STATUS)
+                            .text_color(Theme::color(p.ink_3))
+                            .child(SharedString::new_static("frontmatter"))
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// The code colours of line `ix` in the block `block` (its content rows),
+    /// computed once per block and text revision.
+    fn code_spans(
+        &mut self,
+        lang: &str,
+        block: std::ops::Range<usize>,
+        ix: usize,
+    ) -> Option<Vec<(std::ops::Range<usize>, CodeStyle)>> {
+        if !mnote_core::code::supported(lang) {
+            return None;
+        }
+        let revision = self.buffer.revision();
+        let cached = self
+            .code_cache
+            .get(&block.start)
+            .filter(|(rev, lines)| *rev == revision && lines.len() == block.len())
+            .map(|(_, lines)| lines.clone());
+        let lines = match cached {
+            Some(lines) => lines,
+            None => {
+                let rope = self.buffer.text();
+                let rows: Vec<String> = block
+                    .clone()
+                    .map(|row| {
+                        let start = line_start(rope, row);
+                        rope.slice(start..start + line_len(rope, row)).to_string()
+                    })
+                    .collect();
+                let code = rows.join("\n");
+                let spans = mnote_core::code::highlight(lang, &code).unwrap_or_default();
+                // Split the block's spans into lines.
+                let mut per_line = Vec::with_capacity(rows.len());
+                let mut offset = 0;
+                for row in &rows {
+                    let end = offset + row.len();
+                    per_line.push(
+                        spans
+                            .iter()
+                            .filter(|(r, _)| r.start < end && r.end > offset)
+                            .map(|(r, s)| {
+                                (r.start.max(offset) - offset..r.end.min(end) - offset, *s)
+                            })
+                            .collect(),
+                    );
+                    offset = end + 1;
+                }
+                let lines = Rc::new(per_line);
+                if self.code_cache.len() > 64 {
+                    self.code_cache.retain(|_, (rev, _)| *rev == revision);
+                }
+                self.code_cache
+                    .insert(block.start, (revision, lines.clone()));
+                lines
+            }
+        };
+        lines.get(ix.checked_sub(block.start)?).cloned()
     }
 
     /// Whether line `ix` is in the `'<,'>` range of the command being typed,
@@ -1236,14 +1552,6 @@ impl Editor {
             Source::Scratch => vec![SharedString::new_static("scratch")],
             Source::Note { note, .. } => note.segments().map(|s| s.to_owned().into()).collect(),
         }
-    }
-}
-
-/// The font of a note text style (IBM Plex Mono for the body).
-fn note_font(style: crate::theme::TextStyle) -> Font {
-    Font {
-        weight: style.font_weight(),
-        ..font(style.font_family())
     }
 }
 
@@ -1397,6 +1705,7 @@ impl Editor {
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.tree = self.buffer.syntax_tree().cloned();
         let p = cx.theme().palette;
         let width = window.viewport_size().width / px(1.);
         let caret_on = self.caret_on;

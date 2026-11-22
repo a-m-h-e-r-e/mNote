@@ -40,6 +40,19 @@ pub struct Highlight {
     pub outline: Option<Hsla>,
 }
 
+/// Inline formatting of a run of the line (bold, a link, inline code), under
+/// any [`Highlight`].
+#[derive(Debug, Clone, Default)]
+pub struct Styling {
+    /// Byte range in the line.
+    pub bytes: Range<usize>,
+    pub color: Option<Hsla>,
+    pub background: Option<Hsla>,
+    pub weight: Option<gpui::FontWeight>,
+    pub underline: bool,
+    pub strike: bool,
+}
+
 /// One rendered line of the note.
 pub struct LineText {
     text: SharedString,
@@ -52,6 +65,7 @@ pub struct LineText {
     selection: Option<(Range<usize>, Hsla)>,
     caret: Option<Caret>,
     highlights: Vec<Highlight>,
+    styling: Vec<Styling>,
     shaped: Rc<RefCell<Option<Shaped>>>,
 }
 
@@ -77,6 +91,7 @@ impl LineText {
             selection: None,
             caret: None,
             highlights: Vec::new(),
+            styling: Vec::new(),
             shaped: Rc::default(),
         }
     }
@@ -88,6 +103,12 @@ impl LineText {
 
     pub fn caret(mut self, caret: Option<Caret>) -> Self {
         self.caret = caret;
+        self
+    }
+
+    /// Inline formatting, in order and not overlapping.
+    pub fn styling(mut self, styling: Vec<Styling>) -> Self {
+        self.styling = styling;
         self
     }
 
@@ -129,6 +150,9 @@ impl LineText {
         for h in &self.highlights {
             cuts.extend([h.bytes.start.min(len), h.bytes.end.min(len)]);
         }
+        for st in &self.styling {
+            cuts.extend([st.bytes.start.min(len), st.bytes.end.min(len)]);
+        }
         cuts.sort_unstable();
         cuts.dedup();
 
@@ -139,19 +163,37 @@ impl LineText {
                 let in_block = block.as_ref().filter(|(r, _)| r.contains(&at));
                 let in_selection = selection.as_ref().filter(|(r, _)| r.contains(&at));
                 let in_highlight = self.highlights.iter().find(|h| h.bytes.contains(&at));
+                let style = self.styling.iter().find(|st| st.bytes.contains(&at));
+                let mut font = self.font.clone();
+                if let Some(weight) = style.and_then(|st| st.weight) {
+                    font.weight = weight;
+                }
+                let base = style.and_then(|st| st.color).unwrap_or(self.color);
                 TextRun {
                     len: w[1] - w[0],
-                    font: self.font.clone(),
+                    font,
                     color: in_block.map_or_else(
-                        || in_highlight.map_or(self.color, |h| h.color),
+                        || in_highlight.map_or(base, |h| h.color),
                         |(_, c)| c.on_color,
                     ),
                     background_color: in_block
                         .map(|(_, c)| c.color)
                         .or(in_highlight.map(|h| h.background))
-                        .or(in_selection.map(|(_, color)| *color)),
-                    underline: None,
-                    strikethrough: None,
+                        .or(in_selection.map(|(_, color)| *color))
+                        .or(style.and_then(|st| st.background)),
+                    underline: style
+                        .filter(|st| st.underline)
+                        .map(|_| gpui::UnderlineStyle {
+                            thickness: px(1.),
+                            color: None,
+                            wavy: false,
+                        }),
+                    strikethrough: style
+                        .filter(|st| st.strike)
+                        .map(|_| gpui::StrikethroughStyle {
+                            thickness: px(1.),
+                            color: None,
+                        }),
                 }
             })
             .collect()
