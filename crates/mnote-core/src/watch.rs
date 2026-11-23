@@ -79,6 +79,40 @@ impl Vault {
     }
 }
 
+/// Keeps a folder watch running ([`watch_dir`]). Dropping it stops watching.
+pub struct DirWatcher {
+    _watcher: RecommendedWatcher,
+}
+
+impl std::fmt::Debug for DirWatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DirWatcher")
+    }
+}
+
+/// Watches `dir` and everything under it, and calls `on_change` with each
+/// file created, changed or removed (for theme files saved in another
+/// editor). It runs on the watcher's thread: hand the path over and return.
+pub fn watch_dir(
+    dir: &Path,
+    on_change: impl Fn(std::path::PathBuf) + Send + 'static,
+) -> Result<DirWatcher> {
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        let Ok(event) = res else { return };
+        if matches!(event.kind, EventKind::Access(_)) {
+            return;
+        }
+        for path in event.paths {
+            on_change(path);
+        }
+    })
+    .map_err(|e| VaultError::io(dir, std::io::Error::other(e.to_string())))?;
+    watcher
+        .watch(dir, RecursiveMode::Recursive)
+        .map_err(|e| VaultError::io(dir, std::io::Error::other(e.to_string())))?;
+    Ok(DirWatcher { _watcher: watcher })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

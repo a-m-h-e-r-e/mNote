@@ -222,6 +222,8 @@ pub struct Editor {
     /// Changes by other apps. Boxed: the watcher is large, and a scratch
     /// note has none.
     _watcher: Option<Box<VaultWatcher>>,
+    /// Watches ~/.config/mnote, so a theme file saved anywhere applies.
+    _config_watcher: Option<mnote_core::DirWatcher>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
     /// Editor events and their subscribers.
@@ -407,9 +409,11 @@ impl Editor {
             config: Config::default(),
             config_path: Config::path(),
             _watcher: None,
+            _config_watcher: None,
             _tasks: vec![redraw],
             _subscriptions: subscriptions,
         };
+        editor.watch_themes(cx);
         editor.subscribe_builtin();
         editor.register_builtin_blocks();
         // The first snapshot opens the note (and counts its words).
@@ -1497,7 +1501,9 @@ impl Editor {
             "set nowrap"
         };
         let _ = self.vim.execute(wrap, &mut self.buffer);
-        crate::theme::Theme::set_choice(config.theme, cx);
+        if let Err(err) = crate::theme::Theme::set_choice(&config.theme, cx) {
+            self.notice = Some(err.into());
+        }
         crate::commands::set_leader(config.leader);
         // Key bindings: the commands' defaults, then config.toml's [keys].
         let (keymap, problems) =
@@ -2184,6 +2190,44 @@ impl Editor {
             Err(err) => self.notice = Some(err.to_string().into()),
         }
         cx.notify();
+    }
+
+    /// Reloads the theme in use when its file (`themes/<name>.toml`) is
+    /// saved, here or in another editor.
+    fn watch_themes(&mut self, cx: &mut Context<Self>) {
+        let Some(dir) = Config::path().and_then(|p| p.parent().map(|d| d.to_path_buf())) else {
+            return;
+        };
+        if !dir.is_dir() {
+            return;
+        }
+        let (tx, rx) = async_channel::unbounded::<std::path::PathBuf>();
+        let Ok(watcher) = mnote_core::watch_dir(&dir, move |path| {
+            let _ = tx.try_send(path);
+        }) else {
+            return;
+        };
+        self._config_watcher = Some(watcher);
+        self._tasks.push(cx.spawn(async move |this, cx| {
+            while let Ok(path) = rx.recv().await {
+                let applied = this.update(cx, |this, cx| {
+                    match crate::theme::Theme::reload(&path, cx) {
+                        Some(Ok(())) => {
+                            this.notice = None;
+                            cx.refresh_windows();
+                        }
+                        Some(Err(err)) => {
+                            this.notice = Some(err.into());
+                            cx.notify();
+                        }
+                        None => {}
+                    }
+                });
+                if applied.is_err() {
+                    break;
+                }
+            }
+        }));
     }
 
     fn on_vault_event(&mut self, event: VaultEvent, cx: &mut Context<Self>) {

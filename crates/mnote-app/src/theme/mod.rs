@@ -1,5 +1,6 @@
 //! The app theme: the design-system tokens plus the dark or light choice, which
-//! follows the system appearance.
+//! follows the system appearance, or a theme file
+//! (`~/.config/mnote/themes/<name>.toml`) over one of them.
 //!
 //! Colours, type, spacing, radii and sizes are generated into [`tokens`] from
 //! `design/tokens.json` by `tools/gen_theme.py`. Never hard-code a colour or size
@@ -137,6 +138,12 @@ pub fn row_h() -> f32 {
     (size::ROW_H * ui_scale()).round()
 }
 
+/// The theme file in use (`theme = "<name>"`), to reload it when it's saved.
+#[derive(Debug, Clone, Default)]
+struct NamedTheme(Option<String>);
+
+impl Global for NamedTheme {}
+
 /// The appearance `config.toml` fixes, if it does (`theme = "dark"`).
 #[derive(Debug, Clone, Copy, Default)]
 struct FixedAppearance(Option<Appearance>);
@@ -176,20 +183,82 @@ impl Theme {
         cx.set_global(Self::new(cx.window_appearance().into()));
     }
 
-    /// Follows the config's `theme`: the system's appearance, or always dark
-    /// or light.
-    pub fn set_choice(choice: mnote_core::config::ThemeChoice, cx: &mut App) {
+    /// Follows the config's `theme`: the system's appearance, always dark or
+    /// light, or a theme file. A theme file that can't be read is reported
+    /// and the colours in use stay.
+    pub fn set_choice(
+        choice: &mnote_core::config::ThemeChoice,
+        cx: &mut App,
+    ) -> Result<(), String> {
         use mnote_core::config::ThemeChoice;
         let fixed = match choice {
             ThemeChoice::System => None,
             ThemeChoice::Dark => Some(Appearance::Dark),
             ThemeChoice::Light => Some(Appearance::Light),
+            ThemeChoice::Named(name) => {
+                let theme = Self::named(name)?;
+                cx.set_global(FixedAppearance(Some(theme.appearance)));
+                cx.set_global(NamedTheme(Some(name.clone())));
+                cx.set_global(theme);
+                return Ok(());
+            }
         };
+        let was_named = cx.try_global::<NamedTheme>().is_some_and(|n| n.0.is_some());
+        cx.set_global(NamedTheme(None));
         cx.set_global(FixedAppearance(fixed));
         let appearance = fixed.unwrap_or_else(|| cx.window_appearance().into());
-        if cx.theme().appearance != appearance {
+        if was_named || cx.theme().appearance != appearance {
             cx.set_global(Self::new(appearance));
         }
+        Ok(())
+    }
+
+    /// The theme in `themes/<name>.toml`: its base, with its colours over it.
+    /// A palette made here is kept for the program's life (a few hundred
+    /// bytes each time a theme file is read), so every view can hold it as
+    /// `&'static`.
+    pub fn named(name: &str) -> Result<Self, String> {
+        let path = mnote_core::config::ThemeFile::path(name)
+            .ok_or_else(|| "No home folder for themes".to_owned())?;
+        // Named as config.toml's folder shows it, short enough for the
+        // status line.
+        let shown = format!("themes/{name}.toml");
+        let text = std::fs::read_to_string(&path)
+            .map_err(|err| format!("Couldn't read {shown}: {err}"))?;
+        let file = mnote_core::config::ThemeFile::parse(&text).map_err(|err| match err.line {
+            Some(line) => format!("{shown} line {line}: {}", err.message),
+            None => format!("{shown}: {}", err.message),
+        })?;
+        Self::from_file(&file).map_err(|err| format!("{shown}: {err}"))
+    }
+
+    /// A theme file's base with its colours over it.
+    pub fn from_file(file: &mnote_core::config::ThemeFile) -> Result<Self, String> {
+        let appearance = if file.dark {
+            Appearance::Dark
+        } else {
+            Appearance::Light
+        };
+        let mut theme = Self::new(appearance);
+        let mut palette = *theme.palette;
+        for (token, value) in &file.colors {
+            if !palette.set_token(token, *value) {
+                return Err(format!("there's no colour called {token}"));
+            }
+        }
+        theme.palette = Box::leak(Box::new(palette));
+        Ok(theme)
+    }
+
+    /// Reloads the theme in use if `path` is its file (it was just saved).
+    /// `None` when it isn't.
+    pub fn reload(path: &std::path::Path, cx: &mut App) -> Option<Result<(), String>> {
+        let name = cx.try_global::<NamedTheme>()?.0.clone()?;
+        let file = mnote_core::config::ThemeFile::path(&name)?;
+        if path != file {
+            return None;
+        }
+        Some(Self::named(&name).map(|theme| cx.set_global(theme)))
     }
 
     /// Switches the theme when the window's appearance changed (unless the
@@ -300,6 +369,44 @@ impl ActiveTheme for App {
 }
 
 impl Palette {
+    /// Sets the colour of token `name` (`0xRRGGBBAA`); `false` when there's
+    /// no such token.
+    pub fn set_token(&mut self, name: &str, value: u32) -> bool {
+        let slot = match name {
+            "paper" => &mut self.paper,
+            "chrome" => &mut self.chrome,
+            "overlay" => &mut self.overlay,
+            "well" => &mut self.well,
+            "scrim" => &mut self.scrim,
+            "line" => &mut self.line,
+            "line_strong" => &mut self.line_strong,
+            "ink" => &mut self.ink,
+            "ink_2" => &mut self.ink_2,
+            "ink_3" => &mut self.ink_3,
+            "cursor" => &mut self.cursor,
+            "on_cursor" => &mut self.on_cursor,
+            "select" => &mut self.select,
+            "select_ink" => &mut self.select_ink,
+            "match" => &mut self.match_,
+            "insert" => &mut self.insert,
+            "insert_wash" => &mut self.insert_wash,
+            "visual" => &mut self.visual,
+            "visual_wash" => &mut self.visual_wash,
+            "danger" => &mut self.danger,
+            "danger_wash" => &mut self.danger_wash,
+            "syn_heading" => &mut self.syn_heading,
+            "syn_strong" => &mut self.syn_strong,
+            "syn_link" => &mut self.syn_link,
+            "syn_url" => &mut self.syn_url,
+            "syn_marker" => &mut self.syn_marker,
+            "syn_code" => &mut self.syn_code,
+            "syn_keyword" => &mut self.syn_keyword,
+            _ => return false,
+        };
+        *slot = value;
+        true
+    }
+
     /// A colour by its token name (`"match"`, `"danger_wash"`, `"syn_link"`),
     /// for decorations and anything else that names colours as data.
     pub fn token(&self, name: &str) -> Option<u32> {
@@ -340,6 +447,33 @@ impl Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_files_override_tokens_over_their_base() {
+        let file = mnote_core::config::ThemeFile::parse(
+            "base = \"light\"\n[colors]\npaper = \"#101010\"\nmatch = \"#11223344\"\n",
+        )
+        .expect("valid");
+        let theme = Theme::from_file(&file).expect("applies");
+        assert_eq!(theme.appearance, Appearance::Light);
+        assert_eq!(theme.palette.paper, 0x101010ff);
+        assert_eq!(theme.palette.match_, 0x11223344);
+        assert_eq!(
+            theme.palette.ink,
+            Theme::new(Appearance::Light).palette.ink,
+            "the rest from the base"
+        );
+        let bad =
+            mnote_core::config::ThemeFile::parse("[colors]\nnope = \"#000000\"\n").expect("parses");
+        assert!(
+            Theme::from_file(&bad)
+                .expect_err("unknown token")
+                .contains("nope")
+        );
+        let mut p = *Theme::new(Appearance::Dark).palette;
+        assert!(p.set_token("syn_link", 1) && p.syn_link == 1);
+        assert_eq!(p.token("syn_link"), Some(1));
+    }
 
     /// WCAG 2 relative luminance of an opaque `0xRRGGBBAA` colour.
     fn luminance(c: u32) -> f64 {

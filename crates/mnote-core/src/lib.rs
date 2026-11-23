@@ -33,7 +33,7 @@ pub use text::{Autosave, Buffer, ChangedLines, Mark, MarkKind, Reload, drop_tree
 /// The Markdown syntax tree a [`Buffer`] keeps, for the styled view.
 pub use tree_sitter::Tree as SyntaxTree;
 pub use vault::Vault;
-pub use watch::{VaultEvent, VaultWatcher};
+pub use watch::{DirWatcher, VaultEvent, VaultWatcher, watch_dir};
 
 /// Returns true when `path` looks like a note mNote should index: its
 /// file type ([`filetype`]) is a note one (Markdown).

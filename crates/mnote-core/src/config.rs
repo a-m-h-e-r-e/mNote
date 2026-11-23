@@ -9,13 +9,98 @@ use std::path::{Path, PathBuf};
 
 use crate::NotePath;
 
-/// What the window follows for dark or light.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// The colours: the system's dark or light, one of them always, or a
+/// theme file (`~/.config/mnote/themes/<name>.toml`, see [`ThemeFile`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ThemeChoice {
     #[default]
     System,
     Dark,
     Light,
+    Named(String),
+}
+
+/// A theme file: a base (`dark` or `light`) and colours over it, by token
+/// name. Tokens it doesn't set come from the base.
+///
+/// ```toml
+/// base = "dark"
+/// [colors]
+/// paper = "#1e1e2e"
+/// match = "#f9e2af55"
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ThemeFile {
+    /// `true` for a dark base.
+    pub dark: bool,
+    /// Token names and colours (`0xRRGGBBAA`).
+    pub colors: Vec<(String, u32)>,
+}
+
+impl ThemeFile {
+    /// Reads a theme file.
+    pub fn parse(text: &str) -> Result<ThemeFile, ConfigError> {
+        let table: toml::Table = text.parse().map_err(|err: toml::de::Error| ConfigError {
+            line: err.span().map(|span| line_at(text, span.start)),
+            message: err.message().trim().to_owned(),
+        })?;
+        let mut theme = ThemeFile {
+            dark: true,
+            colors: Vec::new(),
+        };
+        for (key, value) in &table {
+            let line = find_key_line(text, key);
+            let wrong = |message: String| ConfigError { line, message };
+            match key.as_str() {
+                "base" => {
+                    theme.dark = match value.as_str() {
+                        Some("dark") => true,
+                        Some("light") => false,
+                        _ => return Err(wrong("base should be \"dark\" or \"light\"".into())),
+                    }
+                }
+                "colors" => {
+                    let colors = value
+                        .as_table()
+                        .ok_or_else(|| wrong("colors should be a [colors] table".into()))?;
+                    for (name, color) in colors {
+                        let value = color.as_str().and_then(parse_color).ok_or_else(|| {
+                            ConfigError {
+                                line: find_key_line(text, name),
+                                message: format!(
+                                    "{name} should be a colour like \"#1e1e2e\" or \"#1e1e2e80\""
+                                ),
+                            }
+                        })?;
+                        theme.colors.push((name.clone(), value));
+                    }
+                }
+                other => return Err(wrong(format!("there's no theme setting called {other}"))),
+            }
+        }
+        Ok(theme)
+    }
+
+    /// The folder theme files live in: `~/.config/mnote/themes`.
+    pub fn dir() -> Option<PathBuf> {
+        Config::path()?.parent().map(|p| p.join("themes"))
+    }
+
+    /// The file for theme `name`.
+    pub fn path(name: &str) -> Option<PathBuf> {
+        Some(Self::dir()?.join(format!("{name}.toml")))
+    }
+}
+
+/// `#rrggbb` or `#rrggbbaa` as `0xRRGGBBAA`.
+pub fn parse_color(text: &str) -> Option<u32> {
+    let hex = text.trim().strip_prefix('#')?;
+    let value = u32::from_str_radix(hex, 16).ok()?;
+    match hex.len() {
+        6 => Some((value << 8) | 0xff),
+        8 => Some(value),
+        _ => None,
+    }
 }
 
 /// How notes are shown when they open.
@@ -110,8 +195,52 @@ impl KeySpec {
     }
 }
 
+/// Checks a plugin setting's value: `Err(why)` for one it doesn't take.
+pub type SettingCheck = std::sync::Arc<dyn Fn(&toml::Value) -> Result<(), String> + Send + Sync>;
+
+/// A plugin's setting (or a built-in feature's), under `[plugins.<plugin>]`:
+/// checked when config.toml is read, and written into it with its comment,
+/// values and default like the built-in settings.
+#[derive(Clone)]
+pub struct PluginSetting {
+    pub plugin: String,
+    pub key: String,
+    /// What it does and the values it takes (each line becomes a `#` line).
+    pub help: String,
+    pub default: toml::Value,
+    /// `Err(why)` for a value it doesn't take.
+    pub check: SettingCheck,
+}
+
+impl std::fmt::Debug for PluginSetting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PluginSetting({}.{})", self.plugin, self.key)
+    }
+}
+
+fn plugin_settings() -> &'static std::sync::RwLock<Vec<PluginSetting>> {
+    static SETTINGS: std::sync::OnceLock<std::sync::RwLock<Vec<PluginSetting>>> =
+        std::sync::OnceLock::new();
+    SETTINGS.get_or_init(Default::default)
+}
+
+/// Registers a plugin setting (replacing one with the same plugin and key).
+pub fn register_plugin_setting(setting: PluginSetting) {
+    if let Ok(mut settings) = plugin_settings().write() {
+        settings.retain(|s| !(s.plugin == setting.plugin && s.key == setting.key));
+        settings.push(setting);
+    }
+}
+
+fn registered(plugin: &str) -> Vec<PluginSetting> {
+    plugin_settings()
+        .read()
+        .map(|s| s.iter().filter(|s| s.plugin == plugin).cloned().collect())
+        .unwrap_or_default()
+}
+
 /// Every setting, with defaults for what the file leaves out.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     /// The notes folder, used when mNote starts without one.
     pub vault: Option<PathBuf>,
@@ -149,6 +278,8 @@ pub struct Config {
     /// Key bindings from the `[keys]` table: keys in Vim notation, and the
     /// command they run (`"<leader>d" = "daily"`; `"none"` removes one).
     pub keys: Vec<(String, String)>,
+    /// `[plugins.<name>]` tables, kept as written (see [`PluginSetting`]).
+    pub plugins: std::collections::BTreeMap<String, toml::Table>,
     /// The corner radius of pickers, modals, the capture panel, the command
     /// line and toasts, in pixels. `None` keeps the design's radii.
     pub panel_radius: Option<u32>,
@@ -204,6 +335,7 @@ impl Default for Config {
             wrap: true,
             mappings: None,
             keys: Vec::new(),
+            plugins: Default::default(),
             panel_radius: None,
             panel_shadow: true,
             autosave: true,
@@ -287,7 +419,20 @@ impl Config {
                         Some("system") => ThemeChoice::System,
                         Some("dark") => ThemeChoice::Dark,
                         Some("light") => ThemeChoice::Light,
-                        _ => return Err(wrong("\"system\", \"dark\" or \"light\"")),
+                        Some(name)
+                            if !name.is_empty()
+                                && name.chars().all(|c| {
+                                    c.is_alphanumeric() || matches!(c, '-' | '_' | '.')
+                                })
+                                && !name.starts_with('.') =>
+                        {
+                            ThemeChoice::Named(name.to_owned())
+                        }
+                        _ => {
+                            return Err(wrong(
+                                "\"system\", \"dark\", \"light\" or a theme file's name",
+                            ));
+                        }
                     }
                 }
                 "view" => {
@@ -338,6 +483,26 @@ impl Config {
                         Some("system") => true,
                         Some("vim") => false,
                         _ => return Err(wrong("\"system\" or \"vim\"")),
+                    }
+                }
+                "plugins" => {
+                    let plugins = value
+                        .as_table()
+                        .ok_or_else(|| wrong("tables, one per plugin: [plugins.<name>]"))?;
+                    for (name, table) in plugins {
+                        let table = table.as_table().ok_or_else(|| ConfigError {
+                            line: find_key_line(text, name),
+                            message: format!("plugins.{name} should be a table: [plugins.{name}]"),
+                        })?;
+                        for setting in registered(name) {
+                            if let Some(value) = table.get(&setting.key) {
+                                (setting.check)(value).map_err(|why| ConfigError {
+                                    line: find_key_line(text, &setting.key),
+                                    message: format!("plugins.{name}.{}: {why}", setting.key),
+                                })?;
+                            }
+                        }
+                        config.plugins.insert(name.clone(), table.clone());
                     }
                 }
                 "keys" => {
@@ -433,11 +598,14 @@ impl Config {
         let d = Config::default();
         let on_off = |b: bool| if b { "true" } else { "false" };
         let quoted = |s: &str| format!("\"{s}\"");
-        let theme = |t: ThemeChoice| match t {
-            ThemeChoice::System => "system",
-            ThemeChoice::Dark => "dark",
-            ThemeChoice::Light => "light",
-        };
+        fn theme(t: &ThemeChoice) -> &str {
+            match t {
+                ThemeChoice::System => "system",
+                ThemeChoice::Dark => "dark",
+                ThemeChoice::Light => "light",
+                ThemeChoice::Named(name) => name.as_str(),
+            }
+        }
         let view = |v: ViewChoice| match v {
             ViewChoice::Styled => "styled",
             ViewChoice::Source => "source",
@@ -486,11 +654,13 @@ impl Config {
             Setting::new(
                 "theme",
                 &format!(
-                    "Colours. Values: \"system\" (follows macOS), \"dark\", \"light\".\n\
-                     Default: {}",
-                    quoted(theme(d.theme))
+                    "Colours. Values: \"system\" (follows macOS), \"dark\", \"light\",\n\
+                     or a theme's name: ~/.config/mnote/themes/<name>.toml, with\n\
+                     base = \"dark\" or \"light\" and a [colors] table of tokens, like\n\
+                     paper = \"#1e1e2e\". Saving the file applies it. Default: {}",
+                    quoted(theme(&d.theme))
                 ),
-                quoted(theme(self.theme)),
+                quoted(theme(&self.theme)),
             ),
             Setting::new(
                 "view",
@@ -663,11 +833,60 @@ impl Config {
         }
         out.push('\n');
         out.push_str(&self.keys_block());
+        out.push_str(&self.plugins_block());
         out
     }
 
     /// The `[keys]` table, with how it works. It's a TOML table, so it
     /// comes after every other setting.
+    /// A plugin setting's value: config.toml's, else its default.
+    pub fn plugin_value(&self, plugin: &str, key: &str) -> Option<toml::Value> {
+        self.plugins
+            .get(plugin)
+            .and_then(|t| t.get(key).cloned())
+            .or_else(|| {
+                registered(plugin)
+                    .into_iter()
+                    .find(|s| s.key == key)
+                    .map(|s| s.default)
+            })
+    }
+
+    /// A `[plugins.<name>]` table for each plugin with settings, registered
+    /// or written: each registered setting with its comment and value (or
+    /// default), then anything else the table holds, as it was.
+    fn plugins_block(&self) -> String {
+        let mut names: Vec<String> = plugin_settings()
+            .read()
+            .map(|s| s.iter().map(|s| s.plugin.clone()).collect())
+            .unwrap_or_default();
+        names.extend(self.plugins.keys().cloned());
+        names.sort();
+        names.dedup();
+        let mut out = String::new();
+        for name in names {
+            let table = self.plugins.get(&name);
+            let settings = registered(&name);
+            out.push_str(&format!("\n[plugins.{name}]\n"));
+            for setting in &settings {
+                for line in setting.help.lines() {
+                    out.push_str(&format!("# {}\n", line.trim_start()));
+                }
+                out.push_str(&format!("# Default: {}\n", toml_value(&setting.default)));
+                let value = table
+                    .and_then(|t| t.get(&setting.key))
+                    .unwrap_or(&setting.default);
+                out.push_str(&format!("{} = {}\n", setting.key, toml_value(value)));
+            }
+            for (key, value) in table.into_iter().flatten() {
+                if !settings.iter().any(|s| s.key == *key) {
+                    out.push_str(&format!("{key} = {}\n", toml_value(value)));
+                }
+            }
+        }
+        out
+    }
+
     fn keys_block(&self) -> String {
         let mut out = String::from(KEYS_HELP);
         out.push_str("[keys]\n");
@@ -724,6 +943,37 @@ impl Config {
                 Some((text.len(), added))
             }
         }
+    }
+}
+
+/// A TOML value as config.toml writes it (inline: `"text"`, `3`, `[1, 2]`,
+/// `{ a = 1 }`).
+fn toml_value(value: &toml::Value) -> String {
+    match value {
+        toml::Value::String(s) => format!("{s:?}"),
+        toml::Value::Integer(n) => n.to_string(),
+        toml::Value::Float(f) => {
+            let text = f.to_string();
+            if text.contains(['.', 'e', 'i', 'N']) {
+                text
+            } else {
+                format!("{text}.0")
+            }
+        }
+        toml::Value::Boolean(b) => b.to_string(),
+        toml::Value::Datetime(d) => d.to_string(),
+        toml::Value::Array(items) => format!(
+            "[{}]",
+            items.iter().map(toml_value).collect::<Vec<_>>().join(", ")
+        ),
+        toml::Value::Table(table) => format!(
+            "{{ {} }}",
+            table
+                .iter()
+                .map(|(k, v)| format!("{k} = {}", toml_value(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 
@@ -875,14 +1125,22 @@ mod tests {
             mappings: Some(vec!["nnoremap j gj".into(), "inoremap jk <Esc>".into()]),
             ..Config::default()
         };
-        assert_eq!(Config::parse(&config.template()), Ok(config));
+        // Plugin settings are process-wide; another test may register some.
+        let mut back = Config::parse(&config.template()).expect("reads back");
+        back.plugins.clear();
+        assert_eq!(back, config);
     }
 
     #[test]
     fn the_template_lists_every_setting_with_values_and_default() {
         let template = Config::default().template();
+        let mut back = Config::parse(&template);
+        // Plugin settings are process-wide; another test may register some.
+        if let Ok(back) = &mut back {
+            back.plugins.clear();
+        }
         assert_eq!(
-            Config::parse(&template),
+            back,
             Ok(Config {
                 vault: Some(expand_home("~/notes")),
                 // The built-in mapping, written out.
@@ -966,6 +1224,79 @@ mod tests {
                 .template()
                 .contains("[keys]\n# \"<leader>d\" = \"daily\"\n")
         );
+    }
+
+    #[test]
+    fn themes_by_name_and_theme_files() {
+        assert_eq!(
+            Config::parse("theme = \"catppuccin\"").map(|c| c.theme),
+            Ok(ThemeChoice::Named("catppuccin".into()))
+        );
+        assert!(Config::parse("theme = \"../x\"").is_err());
+        assert!(Config::parse("theme = \".hidden\"").is_err());
+        let config = Config {
+            theme: ThemeChoice::Named("mine".into()),
+            ..Config::default()
+        };
+        assert_eq!(
+            Config::parse(&config.template()).map(|c| c.theme),
+            Ok(ThemeChoice::Named("mine".into()))
+        );
+        let file =
+            ThemeFile::parse("base = \"light\"\n[colors]\nink = \"#102030\"\n").expect("valid");
+        assert!(!file.dark);
+        assert_eq!(file.colors, [("ink".to_owned(), 0x102030ff)]);
+        assert_eq!(parse_color("#10203040"), Some(0x10203040));
+        assert_eq!(parse_color("102030"), None);
+        let err = ThemeFile::parse("[colors]\n\nink = \"blue\"\n").expect_err("not a colour");
+        assert_eq!(err.line, Some(3));
+        assert!(ThemeFile::parse("base = \"grey\"").is_err());
+        assert!(ThemeFile::parse("colours = 1").is_err());
+    }
+
+    #[test]
+    fn plugin_tables_are_kept_and_registered_settings_checked_and_written() {
+        let text = "[plugins.wordgoal]\ngoal = 500\nnote = \"x\"\n";
+        let config = Config::parse(text).expect("an unknown plugin's table is kept");
+        assert_eq!(
+            config.plugins["wordgoal"]
+                .get("goal")
+                .and_then(toml::Value::as_integer),
+            Some(500)
+        );
+        register_plugin_setting(PluginSetting {
+            plugin: "wordgoal".into(),
+            key: "goal".into(),
+            help: "Words to write each day.\nValues: 1 to 100000.".into(),
+            default: toml::Value::Integer(750),
+            check: std::sync::Arc::new(|v| {
+                v.as_integer()
+                    .filter(|n| (1..=100_000).contains(n))
+                    .map(|_| ())
+                    .ok_or_else(|| "a whole number from 1 to 100000".to_owned())
+            }),
+        });
+        let err = Config::parse("[plugins.wordgoal]\ngoal = 0\n").expect_err("checked");
+        assert_eq!(err.line, Some(2));
+        assert!(err.message.contains("1 to 100000"));
+        let config = Config::parse(text).expect("valid");
+        assert_eq!(
+            config.plugin_value("wordgoal", "goal"),
+            Some(toml::Value::Integer(500))
+        );
+        assert_eq!(
+            Config::default().plugin_value("wordgoal", "goal"),
+            Some(toml::Value::Integer(750)),
+            "the default"
+        );
+        let written = config.template();
+        assert!(written.contains(
+            "[plugins.wordgoal]\n# Words to write each day.\n# Values: 1 to 100000.\n# Default: 750\ngoal = 500\nnote = \"x\"\n"
+        ));
+        let back = Config::parse(&written).expect("reads back");
+        assert_eq!(back.plugins, config.plugins);
+        assert!(Config::parse("plugins = 3").is_err());
+        assert!(Config::parse("[plugins]\nx = 3").is_err());
     }
 
     #[test]

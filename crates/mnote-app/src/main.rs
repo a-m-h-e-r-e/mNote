@@ -86,7 +86,9 @@ fn main() {
 
     Application::new().run(move |cx: &mut App| {
         Theme::init(cx);
-        Theme::set_choice(config.theme, cx);
+        // A theme file that can't be read shows as a notice once the editor
+        // applies the config.
+        let _ = Theme::set_choice(&config.theme, cx);
         let settings = config.clone();
         let bounds = Bounds::centered(None, size(px(1200.), px(720.)), cx);
         let opened = cx.open_window(
