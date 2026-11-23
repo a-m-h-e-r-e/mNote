@@ -45,7 +45,7 @@ impl CmdWindow {
 impl Vim {
     /// The command-line window, while open.
     pub fn cmd_window(&self) -> Option<&CmdWindow> {
-        self.cmdwin.as_deref()
+        self.cmd.cmdwin.as_deref()
     }
 
     /// Opens the window on the `kind` history, with `current` as the last
@@ -63,13 +63,13 @@ impl Vim {
         vim.options = self.options.clone();
         let last = line_count(buffer.text()).saturating_sub(1);
         vim.set_cursor(line_start(buffer.text(), last));
-        self.cmdwin = Some(Box::new(CmdWindow { kind, buffer, vim }));
+        self.cmd.cmdwin = Some(Box::new(CmdWindow { kind, buffer, vim }));
     }
 
     /// A key while the window is open. The note isn't touched until a line
     /// runs.
     pub(crate) fn cmd_window_key(&mut self, key: Key, buf: &mut Buffer) {
-        let Some(mut win) = self.cmdwin.take() else {
+        let Some(mut win) = self.cmd.cmdwin.take() else {
             return;
         };
         let mode = win.vim.mode();
@@ -99,7 +99,7 @@ impl Vim {
         {
             return;
         }
-        self.cmdwin = Some(win);
+        self.cmd.cmdwin = Some(win);
     }
 }
 

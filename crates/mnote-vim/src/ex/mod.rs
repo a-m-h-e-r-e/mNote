@@ -289,8 +289,9 @@ impl Vim {
 
     /// The pattern to highlight in the note, if search highlighting is on.
     pub fn search_highlight(&self) -> Option<&str> {
-        self.search_highlight
-            .then_some(self.last_search.as_deref())
+        self.search
+            .search_highlight
+            .then_some(self.search.last_search.as_deref())
             .flatten()
     }
 
@@ -298,7 +299,8 @@ impl Vim {
     /// means the last search (`E35` if there was none).
     pub fn compile(&self, source: &str) -> Result<Pattern, ExError> {
         let source = if source.is_empty() {
-            self.last_search
+            self.search
+                .last_search
                 .clone()
                 .ok_or_else(|| ExError::new(35, "No previous regular expression"))?
         } else {
@@ -428,7 +430,7 @@ impl Vim {
             }
             "nohlsearch" => {
                 no_args(args)?;
-                self.search_highlight = false;
+                self.search.search_highlight = false;
                 Ok(ExOutcome::default())
             }
             "set" => {
@@ -649,6 +651,7 @@ impl Vim {
             // `:s` or `:&` alone (or with flags) repeats the last substitute.
             _ => {
                 let (p, r, flags) = self
+                    .search
                     .last_substitute
                     .clone()
                     .ok_or_else(|| ExError::new(35, "No previous regular expression"))?;
@@ -679,7 +682,11 @@ impl Vim {
             pattern = Pattern::new(&pattern.source, flags.contains('i'), false)
                 .map_err(|e| ExError::invalid_pattern(&e.0))?;
         }
-        let previous = self.last_substitute.as_ref().map(|(_, r, _)| r.clone());
+        let previous = self
+            .search
+            .last_substitute
+            .as_ref()
+            .map(|(_, r, _)| r.clone());
         let replacement = Replacement::new(&replacement_src, previous.as_deref());
 
         let text = buf.text();
@@ -693,7 +700,7 @@ impl Vim {
         }
 
         self.remember_search(&pattern);
-        self.last_substitute = Some((
+        self.search.last_substitute = Some((
             pattern.source.clone(),
             replacement_src,
             flags.replace('&', ""),
@@ -1072,16 +1079,20 @@ fn map_modes(name: &str) -> &'static str {
 impl Vim {
     fn mapping_table(&mut self, mode: char) -> &mut crate::state::MapTable {
         match mode {
-            'n' => &mut self.nmaps,
-            'v' => &mut self.vmaps,
-            _ => &mut self.imaps,
+            'n' => &mut self.maps.nmaps,
+            'v' => &mut self.maps.vmaps,
+            _ => &mut self.maps.imaps,
         }
     }
 
     /// `:map` and friends with no arguments: each mapping as `n  lhs  rhs`.
     fn list_mappings(&self, modes: &str) -> Vec<String> {
         let mut list = Vec::new();
-        for (mode, table) in [('n', &self.nmaps), ('v', &self.vmaps), ('i', &self.imaps)] {
+        for (mode, table) in [
+            ('n', &self.maps.nmaps),
+            ('v', &self.maps.vmaps),
+            ('i', &self.maps.imaps),
+        ] {
             if !modes.contains(mode) {
                 continue;
             }

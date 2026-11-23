@@ -176,6 +176,82 @@ pub trait ScreenRows {
     fn row_starts(&self, line: usize) -> Vec<usize>;
 }
 
+/// Mappings: `:map` and friends, and keys waiting to become one.
+pub(crate) struct Mappings {
+    /// Insert-mode mappings (`:imap`): keys typed, keys they become. `jk`
+    /// to `<Esc>` is there by default.
+    pub imaps: MapTable,
+    /// NORMAL and VISUAL mappings (`:nmap`, `:vmap`), non-recursive.
+    pub nmaps: MapTable,
+    pub vmaps: MapTable,
+    /// Keys typed in NORMAL or VISUAL that may yet become a mapping.
+    pub map_pending: Vec<Key>,
+    /// Keys typed in insert mode that start a mapping; they're already in
+    /// the text and come out again if the mapping completes.
+    pub imap_pending: Vec<Key>,
+    /// Feeding a mapping's keys: they aren't mapped again.
+    pub in_mapping: bool,
+}
+
+impl Default for Mappings {
+    fn default() -> Self {
+        Mappings {
+            imaps: vec![(
+                vec![Key::Char('j'), Key::Char('k')],
+                MapRhs::Keys(vec![Key::Esc]),
+            )],
+            nmaps: Vec::new(),
+            vmaps: Vec::new(),
+            map_pending: Vec::new(),
+            imap_pending: Vec::new(),
+            in_mapping: false,
+        }
+    }
+}
+
+/// The last search and substitute, for `n`, highlights and `:&`.
+pub(crate) struct SearchState {
+    /// The last search pattern (`/`, `?`, `:s`, `:g`), for `n` and `:s//`.
+    pub last_search: Option<String>,
+    /// Whether matches of the last search are highlighted (`:noh` clears).
+    pub search_highlight: bool,
+    /// The last `:s` (pattern, replacement, flags), for `:s` and `:&`.
+    pub last_substitute: Option<(String, String, String)>,
+    /// The last search compiled, for `n`, `N` and highlighting.
+    pub search_pattern: Option<crate::ex::pattern::Pattern>,
+    /// Direction of the last `/` (true) or `?` search.
+    pub search_forward: bool,
+}
+
+impl Default for SearchState {
+    fn default() -> Self {
+        SearchState {
+            last_search: None,
+            search_highlight: false,
+            last_substitute: None,
+            search_pattern: None,
+            search_forward: true,
+        }
+    }
+}
+
+/// The command line: what's being typed, its preview, the last message, histories, completion and the command-line window.
+#[derive(Default)]
+pub(crate) struct CmdlineState {
+    /// The line being typed in command mode, and its live preview.
+    pub cmdline: Option<crate::ex::cmdline::CommandLine>,
+    pub preview: Option<crate::ex::cmdline::Preview>,
+    /// The last command's message, until the next key.
+    pub message: Option<crate::ex::cmdline::Message>,
+    /// An app command from the last command line, until the app takes it.
+    pub app_command: Option<crate::ex::AppCommand>,
+    /// Lines run from the command line, oldest first.
+    pub ex_history: Vec<String>,
+    pub search_history: Vec<String>,
+    pub completer: Option<Box<dyn crate::ex::cmdline::Completer>>,
+    pub cmdwin: Option<Box<crate::ex::cmdwin::CmdWindow>>,
+}
+
 /// Vim's state for one editor or text input.
 pub struct Vim {
     pub(crate) mode: Mode,
@@ -190,23 +266,9 @@ pub struct Vim {
     pub(crate) registers: Registers,
     pub(crate) marks: HashMap<char, usize>,
     pub(crate) options: crate::ex::Options,
-    /// The last search pattern (`/`, `?`, `:s`, `:g`), for `n` and `:s//`.
-    pub(crate) last_search: Option<String>,
-    /// Whether matches of the last search are highlighted (`:noh` clears).
-    pub(crate) search_highlight: bool,
-    /// The last `:s` (pattern, replacement, flags), for `:s` and `:&`.
-    pub(crate) last_substitute: Option<(String, String, String)>,
     /// Line anchors `:g` and `:normal` walk; edits keep them on their lines,
     /// and a deleted line's anchor becomes `None`.
     pub(crate) anchors: crate::anchors::Anchors,
-    /// Insert-mode mappings (`:imap`): keys typed, keys they become. `jk`
-    /// to `<Esc>` is there by default.
-    pub(crate) imaps: MapTable,
-    /// NORMAL and VISUAL mappings (`:nmap`, `:vmap`), non-recursive.
-    pub(crate) nmaps: MapTable,
-    pub(crate) vmaps: MapTable,
-    /// Keys typed in NORMAL or VISUAL that may yet become a mapping.
-    map_pending: Vec<Key>,
     /// Lines in a page, for Page Up/Down and `⌃f` `⌃b` `⌃d` `⌃u` (the app
     /// sets it from the window).
     page: usize,
@@ -214,27 +276,6 @@ pub struct Vim {
     screen_rows: Option<Box<dyn ScreenRows>>,
     /// Plain `j` / `k` move by screen row (config.toml's `wrap_motion`).
     wrap_motion: bool,
-    /// Keys typed in insert mode that start a mapping; they're already in
-    /// the text and come out again if the mapping completes.
-    imap_pending: Vec<Key>,
-    /// Feeding a mapping's keys: they aren't mapped again.
-    in_mapping: bool,
-    /// The last search compiled, for `n`, `N` and highlighting.
-    pub(crate) search_pattern: Option<crate::ex::pattern::Pattern>,
-    /// Direction of the last `/` (true) or `?` search.
-    pub(crate) search_forward: bool,
-    /// The line being typed in command mode, and its live preview.
-    pub(crate) cmdline: Option<crate::ex::cmdline::CommandLine>,
-    pub(crate) preview: Option<crate::ex::cmdline::Preview>,
-    /// The last command's message, until the next key.
-    pub(crate) message: Option<crate::ex::cmdline::Message>,
-    /// An app command from the last command line, until the app takes it.
-    pub(crate) app_command: Option<crate::ex::AppCommand>,
-    /// Lines run from the command line, oldest first.
-    pub(crate) ex_history: Vec<String>,
-    pub(crate) search_history: Vec<String>,
-    pub(crate) completer: Option<Box<dyn crate::ex::cmdline::Completer>>,
-    pub(crate) cmdwin: Option<Box<crate::ex::cmdwin::CmdWindow>>,
     insert: Option<InsertSession>,
     replace: Option<ReplaceSession>,
     /// Keys of the command being typed, and of the last change, for `.`.
@@ -245,6 +286,9 @@ pub struct Vim {
     visual_in_command: bool,
     /// Buffer revision when the current command started.
     command_revision: u64,
+    pub(crate) maps: Mappings,
+    pub(crate) search: SearchState,
+    pub(crate) cmd: CmdlineState,
 }
 
 impl std::fmt::Debug for Vim {
@@ -272,38 +316,19 @@ impl Default for Vim {
             registers: Registers::default(),
             marks: HashMap::new(),
             options: crate::ex::Options::default(),
-            last_search: None,
-            search_highlight: false,
-            last_substitute: None,
             anchors: crate::anchors::Anchors::default(),
             page: 20,
             screen_rows: None,
             wrap_motion: false,
-            imaps: vec![(
-                vec![Key::Char('j'), Key::Char('k')],
-                MapRhs::Keys(vec![Key::Esc]),
-            )],
-            imap_pending: Vec::new(),
-            nmaps: Vec::new(),
-            vmaps: Vec::new(),
-            map_pending: Vec::new(),
-            in_mapping: false,
-            search_pattern: None,
-            search_forward: true,
-            cmdline: None,
-            preview: None,
-            message: None,
-            app_command: None,
-            ex_history: Vec::new(),
-            search_history: Vec::new(),
-            completer: None,
-            cmdwin: None,
             insert: None,
             replace: None,
             keys: Vec::new(),
             last_change: None,
             visual_in_command: false,
             command_revision: 0,
+            maps: Mappings::default(),
+            search: SearchState::default(),
+            cmd: CmdlineState::default(),
         }
     }
 }
@@ -403,7 +428,7 @@ impl Vim {
     /// Whether a key sequence is half typed (shown in the status line).
     pub fn is_pending(&self) -> bool {
         self.pending != Pending::None
-            || !self.map_pending.is_empty()
+            || !self.maps.map_pending.is_empty()
             || self.count.is_some()
             || self.op.is_some()
             || self.register.is_some()
@@ -432,8 +457,8 @@ impl Vim {
             self.command_revision = buf.revision();
         }
         self.keys.push(key);
-        self.message = None;
-        if self.cmdwin.is_some() {
+        self.cmd.message = None;
+        if self.cmd.cmdwin.is_some() {
             self.cmd_window_key(key, buf);
             return Effect::Handled;
         }
@@ -460,15 +485,19 @@ impl Vim {
     /// be one run as typed.
     fn normal_mapped(&mut self, key: Key, buf: &mut Buffer) -> Effect {
         let visual = self.mode.is_visual();
-        let mappable = !self.in_mapping
+        let mappable = !self.maps.in_mapping
             && self.op.is_none()
             && self.pending == Pending::None
             && self.register.is_none();
-        let table = if visual { &self.vmaps } else { &self.nmaps };
-        if self.map_pending.is_empty() && (!mappable || table.is_empty()) {
+        let table = if visual {
+            &self.maps.vmaps
+        } else {
+            &self.maps.nmaps
+        };
+        if self.maps.map_pending.is_empty() && (!mappable || table.is_empty()) {
             return self.normal_key(key, buf);
         }
-        let mut typed = std::mem::take(&mut self.map_pending);
+        let mut typed = std::mem::take(&mut self.maps.map_pending);
         typed.push(key);
         if let Some(rhs) = table
             .iter()
@@ -481,7 +510,7 @@ impl Vim {
             .iter()
             .any(|(lhs, _)| lhs.len() > typed.len() && lhs.starts_with(&typed))
         {
-            self.map_pending = typed;
+            self.maps.map_pending = typed;
             return Effect::Handled;
         }
         self.run_unmapped(typed, buf)
@@ -510,12 +539,12 @@ impl Vim {
                 return Effect::Handled;
             }
         };
-        self.in_mapping = true;
+        self.maps.in_mapping = true;
         let mut effect = Effect::Handled;
         for key in keys {
             effect = self.handle_key(*key, buf);
         }
-        self.in_mapping = false;
+        self.maps.in_mapping = false;
         effect
     }
 
@@ -526,10 +555,10 @@ impl Vim {
         self.cancel();
         let revision = buf.revision();
         let result = self.execute(line, buf).map(|outcome| {
-            self.app_command = outcome.app;
+            self.cmd.app_command = outcome.app;
             outcome.message
         });
-        self.message = match result {
+        self.cmd.message = match result {
             Ok(Some(text)) => Some(crate::ex::cmdline::Message {
                 text,
                 error: false,
@@ -553,12 +582,12 @@ impl Vim {
     /// Whether NORMAL or VISUAL keys wait to see if they become a mapping;
     /// the app gives up on them after a second ([`Vim::flush_mapping`]).
     pub fn map_pending(&self) -> bool {
-        !self.map_pending.is_empty()
+        !self.maps.map_pending.is_empty()
     }
 
     /// Runs the waiting keys as typed (the wait for a mapping timed out).
     pub fn flush_mapping(&mut self, buf: &mut Buffer) -> Effect {
-        let typed = std::mem::take(&mut self.map_pending);
+        let typed = std::mem::take(&mut self.maps.map_pending);
         if typed.is_empty() {
             return Effect::Handled;
         }
@@ -568,10 +597,10 @@ impl Vim {
 
     /// Forgets every mapping (before config.toml's are applied).
     pub fn clear_mappings(&mut self) {
-        self.imaps.clear();
-        self.nmaps.clear();
-        self.vmaps.clear();
-        self.map_pending.clear();
+        self.maps.imaps.clear();
+        self.maps.nmaps.clear();
+        self.maps.vmaps.clear();
+        self.maps.map_pending.clear();
     }
 
     /// An insert-mode key, through the `:imap` mappings. A key that may
@@ -579,12 +608,13 @@ impl Vim {
     /// keys come out again and the mapping's keys run instead (so `jk`
     /// leaves insert mode with no `j` left behind).
     fn insert_mapped(&mut self, key: Key, buf: &mut Buffer) -> Effect {
-        if self.in_mapping || self.imaps.is_empty() {
+        if self.maps.in_mapping || self.maps.imaps.is_empty() {
             return self.insert_key(key, buf);
         }
-        let mut typed = std::mem::take(&mut self.imap_pending);
+        let mut typed = std::mem::take(&mut self.maps.imap_pending);
         typed.push(key);
         if let Some(rhs) = self
+            .maps
             .imaps
             .iter()
             .find(|(lhs, _)| *lhs == typed)
@@ -596,12 +626,13 @@ impl Vim {
             return self.run_mapping(&rhs, buf);
         }
         let prefix = |keys: &[Key]| {
-            self.imaps
+            self.maps
+                .imaps
                 .iter()
                 .any(|(lhs, _)| lhs.len() > keys.len() && lhs.starts_with(keys))
         };
         if matches!(key, Key::Char(_)) && prefix(&typed) {
-            self.imap_pending = typed;
+            self.maps.imap_pending = typed;
             return self.insert_key(key, buf);
         }
         if typed.len() > 1 {
@@ -893,7 +924,7 @@ impl Vim {
     pub fn click(&mut self, pos: usize, buf: &mut Buffer) {
         let text = buf.text();
         let pos = pos.min(text.len_chars());
-        if self.cmdline.is_some() {
+        if self.cmd.cmdline.is_some() {
             return;
         }
         match self.mode {
@@ -922,7 +953,7 @@ impl Vim {
     /// line if `linewise`: a mouse drag, double or triple click. An insert
     /// ends first.
     pub fn select(&mut self, anchor: usize, cursor: usize, linewise: bool, buf: &mut Buffer) {
-        if self.cmdline.is_some() {
+        if self.cmd.cmdline.is_some() {
             return;
         }
         if self.mode == Mode::Insert {
@@ -1240,7 +1271,7 @@ impl Vim {
                     Some(id) => return self.operator_key(Operator::Func(id), buf),
                     None => {
                         self.cancel();
-                        self.message = Some(crate::ex::cmdline::Message {
+                        self.cmd.message = Some(crate::ex::cmdline::Message {
                             text: "E774: 'operatorfunc' is empty".into(),
                             error: true,
                             line: None,
@@ -1269,7 +1300,7 @@ impl Vim {
             // `gd` follows the link under the cursor: the app does that.
             (Pending::G, Key::Char('d')) => {
                 self.cancel();
-                self.app_command = Some(crate::ex::AppCommand::new("follow"));
+                self.cmd.app_command = Some(crate::ex::AppCommand::new("follow"));
                 return Effect::Handled;
             }
             (Pending::G, Key::Char(c @ ('u' | 'U' | '~'))) => {
@@ -1936,7 +1967,7 @@ impl Vim {
         self.count = None;
         let command = if everywhere { "%&&" } else { "&" };
         if let Err(err) = self.execute(command, buf) {
-            self.message = Some(crate::ex::cmdline::Message {
+            self.cmd.message = Some(crate::ex::cmdline::Message {
                 text: err.to_string(),
                 error: true,
                 line: None,
@@ -2093,7 +2124,7 @@ impl Vim {
     }
 
     pub(crate) fn enter(&mut self, mode: Mode, text: &Rope) {
-        self.imap_pending.clear();
+        self.maps.imap_pending.clear();
         if mode.is_visual() && !self.mode.is_visual() {
             self.anchor = self.cursor;
             self.visual_in_command = true;

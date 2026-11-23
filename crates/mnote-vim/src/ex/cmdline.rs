@@ -179,24 +179,24 @@ impl Preview {
 impl Vim {
     /// The line being typed, while in command mode.
     pub fn command_line(&self) -> Option<&CommandLine> {
-        self.cmdline.as_ref()
+        self.cmd.cmdline.as_ref()
     }
 
     /// The live preview of the line being typed.
     pub fn preview(&self) -> Option<&Preview> {
-        self.preview.as_ref()
+        self.cmd.preview.as_ref()
     }
 
     /// The message from the last command, shown until the next key.
     pub fn message(&self) -> Option<&Message> {
-        self.message.as_ref()
+        self.cmd.message.as_ref()
     }
 
     /// A command the app should carry out (`:w`, `:q`, …), once.
     /// Shows `text` where command-line messages go, until the next key (for
     /// the app's own listings, such as `:keys`).
     pub fn show_message(&mut self, text: String) {
-        self.message = Some(Message {
+        self.cmd.message = Some(Message {
             text,
             error: false,
             line: None,
@@ -204,28 +204,29 @@ impl Vim {
     }
 
     pub fn take_app_command(&mut self) -> Option<AppCommand> {
-        self.app_command.take()
+        self.cmd.app_command.take()
     }
 
     /// The pattern to highlight in the note after a search, until `:noh`.
     pub fn highlight_pattern(&self) -> Option<&Pattern> {
-        self.search_highlight
-            .then_some(self.search_pattern.as_ref())
+        self.search
+            .search_highlight
+            .then_some(self.search.search_pattern.as_ref())
             .flatten()
     }
 
     /// Remembers `pattern` for `n`, `N`, `:s//` and highlighting.
     pub(crate) fn remember_search(&mut self, pattern: &Pattern) {
-        self.last_search = Some(pattern.source.clone());
-        self.search_pattern = Some(pattern.clone());
-        self.search_highlight = true;
+        self.search.last_search = Some(pattern.source.clone());
+        self.search.search_pattern = Some(pattern.clone());
+        self.search.search_highlight = true;
     }
 
     /// Compiles the last search again after `ignorecase` or `smartcase`
     /// changed.
     pub(crate) fn recompile_search(&mut self) {
-        if let Some(source) = self.last_search.clone() {
-            self.search_pattern = self.compile(&source).ok();
+        if let Some(source) = self.search.last_search.clone() {
+            self.search.search_pattern = self.compile(&source).ok();
         }
     }
 
@@ -233,20 +234,20 @@ impl Vim {
     /// mode).
     pub(crate) fn open_command_line(&mut self, kind: CommandKind, text: &str, buf: &Buffer) {
         self.enter(Mode::Command, buf.text());
-        self.cmdline = Some(CommandLine::new(kind, text));
+        self.cmd.cmdline = Some(CommandLine::new(kind, text));
         self.update_preview(buf);
     }
 
     /// Plugs in note paths for completion.
     pub fn set_completer(&mut self, completer: Box<dyn Completer>) {
-        self.completer = Some(completer);
+        self.cmd.completer = Some(completer);
     }
 
     /// The `:` or search history, oldest first.
     pub fn history(&self, kind: CommandKind) -> &[String] {
         match kind {
-            CommandKind::Ex => &self.ex_history,
-            CommandKind::Search { .. } => &self.search_history,
+            CommandKind::Ex => &self.cmd.ex_history,
+            CommandKind::Search { .. } => &self.cmd.search_history,
         }
     }
 
@@ -255,8 +256,8 @@ impl Vim {
             return;
         }
         let history = match kind {
-            CommandKind::Ex => &mut self.ex_history,
-            CommandKind::Search { .. } => &mut self.search_history,
+            CommandKind::Ex => &mut self.cmd.ex_history,
+            CommandKind::Search { .. } => &mut self.cmd.search_history,
         };
         history.retain(|h| h != text);
         history.push(text.to_owned());
@@ -267,7 +268,7 @@ impl Vim {
 
     /// A key typed in command mode.
     pub(crate) fn command_key(&mut self, key: Key, buf: &mut Buffer) {
-        let Some(mut line) = self.cmdline.take() else {
+        let Some(mut line) = self.cmd.cmdline.take() else {
             self.enter(Mode::Normal, buf.text());
             return;
         };
@@ -343,7 +344,7 @@ impl Vim {
 
     /// `⌘V` on the command line: the text at the caret, on one line.
     pub(crate) fn paste_into_command_line(&mut self, text: &str, buf: &mut Buffer) -> bool {
-        let Some(mut line) = self.cmdline.take() else {
+        let Some(mut line) = self.cmd.cmdline.take() else {
             return false;
         };
         line.insert(&text.replace(['\r', '\n'], " "));
@@ -353,14 +354,17 @@ impl Vim {
 
     /// Puts the line back after an edit and refreshes the preview.
     fn edited(&mut self, line: CommandLine, buf: &Buffer) {
-        self.cmdline = Some(line);
+        self.cmd.cmdline = Some(line);
         self.update_preview(buf);
     }
 
     /// Whether `⌃r` is waiting for a register name, so the app can read the
     /// system clipboard first if it's `+` or `*`.
     pub fn awaits_register(&self) -> bool {
-        self.cmdline.as_ref().is_some_and(|l| l.register_pending)
+        self.cmd
+            .cmdline
+            .as_ref()
+            .is_some_and(|l| l.register_pending)
     }
 
     /// What `⌃r {key}` pastes: a register, `:` the last command, `/` the
@@ -369,8 +373,8 @@ impl Vim {
     fn register_text(&mut self, key: Key, buf: &Buffer) -> Option<String> {
         let text = match key {
             Key::Ctrl('w') => word_under(buf.text(), self.cursor)?,
-            Key::Char(':') => self.ex_history.last()?.clone(),
-            Key::Char('/') => self.last_search.clone()?,
+            Key::Char(':') => self.cmd.ex_history.last()?.clone(),
+            Key::Char('/') => self.search.last_search.clone()?,
             Key::Char(c) if crate::registers::is_register_name(c) => {
                 self.registers.get(Some(c))?.text
             }
@@ -414,11 +418,11 @@ impl Vim {
     /// The first `⇥`: completes the word before the caret. One candidate is
     /// filled in; several open the popup with the first one chosen.
     fn complete(&mut self, mut line: CommandLine, buf: &Buffer) {
-        let mut completer = self.completer.take();
+        let mut completer = self.cmd.completer.take();
         let found = complete::candidates(&line.text, line.cursor, &self.options, || {
             completer.as_mut().map(|c| c.paths()).unwrap_or_default()
         });
-        self.completer = completer;
+        self.cmd.completer = completer;
         if let Some((start, items)) = found.filter(|(_, items)| !items.is_empty()) {
             let original = line.text[start..line.cursor].to_owned();
             if items.len() == 1 {
@@ -461,15 +465,15 @@ impl Vim {
     }
 
     fn close_command_line(&mut self, buf: &Buffer) {
-        self.cmdline = None;
-        self.preview = None;
+        self.cmd.cmdline = None;
+        self.cmd.preview = None;
         self.enter(Mode::Normal, buf.text());
     }
 
     /// `enter`: runs the line (typed, or picked in the command-line window).
     pub(crate) fn run_line(&mut self, mut line: CommandLine, buf: &mut Buffer) {
-        self.cmdline = None;
-        self.preview = None;
+        self.cmd.cmdline = None;
+        self.cmd.preview = None;
         self.enter(Mode::Normal, buf.text());
         line.completion = None;
         line.history = None;
@@ -477,12 +481,12 @@ impl Vim {
         self.remember_line(line.kind, &line.text);
         let result = match line.kind {
             CommandKind::Ex => self.execute(&line.text, buf).map(|outcome| {
-                self.app_command = outcome.app;
+                self.cmd.app_command = outcome.app;
                 outcome.message
             }),
             CommandKind::Search { forward } => self.search(&line.text, forward, buf),
         };
-        self.message = match result {
+        self.cmd.message = match result {
             Ok(Some(text)) => Some(Message {
                 text,
                 error: false,
@@ -509,7 +513,7 @@ impl Vim {
         let (source, _offset) = split_delimited(input, delim);
         let pattern = self.compile(&source)?;
         self.remember_search(&pattern);
-        self.search_forward = forward;
+        self.search.search_forward = forward;
         self.jump_to_match(1, false, buf)
     }
 
@@ -517,14 +521,14 @@ impl Vim {
     pub(crate) fn search_next(&mut self, reverse: bool, count: usize, buf: &mut Buffer) {
         match self.jump_to_match(count, reverse, buf) {
             Ok(text) => {
-                self.message = text.map(|text| Message {
+                self.cmd.message = text.map(|text| Message {
                     text,
                     error: false,
                     line: None,
                 })
             }
             Err(err) => {
-                self.message = Some(Message {
+                self.cmd.message = Some(Message {
                     text: err.to_string(),
                     error: true,
                     line: None,
@@ -541,11 +545,11 @@ impl Vim {
         reverse: bool,
         buf: &mut Buffer,
     ) -> Result<Option<String>, ExError> {
-        let Some(pattern) = self.search_pattern.clone() else {
+        let Some(pattern) = self.search.search_pattern.clone() else {
             return Err(ExError::new(35, "No previous regular expression"));
         };
-        self.search_highlight = true;
-        let forward = self.search_forward != reverse;
+        self.search.search_highlight = true;
+        let forward = self.search.search_forward != reverse;
         let text = buf.text();
         let mut pos = self.cursor;
         let mut wrapped = false;
@@ -572,12 +576,12 @@ impl Vim {
 
     /// Works out the preview for the line being typed.
     fn update_preview(&mut self, buf: &Buffer) {
-        self.preview = None;
-        let Some(line) = self.cmdline.clone() else {
+        self.cmd.preview = None;
+        let Some(line) = self.cmd.cmdline.clone() else {
             return;
         };
         let text = buf.text();
-        self.preview = match line.kind {
+        self.cmd.preview = match line.kind {
             CommandKind::Search { forward } => {
                 let (source, _) = split_delimited(&line.text, line.kind.prefix());
                 if source.is_empty() {
@@ -615,19 +619,23 @@ impl Vim {
         };
         let delim = cmd.args.chars().next().filter(|&c| is_delimiter(c))?;
         let (source, rest) = split_found(&cmd.args[delim.len_utf8()..], delim);
-        if source.is_empty() && self.last_search.is_none() {
+        if source.is_empty() && self.search.last_search.is_none() {
             return None;
         }
 
         // Resolving the range may run a search address; that mustn't count
         // as a search yet.
         let saved = (
-            self.last_search.clone(),
-            self.search_pattern.clone(),
-            self.search_highlight,
+            self.search.last_search.clone(),
+            self.search.search_pattern.clone(),
+            self.search.search_highlight,
         );
         let range = self.lines(&cmd, text, default);
-        (self.last_search, self.search_pattern, self.search_highlight) = saved;
+        (
+            self.search.last_search,
+            self.search.search_pattern,
+            self.search.search_highlight,
+        ) = saved;
         let (first, last) = range.ok()?;
 
         let mut pattern = self.compile(&source).ok()?;
@@ -651,7 +659,11 @@ impl Vim {
         };
         match replacement {
             Some((replacement, flags)) if !flags.contains('n') => {
-                let previous = self.last_substitute.as_ref().map(|(_, r, _)| r.as_str());
+                let previous = self
+                    .search
+                    .last_substitute
+                    .as_ref()
+                    .map(|(_, r, _)| r.as_str());
                 let replacement = Replacement::new(&replacement, previous);
                 let plan = plan_substitute(
                     text,
@@ -1172,7 +1184,7 @@ mod tests {
         let preview = vim.preview().expect("current line only");
         assert_eq!((preview.lines, preview.substitutions.len()), ((0, 0), 1));
         assert!(
-            vim.last_search.is_none(),
+            vim.search.last_search.is_none(),
             "previews don't count as searches"
         );
     }
