@@ -7,6 +7,7 @@
 
 mod autosave;
 mod history;
+mod marks;
 mod syntax;
 
 use std::fmt;
@@ -15,6 +16,7 @@ use std::ops::Range;
 pub use autosave::Autosave;
 pub use history::Change;
 use history::{History, Step};
+pub use marks::{Mark, MarkKind, Marks};
 use ropey::Rope;
 pub use syntax::drop_tree_later;
 use syntax::{Syntax, point_at};
@@ -69,6 +71,8 @@ pub struct Buffer {
     revision: u64,
     /// Lines touched since the last [`take_changed_lines`](Self::take_changed_lines).
     changed: Option<ChangedLines>,
+    /// Decorations, moved by every edit.
+    marks: Marks,
 }
 
 /// Which lines changed since a view last looked, as the number of unchanged
@@ -92,7 +96,18 @@ impl Buffer {
             syntax: Syntax::markdown(),
             revision: 0,
             changed: None,
+            marks: Marks::default(),
         }
+    }
+
+    /// The buffer's decorations.
+    pub fn marks(&self) -> &Marks {
+        &self.marks
+    }
+
+    /// Changes the decorations (add, remove, clear a namespace).
+    pub fn marks_mut(&mut self) -> &mut Marks {
+        &mut self.marks
     }
 
     /// Opens a note from the vault.
@@ -338,6 +353,8 @@ impl Buffer {
         let removed = rope.slice(change.start..change.end).to_string();
         rope.remove(change.start..change.end);
         rope.insert(change.start, &change.text);
+        self.marks
+            .edited(change.start..change.end, change.text.chars().count());
 
         let new_end_byte = start_byte + change.text.len();
         let top = start_position.row;
@@ -526,6 +543,26 @@ mod tests {
         assert!(b.is_dirty(), "a change in progress is dirty");
         b.mark_saved();
         assert!(!b.is_dirty());
+    }
+
+    #[test]
+    fn marks_follow_edits_undo_and_redo() {
+        let mut b = Buffer::new("one two\n");
+        b.marks_mut().add(
+            "t",
+            4..7,
+            MarkKind::Highlight {
+                color: None,
+                background: Some("match".into()),
+            },
+        );
+        b.edit(0..0, ">> ", 0).expect("edit");
+        let range = |b: &Buffer| b.marks().touching(0..100).next().map(|m| m.range.clone());
+        assert_eq!(range(&b), Some(7..10));
+        b.undo();
+        assert_eq!(range(&b), Some(4..7));
+        b.redo();
+        assert_eq!(range(&b), Some(7..10));
     }
 
     #[test]

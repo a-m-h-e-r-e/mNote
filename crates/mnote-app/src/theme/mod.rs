@@ -299,6 +299,44 @@ impl ActiveTheme for App {
     }
 }
 
+impl Palette {
+    /// A colour by its token name (`"match"`, `"danger_wash"`, `"syn_link"`),
+    /// for decorations and anything else that names colours as data.
+    pub fn token(&self, name: &str) -> Option<u32> {
+        Some(match name {
+            "paper" => self.paper,
+            "chrome" => self.chrome,
+            "overlay" => self.overlay,
+            "well" => self.well,
+            "scrim" => self.scrim,
+            "line" => self.line,
+            "line_strong" => self.line_strong,
+            "ink" => self.ink,
+            "ink_2" => self.ink_2,
+            "ink_3" => self.ink_3,
+            "cursor" => self.cursor,
+            "on_cursor" => self.on_cursor,
+            "select" => self.select,
+            "select_ink" => self.select_ink,
+            "match" => self.match_,
+            "insert" => self.insert,
+            "insert_wash" => self.insert_wash,
+            "visual" => self.visual,
+            "visual_wash" => self.visual_wash,
+            "danger" => self.danger,
+            "danger_wash" => self.danger_wash,
+            "syn_heading" => self.syn_heading,
+            "syn_strong" => self.syn_strong,
+            "syn_link" => self.syn_link,
+            "syn_url" => self.syn_url,
+            "syn_marker" => self.syn_marker,
+            "syn_code" => self.syn_code,
+            "syn_keyword" => self.syn_keyword,
+            _ => return None,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

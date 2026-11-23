@@ -28,7 +28,7 @@ pub use error::{Result, VaultError};
 pub use frontmatter::Frontmatter;
 pub use index::{FolderItem, NoteEntry, NoteIndex, NoteSearch};
 pub use note_path::NotePath;
-pub use text::{Autosave, Buffer, ChangedLines, Reload, drop_tree_later};
+pub use text::{Autosave, Buffer, ChangedLines, Mark, MarkKind, Reload, drop_tree_later};
 /// The Markdown syntax tree a [`Buffer`] keeps, for the styled view.
 pub use tree_sitter::Tree as SyntaxTree;
 pub use vault::Vault;

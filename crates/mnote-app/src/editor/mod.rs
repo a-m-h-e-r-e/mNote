@@ -10,6 +10,7 @@
 //! typed, matches and `:s` replacements are painted into the note as a
 //! preview; nothing changes until `enter`.
 
+pub mod blocks;
 pub mod commands;
 pub mod events;
 mod first_run;
@@ -225,6 +226,8 @@ pub struct Editor {
     _subscriptions: Vec<Subscription>,
     /// Editor events and their subscribers.
     events: events::Bus,
+    /// Block renderers, tried in order (see `blocks`).
+    blocks: Rc<Vec<(String, blocks::BlockRenderer)>>,
 }
 
 impl Editor {
@@ -346,6 +349,7 @@ impl Editor {
         vim.set_screen_rows(Box::new(WrapRows(wraps.clone())));
         let mut editor = Editor {
             events: events::Bus::default(),
+            blocks: Rc::default(),
             lines: ListState::new(buffer.text().len_lines(), ListAlignment::Top, px(400.)),
             buffer,
             vim,
@@ -407,6 +411,7 @@ impl Editor {
             _subscriptions: subscriptions,
         };
         editor.subscribe_builtin();
+        editor.register_builtin_blocks();
         // The first snapshot opens the note (and counts its words).
         cx.notify();
         editor
@@ -1597,9 +1602,38 @@ impl Editor {
         }));
     }
 
+    /// The blame label, as a decoration at the right of the cursor line: only
+    /// for the line it's about, with blame on and not while inserting.
+    fn show_blame(&mut self) {
+        self.buffer.marks_mut().clear("blame");
+        if !self.config.git_blame || self.vim.mode() == Mode::Insert {
+            return;
+        }
+        let rope = self.buffer.text();
+        let line = line_of(rope, self.vim.cursor());
+        let Some((key, at, Some(label))) = &self.blame else {
+            return;
+        };
+        if *key != self.source.doc_key() || *at != line {
+            return;
+        }
+        let start = line_start(rope, line);
+        let label = label.to_string();
+        self.buffer.marks_mut().add(
+            "blame",
+            start..start,
+            mnote_core::MarkKind::VirtualText {
+                text: label,
+                color: "ink_3".into(),
+                right: true,
+            },
+        );
+    }
+
     /// Asks git who last changed the cursor line, once the cursor rests on
     /// it (not while typing), off the UI thread.
     fn blame_soon(&mut self, cx: &mut Context<Self>) {
+        self.show_blame();
         if !self.config.git_blame || self.vim.mode() == Mode::Insert || self.blame_task.is_some() {
             return;
         }
@@ -1645,6 +1679,7 @@ impl Editor {
             let _ = this.update(cx, |this, cx| {
                 this.blame = Some((key, line, label));
                 this.blame_task = None;
+                this.show_blame();
                 cx.notify();
             });
         }));
@@ -2223,11 +2258,15 @@ impl Editor {
         };
 
         let kind = line_kind(self.tree.as_ref(), rope, ix);
-        let in_frontmatter = |line: usize| {
-            matches!(
-                line_kind(self.tree.as_ref(), rope, line),
-                LineKind::Frontmatter { .. }
-            )
+        // Decorations on this line (see `mnote_core::text::marks`).
+        let marks: Vec<mnote_core::Mark> = if self.buffer.marks().is_empty() {
+            Vec::new()
+        } else {
+            self.buffer
+                .marks()
+                .touching(start..start + len + 1)
+                .cloned()
+                .collect()
         };
         let (shown, highlights) = self.decorate(ix, start, len, &content, p);
         let substituted = shown != content;
@@ -2241,32 +2280,25 @@ impl Editor {
         let styled_view = self.view == styled::View::Styled && !config;
         let plain_view = self.view == styled::View::Plain || config;
 
-        // Frontmatter collapses to its tags unless the cursor is inside it.
-        if let LineKind::Frontmatter { first } = kind
-            && styled_view
-            && !in_frontmatter(cursor_line)
-        {
-            if !first {
-                return div().h(px(0.)).into_any_element();
+        // Blocks (frontmatter, images, tables, and any registered) draw
+        // the line their own way in the styled view.
+        if styled_view {
+            let ctx = blocks::BlockCtx {
+                ix,
+                kind: &kind,
+                content: &content,
+                current,
+                cursor_line,
+                raw,
+                gutter: gutter_number.clone(),
+                palette: p,
+            };
+            let renderers = self.blocks.clone();
+            for (_, render) in renderers.iter() {
+                if let Some(element) = render(self, &ctx, cx) {
+                    return element;
+                }
             }
-            let head: String = rope.slice(..rope.len_chars().min(8192)).to_string();
-            let fm = mnote_core::Frontmatter::parse(&head);
-            return self.frontmatter_row(gutter_number, current, &fm.tags, p);
-        }
-
-        if let LineKind::Image { src, alt } = &kind
-            && styled_view
-            && !raw
-        {
-            return self.image_row(gutter_number, current, src, alt, p);
-        }
-
-        if let LineKind::Table { block, delimiter } = &kind
-            && styled_view
-            && !raw
-        {
-            let block = self.table_block(block.clone(), ix);
-            return self.table_row(ix, block, *delimiter, &content, gutter_number, current, p);
         }
 
         let text = if substituted { &shown } else { &content };
@@ -2305,6 +2337,43 @@ impl Editor {
                 h
             })
             .collect();
+        // Highlight decorations, under search matches where they meet.
+        let color = |name: &str| p.token(name).map(Theme::color);
+        for mark in &marks {
+            let mnote_core::MarkKind::Highlight {
+                color: fg,
+                background,
+            } = &mark.kind
+            else {
+                continue;
+            };
+            if substituted {
+                continue;
+            }
+            let from = mark.range.start.clamp(start, start + len) - start;
+            let to = mark.range.end.clamp(start, start + len) - start;
+            if to <= from {
+                continue;
+            }
+            let bytes =
+                to_shown(char_to_byte(&content, from))..to_shown(char_to_byte(&content, to));
+            if highlights
+                .iter()
+                .any(|h| h.bytes.start < bytes.end && bytes.start < h.bytes.end)
+            {
+                continue;
+            }
+            highlights.push(Highlight {
+                bytes,
+                background: background
+                    .as_deref()
+                    .and_then(color)
+                    .unwrap_or(gpui::transparent_black()),
+                color: fg.as_deref().and_then(color).unwrap_or(Theme::color(p.ink)),
+                outline: None,
+            });
+        }
+        highlights.sort_by_key(|h| h.bytes.start);
 
         // Text still being composed shows at the caret, underlined. Only the
         // cursor line has a caret (elsewhere the cursor may be before `start`).
@@ -2498,6 +2567,26 @@ impl Editor {
                 .when_some(look.height, |row, h| row.h(h).overflow_hidden())
                 .children(prefix)
                 .child(div().flex_1().min_w_0().child(line))
+                .children(marks.iter().filter_map(|m| {
+                    match &m.kind {
+                        mnote_core::MarkKind::VirtualText {
+                            text: label,
+                            color: c,
+                            right: false,
+                        } => Some(
+                            div()
+                                .flex_none()
+                                .pl(px(space::S3))
+                                .h(line_height)
+                                .flex()
+                                .items_center()
+                                .text_style(text::HINT)
+                                .text_color(color(c).unwrap_or(Theme::color(p.ink_3)))
+                                .child(SharedString::from(label.clone())),
+                        ),
+                        _ => None,
+                    }
+                }))
                 .children(look.label.clone().map(|label| {
                     div()
                         .flex_none()
@@ -2513,13 +2602,33 @@ impl Editor {
                 .into_any_element()
         };
 
-        // Who last changed the cursor line (`git_blame`), at its right.
-        let blame = current
-            .then_some(self.blame.as_ref())
-            .flatten()
-            .filter(|(key, line, _)| *key == self.source.doc_key() && *line == ix)
-            .and_then(|(_, _, label)| label.clone())
-            .filter(|_| self.config.git_blame && self.vim.mode() != Mode::Insert);
+        // Line decorations: a background, a gutter sign, text at the right.
+        let line_bg = marks.iter().find_map(|m| match &m.kind {
+            mnote_core::MarkKind::LineBackground { background } => color(background),
+            _ => None,
+        });
+        let sign = marks.iter().find_map(|m| match &m.kind {
+            mnote_core::MarkKind::Sign { text: t, color: c } => Some((
+                SharedString::from(t.clone()),
+                color(c).unwrap_or(Theme::color(p.ink_3)),
+            )),
+            _ => None,
+        });
+        let row_bg = Theme::color(if current { p.well } else { p.paper });
+        let right_text: Vec<(SharedString, gpui::Hsla)> = marks
+            .iter()
+            .filter_map(|m| match &m.kind {
+                mnote_core::MarkKind::VirtualText {
+                    text: t,
+                    color: c,
+                    right: true,
+                } => Some((
+                    SharedString::from(t.clone()),
+                    color(c).unwrap_or(Theme::color(p.ink_3)),
+                )),
+                _ => None,
+            })
+            .collect();
 
         // Line numbers in the note's own font and size, as in Zed, centred
         // on the first row of the line.
@@ -2528,11 +2637,13 @@ impl Editor {
             .relative()
             .w_full()
             .when(current, |row| row.bg(Theme::color(p.well)))
+            .when_some(line_bg, |row, bg| row.bg(bg))
             .when(self.in_visual_range(ix), |row| {
                 row.bg(Theme::color(p.select))
             })
             .child(
                 div()
+                    .relative()
                     .flex_none()
                     .w(px(size::GUTTER_W))
                     .pr(px(space::S8))
@@ -2540,6 +2651,14 @@ impl Editor {
                     .text_style(text::NOTE_BODY)
                     .line_height(look.height.unwrap_or(line_height))
                     .text_color(Theme::color(if current { p.ink } else { p.ink_3 }))
+                    .children(sign.map(|(t, c)| {
+                        div()
+                            .absolute()
+                            .left(px(space::S4))
+                            .top_0()
+                            .text_color(c)
+                            .child(t)
+                    }))
                     .child(gutter_number),
             )
             .child(
@@ -2549,7 +2668,7 @@ impl Editor {
                     .max_w(px(size::MEASURE))
                     .child(body),
             )
-            .children(blame.map(|label| {
+            .children(right_text.into_iter().map(|(label, c)| {
                 div()
                     .absolute()
                     .right_0()
@@ -2559,9 +2678,9 @@ impl Editor {
                     .items_center()
                     .pl(px(space::S4))
                     .pr(px(space::S2))
-                    .bg(Theme::color(p.well))
+                    .bg(line_bg.unwrap_or(row_bg))
                     .text_style(text::HINT)
-                    .text_color(Theme::color(p.ink_3))
+                    .text_color(c)
                     .child(label)
             }))
             .into_any_element()
