@@ -51,6 +51,8 @@ pub enum Motion {
     NextHeading,
     /// `[[`: previous Markdown heading.
     PrevHeading,
+    /// One added with [`crate::ext::register_motion`], by id.
+    Custom(u16),
 }
 
 /// A character search within the line: `f`, `t`, `F` or `T`.
@@ -118,6 +120,10 @@ impl Motion {
         past_end: bool,
     ) -> Option<Target> {
         let n = count.unwrap_or(1).max(1);
+        if let Motion::Custom(id) = self {
+            let (run, _) = crate::ext::motion(id)?;
+            return run(text, pos, n);
+        }
         let len = text.len_chars();
         let line = line_of(text, pos);
         let target = |pos| Target {
@@ -198,6 +204,8 @@ impl Motion {
                 });
                 line_start(text, to)
             }
+            // Handled above.
+            Motion::Custom(_) => return None,
             Motion::PrevHeading => {
                 // The nth heading before the cursor's line, or the first line.
                 let mut before = Vec::with_capacity(n);

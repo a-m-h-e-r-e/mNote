@@ -12,6 +12,7 @@
 
 mod anchors;
 pub mod ex;
+pub mod ext;
 mod input;
 mod keys;
 mod motion;
@@ -26,7 +27,8 @@ pub use input::{InputAction, VimInput};
 pub use keys::{Key, key_notation, parse_keys};
 pub use motion::{Find, Motion, MotionKind, Target};
 pub use registers::{Clipboard, MemoryClipboard, Register};
-pub use state::{Effect, MapRhs, Operator, ScreenRows, Vim};
+pub use state::{Effect, LastChange, MapRhs, Operator, ScreenRows, Vim};
+pub use textobj::Selection;
 
 /// The Vim mode an editor or text input is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

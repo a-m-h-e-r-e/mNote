@@ -39,6 +39,8 @@ pub enum Operator {
     Upper,
     /// `g~`: swaps upper and lower case.
     Toggle,
+    /// One added with [`crate::ext::register_operator`], by id.
+    Func(u16),
 }
 
 impl Operator {
@@ -65,6 +67,7 @@ impl Operator {
             Operator::Lower => 'u',
             Operator::Upper => 'U',
             Operator::Toggle => '~',
+            Operator::Func(id) => crate::ext::operator_line_key(id),
         }
     }
 }
@@ -153,6 +156,16 @@ impl MapRhs {
     }
 }
 
+/// What `.` repeats.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LastChange {
+    /// The keys of a change, replayed (a count replaces theirs).
+    Keys(Vec<Key>),
+    /// A command line that changed the text (a `<Cmd>` mapping's, or one an
+    /// extension asked for with [`Vim::repeat_with`]).
+    Ex(String),
+}
+
 /// Mappings for one mode: keys typed, what they run.
 pub(crate) type MapTable = Vec<(Vec<Key>, MapRhs)>;
 
@@ -226,7 +239,10 @@ pub struct Vim {
     replace: Option<ReplaceSession>,
     /// Keys of the command being typed, and of the last change, for `.`.
     keys: Vec<Key>,
-    last_change: Option<Vec<Key>>,
+    last_change: Option<LastChange>,
+    /// The command being typed went through VISUAL (its change isn't
+    /// repeated, as `.` after a visual change would need the selection).
+    visual_in_command: bool,
     /// Buffer revision when the current command started.
     command_revision: u64,
 }
@@ -286,6 +302,7 @@ impl Default for Vim {
             replace: None,
             keys: Vec::new(),
             last_change: None,
+            visual_in_command: false,
             command_revision: 0,
         }
     }
@@ -371,6 +388,13 @@ impl Vim {
         buf.end_change(self.cursor);
     }
 
+    /// Replaces `range` with `text`, keeping marks in place, as part of the
+    /// change being made (for extension operators and commands; the change
+    /// around it is the undo step).
+    pub fn edit_text(&mut self, buf: &mut Buffer, range: Range<usize>, text: &str) {
+        self.edit(buf, range, text);
+    }
+
     pub fn set_cursor(&mut self, pos: usize) {
         self.cursor = pos;
         self.want_col = None;
@@ -404,6 +428,7 @@ impl Vim {
     pub fn handle_key(&mut self, key: Key, buf: &mut Buffer) -> Effect {
         if !matches!(self.mode, Mode::Insert | Mode::Replace) && self.is_idle() {
             self.keys.clear();
+            self.visual_in_command = self.mode.is_visual();
             self.command_revision = buf.revision();
         }
         self.keys.push(key);
@@ -499,6 +524,7 @@ impl Vim {
     /// any command line it ends in NORMAL.
     fn run_mapped_command(&mut self, line: &str, buf: &mut Buffer) {
         self.cancel();
+        let revision = buf.revision();
         let result = self.execute(line, buf).map(|outcome| {
             self.app_command = outcome.app;
             outcome.message
@@ -516,6 +542,12 @@ impl Vim {
                 line: None,
             }),
         };
+        // A command that changed the text is what `.` repeats.
+        if buf.revision() != revision {
+            self.last_change = Some(LastChange::Ex(line.to_owned()));
+        }
+        self.keys.clear();
+        self.command_revision = buf.revision();
     }
 
     /// Whether NORMAL or VISUAL keys wait to see if they become a mapping;
@@ -1188,6 +1220,35 @@ impl Vim {
                 self.last_find = Some(find);
                 Motion::Find(find)
             }
+            // Extensions on `g…` keys come before the built-ins.
+            (Pending::G, Key::Char(c))
+                if crate::ext::motion_for(crate::ext::Keys::G(c)).is_some() =>
+            {
+                let id = crate::ext::motion_for(crate::ext::Keys::G(c)).unwrap_or_default();
+                Motion::Custom(id)
+            }
+            (Pending::G, Key::Char(c))
+                if crate::ext::operator_for(crate::ext::Keys::G(c)).is_some() =>
+            {
+                let id = crate::ext::operator_for(crate::ext::Keys::G(c)).unwrap_or_default();
+                return self.operator_key(Operator::Func(id), buf);
+            }
+            // `g@`: the operator named by `operatorfunc`.
+            (Pending::G, Key::Char('@')) => {
+                let name = self.options.operatorfunc.clone();
+                match crate::ext::operator_named(&name) {
+                    Some(id) => return self.operator_key(Operator::Func(id), buf),
+                    None => {
+                        self.cancel();
+                        self.message = Some(crate::ex::cmdline::Message {
+                            text: "E774: 'operatorfunc' is empty".into(),
+                            error: true,
+                            line: None,
+                        });
+                        return Effect::Handled;
+                    }
+                }
+            }
             (Pending::G, Key::Char('g')) => Motion::FirstLine,
             // `gJ` joins lines as they are, with no spaces added or removed.
             (Pending::G, Key::Char('J')) if self.op.is_none() => {
@@ -1337,6 +1398,10 @@ impl Vim {
         if self.wrap_motion && self.op.is_none() && matches!(c, 'j' | 'k') {
             return self.screen_motion(c == 'j', buf);
         }
+        // Extension motions come before the built-ins.
+        if let Some(id) = crate::ext::motion_for(crate::ext::Keys::Plain(c)) {
+            return self.run_motion(Motion::Custom(id), buf);
+        }
         if let Some(motion) = motion_for(c) {
             return self.run_motion(motion, buf);
         }
@@ -1404,6 +1469,9 @@ impl Vim {
             && (pending.op.line_key() == c || Operator::from_key(c) == Some(pending.op))
         {
             return self.operate_on_lines(buf);
+        }
+        if let Some(id) = crate::ext::operator_for(crate::ext::Keys::Plain(c)) {
+            return self.operator_key(Operator::Func(id), buf);
         }
         if let Some(op) = Operator::from_key(c) {
             return self.operator_key(op, buf);
@@ -1677,7 +1745,11 @@ impl Vim {
     fn text_object(&mut self, obj: char, around: bool, buf: &mut Buffer) -> Effect {
         let count = self.take_count().unwrap_or(1);
         let text = buf.text();
-        let Some(sel) = textobj::select(text, self.cursor, obj, around, count) else {
+        let sel = match crate::ext::text_object(obj) {
+            Some(run) => run(text, self.cursor, around, count),
+            None => textobj::select(text, self.cursor, obj, around, count),
+        };
+        let Some(sel) = sel else {
             self.cancel();
             return Effect::Handled;
         };
@@ -1804,6 +1876,18 @@ impl Vim {
                 buf.end_change(self.cursor);
                 self.done(buf, true);
             }
+            Operator::Func(id) => {
+                let Some(run) = crate::ext::operator(id) else {
+                    self.done(buf, false);
+                    return;
+                };
+                buf.begin_change(self.cursor);
+                self.cursor = range.start;
+                run(self, buf, range.clone(), linewise);
+                self.cursor = clamp_normal(buf.text(), self.cursor);
+                buf.end_change(self.cursor);
+                self.done(buf, true);
+            }
             Operator::Lower | Operator::Upper | Operator::Toggle => {
                 let changed = match op {
                     Operator::Lower => original.to_lowercase(),
@@ -1906,8 +1990,14 @@ impl Vim {
     /// `.`: replays the keys of the last change, with a new count if given.
     fn repeat_last_change(&mut self, buf: &mut Buffer) {
         let count = self.count.take();
-        let Some(mut keys) = self.last_change.clone() else {
-            return;
+        let mut keys = match self.last_change.clone() {
+            Some(LastChange::Keys(keys)) => keys,
+            Some(LastChange::Ex(line)) => {
+                self.keys.clear();
+                self.run_mapped_command(&line, buf);
+                return;
+            }
+            None => return,
         };
         if let Some(n) = count {
             let digits = keys
@@ -1951,15 +2041,19 @@ impl Vim {
     /// Ends the current command. A command that changed the text becomes the
     /// one `.` repeats (changes made from visual mode aren't repeatable).
     pub(crate) fn done(&mut self, buf: &Buffer, may_repeat: bool) {
-        if may_repeat && buf.revision() != self.command_revision && !self.keys_start_visual() {
-            self.last_change = Some(self.keys.clone());
+        let visual = self.mode.is_visual() || self.visual_in_command;
+        if may_repeat && buf.revision() != self.command_revision && !visual {
+            self.last_change = Some(LastChange::Keys(self.keys.clone()));
         }
         self.keys.clear();
+        self.visual_in_command = false;
         self.command_revision = buf.revision();
     }
 
-    fn keys_start_visual(&self) -> bool {
-        self.mode.is_visual() || self.keys.iter().any(|k| matches!(k, Key::Char('v' | 'V')))
+    /// Makes `.` run `line` (for an extension command that changed the text,
+    /// so it repeats like a built-in change).
+    pub fn repeat_with(&mut self, line: &str) {
+        self.last_change = Some(LastChange::Ex(line.to_owned()));
     }
 
     fn cancel(&mut self) {
@@ -1968,6 +2062,7 @@ impl Vim {
         self.count = None;
         self.register = None;
         self.keys.clear();
+        self.visual_in_command = false;
     }
 
     fn take_count(&mut self) -> Option<usize> {
@@ -2001,6 +2096,7 @@ impl Vim {
         self.imap_pending.clear();
         if mode.is_visual() && !self.mode.is_visual() {
             self.anchor = self.cursor;
+            self.visual_in_command = true;
         }
         if mode == Mode::Normal {
             self.cursor = clamp_normal(text, self.cursor);
@@ -2038,6 +2134,9 @@ fn motion_for(c: char) -> Option<Motion> {
 
 /// Motions that count as jumps: `''` returns to where they started.
 fn is_jump(motion: Motion) -> bool {
+    if let Motion::Custom(id) = motion {
+        return crate::ext::motion(id).is_some_and(|(_, jump)| jump);
+    }
     matches!(
         motion,
         Motion::FirstLine

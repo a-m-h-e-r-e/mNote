@@ -124,13 +124,15 @@ pub fn parse(input: &str) -> Result<Parsed<'_>, ExError> {
     })
 }
 
-/// A command's full name from what was typed: Vim's own first, then the
-/// app's (so `:s` stays `substitute` and `:sp` is the app's `split`).
+/// A command's full name from what was typed: Vim's own first, then
+/// extensions' ([`crate::ext::register_ex`]), then the app's (so `:s` stays
+/// `substitute` and `:sp` is the app's `split`).
 pub(crate) fn lookup(word: &str) -> Option<&'static str> {
     COMMANDS
         .iter()
         .find(|(full, min)| word.len() >= *min && full.starts_with(word))
         .map(|(full, _)| *full)
+        .or_else(|| crate::ext::command_lookup(word))
         .or_else(|| {
             APP.with(|app| {
                 app.borrow()
@@ -144,6 +146,9 @@ pub(crate) fn lookup(word: &str) -> Option<&'static str> {
 /// Whether `word` starts some command's name (`so` while typing `sort`).
 pub(crate) fn is_command_prefix(word: &str) -> bool {
     COMMANDS.iter().any(|(full, _)| full.starts_with(word))
+        || crate::ext::commands()
+            .iter()
+            .any(|c| c.name.starts_with(word))
         || APP.with(|app| app.borrow().iter().any(|c| c.name.starts_with(word)))
 }
 
@@ -181,8 +186,11 @@ pub(crate) fn set_app_commands(specs: Vec<super::CommandSpec>) {
     APP.with(|app| *app.borrow_mut() = std::rc::Rc::from(specs));
 }
 
-/// The app's command named `name` (its full name).
+/// The app's (or an extension's) command named `name` (its full name).
 pub(crate) fn app_command(name: &str) -> Option<super::CommandSpec> {
+    if let Some(ext) = crate::ext::command(name) {
+        return Some(ext.spec.clone());
+    }
     APP.with(|app| {
         app.borrow()
             .iter()

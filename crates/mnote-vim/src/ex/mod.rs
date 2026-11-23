@@ -171,6 +171,9 @@ pub struct Options {
     pub smartcase: bool,
     /// `relativenumber`/`rnu`: the gutter counts from the cursor.
     pub relativenumber: bool,
+    /// `operatorfunc`/`opfunc`: the operator `g@` runs (one added with
+    /// [`crate::ext::register_operator`]).
+    pub operatorfunc: String,
     /// `wrap`: long lines wrap onto more rows; off, each line is one row
     /// and the note scrolls sideways.
     pub wrap: bool,
@@ -183,6 +186,7 @@ impl Default for Options {
             ignorecase: true,
             smartcase: true,
             relativenumber: true,
+            operatorfunc: String::new(),
             wrap: true,
         }
     }
@@ -470,6 +474,24 @@ impl Vim {
                     return Err(ExError::new(31, "No such mapping"));
                 }
                 Ok(ExOutcome::default())
+            }
+            // An extension's: it runs here, on its lines.
+            name if crate::ext::command(name).is_some() => {
+                let ext = crate::ext::command(name).expect("checked");
+                if ext.spec.args == ArgKind::None {
+                    no_args(args)?;
+                }
+                let (first, last) = self.lines(&cmd, buf.text(), DefaultRange::Current)?;
+                let call = crate::ext::ExCall {
+                    lines: first..=last,
+                    args: args.to_owned(),
+                    bang: cmd.bang,
+                };
+                let run = ext.run.clone();
+                Ok(match run(self, buf, &call)? {
+                    Some(text) => ExOutcome::message(text),
+                    None => ExOutcome::default(),
+                })
             }
             name => match parse::app_command(name) {
                 // One the app registered: it runs it.
@@ -925,6 +947,18 @@ impl Vim {
                 Some(rest) if flag(&mut self.options, rest).is_some() => (true, rest),
                 _ => (false, name),
             };
+            if matches!(base, "operatorfunc" | "opfunc") {
+                match value {
+                    Some(name) => {
+                        if !name.is_empty() && crate::ext::operator_named(name).is_none() {
+                            return Err(ExError::new(117, format!("Unknown function: {name}")));
+                        }
+                        self.options.operatorfunc = name.to_owned();
+                    }
+                    None => messages.push(format!("operatorfunc={}", self.options.operatorfunc)),
+                }
+                continue;
+            }
             if matches!(base, "shiftwidth" | "sw") {
                 match value {
                     Some(v) => {

@@ -89,10 +89,12 @@ pub fn candidates(
     // Still typing the command's name: Vim's and the app's, by name.
     if trimmed.chars().all(|c| c.is_ascii_alphabetic()) {
         let app = parse::app_commands();
+        let ext = crate::ext::commands();
         let mut items: Vec<Candidate> = COMMANDS
             .iter()
             .map(|(name, detail)| (*name, *detail))
             .chain(app.iter().map(|c| (c.name, c.spec.detail.as_str())))
+            .chain(ext.iter().map(|c| (c.name, c.spec.detail.as_str())))
             .filter(|(name, _)| name.starts_with(trimmed))
             .map(|(name, detail)| Candidate {
                 text: name.to_owned(),
