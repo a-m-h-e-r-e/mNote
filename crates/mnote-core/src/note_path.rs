@@ -1,13 +1,14 @@
 //! [`NotePath`]: a checked, vault-relative path to a note.
 
 use std::fmt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use crate::error::{Result, VaultError};
 use crate::is_note;
 
-/// A path to a note, relative to the vault root, that is known to be safe:
-/// not absolute, never leaving the vault, not hidden, and ending in `.md`.
+/// A path to a note, relative to the vault root: a safe
+/// [`VaultPath`](crate::files::VaultPath) (not absolute, never leaving the
+/// vault, not hidden) whose file type is a note one (`.md`).
 ///
 /// Every vault operation takes a `NotePath`, so a bad path can't reach the
 /// file system.
@@ -17,9 +18,7 @@ pub struct NotePath(PathBuf);
 impl NotePath {
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let safe = !path.as_os_str().is_empty()
-            && path.components().all(|c| matches!(c, Component::Normal(_)))
-            && is_note(path);
+        let safe = crate::files::VaultPath::new(path).is_ok() && is_note(path);
         if safe {
             Ok(NotePath(path.to_path_buf()))
         } else {

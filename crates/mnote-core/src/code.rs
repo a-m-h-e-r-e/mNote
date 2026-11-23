@@ -6,7 +6,7 @@
 //! cache results per block; highlighting a block parses only that block.
 
 use std::ops::Range;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator};
 
@@ -49,90 +49,166 @@ struct Grammar {
     query: Query,
 }
 
-fn grammar(
-    slot: &'static OnceLock<Option<Grammar>>,
-    make: fn() -> Option<Grammar>,
-) -> Option<&'static Grammar> {
-    slot.get_or_init(make).as_ref()
-}
-
-fn load(language: Language, queries: &[&str]) -> Option<Grammar> {
+fn load(language: Language, queries: &[String]) -> Option<Grammar> {
+    if queries.is_empty() {
+        return None;
+    }
     let source = queries.join("\n");
     let query = Query::new(&language, &source)
-        .or_else(|_| Query::new(&language, queries.last().copied().unwrap_or_default()))
+        .or_else(|_| Query::new(&language, queries.last().map_or("", String::as_str)))
         .ok()?;
     Some(Grammar { language, query })
 }
 
-/// The grammar for a fence's language name, if mNote has one.
-fn for_lang(lang: &str) -> Option<&'static Grammar> {
-    static RUST: OnceLock<Option<Grammar>> = OnceLock::new();
-    static PYTHON: OnceLock<Option<Grammar>> = OnceLock::new();
-    static JS: OnceLock<Option<Grammar>> = OnceLock::new();
-    static TS: OnceLock<Option<Grammar>> = OnceLock::new();
-    static TSX: OnceLock<Option<Grammar>> = OnceLock::new();
-    static BASH: OnceLock<Option<Grammar>> = OnceLock::new();
-    static JSON: OnceLock<Option<Grammar>> = OnceLock::new();
-    match lang {
-        "rust" | "rs" => grammar(&RUST, || {
-            load(
-                tree_sitter_rust::LANGUAGE.into(),
-                &[tree_sitter_rust::HIGHLIGHTS_QUERY],
-            )
-        }),
-        "python" | "py" => grammar(&PYTHON, || {
-            load(
-                tree_sitter_python::LANGUAGE.into(),
-                &[tree_sitter_python::HIGHLIGHTS_QUERY],
-            )
-        }),
-        "javascript" | "js" | "jsx" | "mjs" => grammar(&JS, || {
-            load(
-                tree_sitter_javascript::LANGUAGE.into(),
-                &[
-                    tree_sitter_javascript::HIGHLIGHT_QUERY,
-                    tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
-                ],
-            )
-        }),
-        "typescript" | "ts" => grammar(&TS, || {
-            load(
-                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-                &[
-                    tree_sitter_javascript::HIGHLIGHT_QUERY,
-                    tree_sitter_typescript::HIGHLIGHTS_QUERY,
-                ],
-            )
-        }),
-        "tsx" => grammar(&TSX, || {
-            load(
-                tree_sitter_typescript::LANGUAGE_TSX.into(),
-                &[
-                    tree_sitter_javascript::HIGHLIGHT_QUERY,
-                    tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
-                    tree_sitter_typescript::HIGHLIGHTS_QUERY,
-                ],
-            )
-        }),
-        "bash" | "sh" | "shell" | "zsh" | "console" => grammar(&BASH, || {
-            load(
-                tree_sitter_bash::LANGUAGE.into(),
-                &[tree_sitter_bash::HIGHLIGHT_QUERY],
-            )
-        }),
-        "json" | "jsonc" => grammar(&JSON, || {
-            load(
-                tree_sitter_json::LANGUAGE.into(),
-                &[tree_sitter_json::HIGHLIGHTS_QUERY],
-            )
-        }),
-        _ => None,
+/// A language mNote can parse, and colour when it has highlight queries.
+#[derive(Debug, Clone)]
+pub struct LanguageDef {
+    /// Its name (`rust`), as filetypes and fences name it.
+    pub name: String,
+    /// Other names fences use (`rs`).
+    pub aliases: Vec<String>,
+    pub language: Language,
+    /// Highlight queries, joined in order (`javascript`'s then `jsx`'s).
+    /// None: parsed, but not coloured.
+    pub highlights: Vec<String>,
+}
+
+struct Entry {
+    def: LanguageDef,
+    /// The compiled query, on first use.
+    grammar: OnceLock<Option<Grammar>>,
+}
+
+impl Entry {
+    fn grammar(&self) -> Option<&Grammar> {
+        self.grammar
+            .get_or_init(|| load(self.def.language.clone(), &self.def.highlights))
+            .as_ref()
     }
+
+    fn named(&self, name: &str) -> bool {
+        self.def.name == name || self.def.aliases.iter().any(|a| a == name)
+    }
+}
+
+fn def(name: &str, aliases: &[&str], language: Language, highlights: &[&str]) -> LanguageDef {
+    LanguageDef {
+        name: name.into(),
+        aliases: aliases.iter().map(|a| (*a).to_owned()).collect(),
+        language,
+        highlights: highlights.iter().map(|q| (*q).to_owned()).collect(),
+    }
+}
+
+/// The languages built in: Markdown (parsed, for notes) and the code-block
+/// languages.
+fn builtin() -> Vec<LanguageDef> {
+    vec![
+        def("markdown", &["md"], tree_sitter_md::LANGUAGE.into(), &[]),
+        def(
+            "rust",
+            &["rs"],
+            tree_sitter_rust::LANGUAGE.into(),
+            &[tree_sitter_rust::HIGHLIGHTS_QUERY],
+        ),
+        def(
+            "python",
+            &["py"],
+            tree_sitter_python::LANGUAGE.into(),
+            &[tree_sitter_python::HIGHLIGHTS_QUERY],
+        ),
+        def(
+            "javascript",
+            &["js", "jsx", "mjs"],
+            tree_sitter_javascript::LANGUAGE.into(),
+            &[
+                tree_sitter_javascript::HIGHLIGHT_QUERY,
+                tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+            ],
+        ),
+        def(
+            "typescript",
+            &["ts"],
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            &[
+                tree_sitter_javascript::HIGHLIGHT_QUERY,
+                tree_sitter_typescript::HIGHLIGHTS_QUERY,
+            ],
+        ),
+        def(
+            "tsx",
+            &[],
+            tree_sitter_typescript::LANGUAGE_TSX.into(),
+            &[
+                tree_sitter_javascript::HIGHLIGHT_QUERY,
+                tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+                tree_sitter_typescript::HIGHLIGHTS_QUERY,
+            ],
+        ),
+        def(
+            "bash",
+            &["sh", "shell", "zsh", "console"],
+            tree_sitter_bash::LANGUAGE.into(),
+            &[tree_sitter_bash::HIGHLIGHT_QUERY],
+        ),
+        def(
+            "json",
+            &["jsonc"],
+            tree_sitter_json::LANGUAGE.into(),
+            &[tree_sitter_json::HIGHLIGHTS_QUERY],
+        ),
+    ]
+}
+
+/// The language registry, shared by every thread.
+fn registry() -> &'static RwLock<Vec<Arc<Entry>>> {
+    static REGISTRY: OnceLock<RwLock<Vec<Arc<Entry>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        RwLock::new(
+            builtin()
+                .into_iter()
+                .map(|def| {
+                    Arc::new(Entry {
+                        def,
+                        grammar: OnceLock::new(),
+                    })
+                })
+                .collect(),
+        )
+    })
+}
+
+/// Adds a language, or replaces the one with its name. A language is one
+/// call: a grammar (a Cargo dependency, or later one loaded at run time)
+/// and its highlight queries.
+pub fn register_language(def: LanguageDef) {
+    if let Ok(mut languages) = registry().write() {
+        languages.retain(|e| e.def.name != def.name);
+        languages.push(Arc::new(Entry {
+            def,
+            grammar: OnceLock::new(),
+        }));
+    }
+}
+
+/// The tree-sitter language called `name` (or one of its aliases), for
+/// parsing a whole file.
+pub fn language(name: &str) -> Option<Language> {
+    for_lang(name).map(|e| e.def.language.clone())
+}
+
+fn for_lang(lang: &str) -> Option<Arc<Entry>> {
+    registry()
+        .read()
+        .ok()?
+        .iter()
+        .find(|e| e.named(lang))
+        .cloned()
 }
 
 /// Whether `lang` gets colours.
 pub fn supported(lang: &str) -> bool {
-    for_lang(lang).is_some()
+    for_lang(lang).is_some_and(|e| e.grammar().is_some())
 }
 
 /// The coloured byte ranges of `code` in `lang`, in order and not
@@ -140,7 +216,8 @@ pub fn supported(lang: &str) -> bool {
 /// overlap, the first pattern in the query wins (as in tree-sitter's own
 /// highlighter).
 pub fn highlight(lang: &str, code: &str) -> Option<Vec<(Range<usize>, CodeStyle)>> {
-    let grammar = for_lang(lang)?;
+    let entry = for_lang(lang)?;
+    let grammar = entry.grammar()?;
     let mut parser = Parser::new();
     parser.set_language(&grammar.language).ok()?;
     let tree = parser.parse(code, None)?;
@@ -176,6 +253,23 @@ pub fn highlight(lang: &str, code: &str) -> Option<Vec<(Range<usize>, CodeStyle)
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_registry_names_languages_and_takes_new_ones() {
+        assert!(supported("rs") && supported("rust"));
+        assert!(!supported("markdown"), "parsed, not coloured");
+        assert!(language("markdown").is_some());
+        assert!(language("klingon").is_none());
+        register_language(LanguageDef {
+            name: "rust-registry-test".into(),
+            aliases: vec!["rrt".into()],
+            language: tree_sitter_rust::LANGUAGE.into(),
+            highlights: vec![tree_sitter_rust::HIGHLIGHTS_QUERY.into()],
+        });
+        let spans = highlight("rrt", "fn main() {}").expect("coloured");
+        assert!(spans.iter().any(|(_, s)| *s == CodeStyle::Keyword));
+    }
+
     use super::*;
 
     fn styles(lang: &str, code: &str) -> Vec<(String, CodeStyle)> {

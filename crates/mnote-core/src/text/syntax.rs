@@ -66,8 +66,14 @@ impl Syntax {
     /// Starts a Markdown parser thread, or returns `None` if the grammar can't
     /// load or the thread can't start (the buffer then works as plain text).
     pub fn markdown() -> Option<Self> {
+        Self::new(&tree_sitter_md::LANGUAGE.into())
+    }
+
+    /// Starts a parser thread for `language` (any tree-sitter grammar, such
+    /// as one from [`crate::code::language`]).
+    pub fn new(language: &tree_sitter::Language) -> Option<Self> {
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_md::LANGUAGE.into()).ok()?;
+        parser.set_language(language).ok()?;
 
         let (requests, inbox) = mpsc::channel::<Request>();
         let (outbox, results) = mpsc::channel::<Parsed>();

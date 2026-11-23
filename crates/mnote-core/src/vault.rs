@@ -82,6 +82,37 @@ impl Vault {
         NotePath::new(relative).ok()
     }
 
+    /// Every file of a known type in the vault (notes and the others
+    /// registered with [`crate::filetype::register`]), sorted by path.
+    /// Hidden files and folders are skipped, and symlinked folders aren't
+    /// followed, as for [`Vault::notes`].
+    pub fn files(&self) -> Result<Vec<crate::files::VaultPath>> {
+        let mut files = Vec::new();
+        let mut pending = vec![self.root.clone()];
+        while let Some(dir) = pending.pop() {
+            let entries = fs::read_dir(&dir).map_err(|e| VaultError::io(&dir, e))?;
+            for entry in entries {
+                let entry = entry.map_err(|e| VaultError::io(&dir, e))?;
+                if entry.file_name().to_string_lossy().starts_with('.') {
+                    continue;
+                }
+                let path = entry.path();
+                let kind = entry.file_type().map_err(|e| VaultError::io(&path, e))?;
+                if kind.is_dir() {
+                    pending.push(path);
+                } else if (kind.is_file() || (kind.is_symlink() && path.is_file()))
+                    && let Ok(relative) = path.strip_prefix(&self.root)
+                    && crate::is_known_file(relative)
+                    && let Ok(file) = crate::files::VaultPath::new(relative)
+                {
+                    files.push(file);
+                }
+            }
+        }
+        files.sort_unstable();
+        Ok(files)
+    }
+
     /// Every note in the vault, sorted by path. Hidden files and folders (such
     /// as `.obsidian/` or `.git/`) are skipped, and symlinked folders aren't
     /// followed, so a link loop can't hang the scan.
@@ -165,6 +196,37 @@ impl Vault {
 
 #[cfg(test)]
 pub(crate) mod tests {
+
+    #[test]
+    fn files_lists_every_known_type_and_notes_only_notes() {
+        crate::filetype::register(crate::filetype::Filetype {
+            name: "vault-files-test".into(),
+            extensions: vec!["vftest".into()],
+            language: None,
+            note: false,
+        });
+        let dir = TempDir::new();
+        dir.file("a.md", "# A");
+        dir.file("src/b.vftest", "b");
+        dir.file("c.unknown", "c");
+        dir.file(".hidden/d.md", "d");
+        let vault = Vault::open(&dir.0).expect("vault");
+        let files: Vec<String> = vault
+            .files()
+            .expect("files")
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(files, ["a.md", "src/b.vftest"]);
+        let notes: Vec<String> = vault
+            .notes()
+            .expect("notes")
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(notes, ["a.md"]);
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

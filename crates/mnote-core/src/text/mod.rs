@@ -88,12 +88,26 @@ pub struct ChangedLines {
 impl Buffer {
     /// A buffer holding `text`, parsed as Markdown.
     pub fn new(text: &str) -> Self {
+        Self::with_syntax(text, Syntax::markdown())
+    }
+
+    /// A buffer holding `text`, parsed as `language` (a name or alias in
+    /// [`crate::code`]'s registry); without that language, as plain text.
+    pub fn with_language(text: &str, language: &str) -> Self {
+        if language == "markdown" {
+            return Self::new(text);
+        }
+        let syntax = crate::code::language(language).and_then(|l| Syntax::new(&l));
+        Self::with_syntax(text, syntax)
+    }
+
+    fn with_syntax(text: &str, syntax: Option<Syntax>) -> Self {
         Buffer {
             rope: Rope::from_str(text),
             history: History::new(),
             pending: None,
             depth: 0,
-            syntax: Syntax::markdown(),
+            syntax,
             revision: 0,
             changed: None,
             marks: Marks::default(),
@@ -112,7 +126,12 @@ impl Buffer {
 
     /// Opens a note from the vault.
     pub fn open(vault: &Vault, note: &NotePath) -> Result<Self, VaultError> {
-        Ok(Self::new(&vault.read(note)?))
+        let text = vault.read(note)?;
+        let language = crate::filetype::for_path(note.as_path()).and_then(|f| f.language);
+        Ok(match language {
+            Some(language) => Self::with_language(&text, &language),
+            None => Self::with_syntax(&text, None),
+        })
     }
 
     /// The text. Cheap to clone if a snapshot is needed.
@@ -543,6 +562,20 @@ mod tests {
         assert!(b.is_dirty(), "a change in progress is dirty");
         b.mark_saved();
         assert!(!b.is_dirty());
+    }
+
+    #[test]
+    fn buffers_parse_their_language() {
+        let mut rust = Buffer::with_language("fn main() {}\n", "rs");
+        let tree = rust.syntax_tree_now().expect("parsed as rust");
+        assert_eq!(tree.root_node().kind(), "source_file");
+        let mut md = Buffer::with_language("# Hi\n", "markdown");
+        assert_eq!(
+            md.syntax_tree_now().expect("parsed").root_node().kind(),
+            "document"
+        );
+        let mut plain = Buffer::with_language("text\n", "klingon");
+        assert!(plain.syntax_tree_now().is_none(), "no grammar: plain text");
     }
 
     #[test]

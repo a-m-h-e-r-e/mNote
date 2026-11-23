@@ -218,10 +218,11 @@ fn new_note_path(query: &str, index: &NoteIndex) -> Option<NotePath> {
     if name.is_empty() {
         return None;
     }
-    let file = if name.ends_with(".md") || name.ends_with(".markdown") {
+    // A name that already ends in a note extension keeps it.
+    let file = if mnote_core::is_note(std::path::Path::new(name)) {
         name.to_owned()
     } else {
-        format!("{name}.md")
+        format!("{name}.{}", mnote_core::filetype::new_note_extension())
     };
     let path = NotePath::new(file).ok()?;
     index.get(&path).is_none().then_some(path)

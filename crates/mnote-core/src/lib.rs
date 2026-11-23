@@ -11,6 +11,7 @@ pub mod config;
 pub mod content;
 mod error;
 pub mod files;
+pub mod filetype;
 pub mod folder_edit;
 pub mod frontmatter;
 pub mod index;
@@ -34,21 +35,23 @@ pub use tree_sitter::Tree as SyntaxTree;
 pub use vault::Vault;
 pub use watch::{VaultEvent, VaultWatcher};
 
-/// File extensions mNote treats as notes.
-pub const NOTE_EXTENSIONS: &[&str] = &["md", "markdown"];
-
-/// Returns true when `path` looks like a note mNote should index.
+/// Returns true when `path` looks like a note mNote should index: its
+/// file type ([`filetype`]) is a note one (Markdown).
 ///
 /// Hidden files and folders (such as `.obsidian/` or `.git/`) are skipped.
 pub fn is_note(path: &Path) -> bool {
-    let hidden = path
-        .components()
-        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'));
-    let has_note_ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| NOTE_EXTENSIONS.iter().any(|n| n.eq_ignore_ascii_case(e)));
-    has_note_ext && !hidden
+    !is_hidden(path) && filetype::for_path(path).is_some_and(|f| f.note)
+}
+
+/// Returns true when `path` is a file of a known type (a note, or another
+/// registered with [`filetype::register`]), not hidden.
+pub fn is_known_file(path: &Path) -> bool {
+    !is_hidden(path) && filetype::for_path(path).is_some()
+}
+
+fn is_hidden(path: &Path) -> bool {
+    path.components()
+        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
 }
 
 #[cfg(test)]

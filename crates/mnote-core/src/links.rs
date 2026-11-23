@@ -59,10 +59,13 @@ impl Rewrites {
     }
 }
 
-/// `name.md` → (`name`, `.md`).
+/// `name.md` → (`name`, `.md`), for any note extension.
 fn split_ext(target: &str) -> (&str, &str) {
-    for ext in [".md", ".markdown"] {
-        if target.len() > ext.len() && target[target.len() - ext.len()..].eq_ignore_ascii_case(ext)
+    for ext in crate::filetype::note_extensions() {
+        let ext = format!(".{ext}");
+        if target.len() > ext.len()
+            && target.is_char_boundary(target.len() - ext.len())
+            && target[target.len() - ext.len()..].eq_ignore_ascii_case(&ext)
         {
             return target.split_at(target.len() - ext.len());
         }
@@ -96,7 +99,8 @@ impl WikiLink {
         if bare.is_empty() {
             return None;
         }
-        NotePath::new(format!("{bare}.md")).ok()
+        let ext = crate::filetype::new_note_extension();
+        NotePath::new(format!("{bare}.{ext}")).ok()
     }
 }
 

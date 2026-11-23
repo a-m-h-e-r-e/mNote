@@ -44,8 +44,16 @@ pub struct NoteEntry {
 
 impl NoteEntry {
     /// The entry for `path` with contents `text`.
+    /// Markdown notes are outlined (title, aliases, tags, headings,
+    /// links); a note file type in another language is listed by name only.
     pub fn new(path: NotePath, text: &str, modified: Option<SystemTime>) -> Self {
-        let outline = outline::outline(text);
+        let markdown = crate::filetype::for_path(path.as_path())
+            .is_none_or(|f| f.language.as_deref() == Some("markdown"));
+        let outline = if markdown {
+            outline::outline(text)
+        } else {
+            outline::Outline::default()
+        };
         NoteEntry {
             path_text: path.to_string(),
             title: outline.title.unwrap_or_else(|| path.name().to_owned()),
@@ -440,6 +448,23 @@ fn read_entry(vault: &Vault, path: NotePath) -> NoteEntry {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn notes_in_another_language_are_listed_not_outlined() {
+        crate::filetype::register(crate::filetype::Filetype {
+            name: "org-index-test".into(),
+            extensions: vec!["orgtest".into()],
+            language: Some("org".into()),
+            note: true,
+        });
+        let path = NotePath::new("plans.orgtest").expect("a note path");
+        let entry = NoteEntry::new(path, "# Heading\n#tag [[link]]\n", None);
+        assert_eq!(entry.title, "plans");
+        assert!(entry.headings.is_empty() && entry.tags.is_empty() && entry.links.is_empty());
+        let md = NoteEntry::new(NotePath::new("a.md").expect("path"), "# Heading\n", None);
+        assert_eq!(md.title, "Heading");
+    }
+
     use super::*;
     use crate::vault::tests::TempDir;
 

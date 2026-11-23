@@ -94,8 +94,12 @@ impl BacklinksPicker {
                 }
                 if index.resolve(&link_name) != Some(at) {
                     // Another note has the name: link by path.
-                    let path = entry.path.to_string();
-                    link_name = path.strip_suffix(".md").unwrap_or(&path).to_owned();
+                    link_name = entry
+                        .path
+                        .as_path()
+                        .with_extension("")
+                        .to_string_lossy()
+                        .into_owned();
                 }
                 let entries = index
                     .backlinks(at)
