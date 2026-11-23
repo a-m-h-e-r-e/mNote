@@ -11,6 +11,7 @@
 //! preview; nothing changes until `enter`.
 
 pub mod commands;
+pub mod events;
 mod first_run;
 mod ime;
 pub(crate) mod keys;
@@ -222,6 +223,8 @@ pub struct Editor {
     _watcher: Option<Box<VaultWatcher>>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
+    /// Editor events and their subscribers.
+    events: events::Bus,
 }
 
 impl Editor {
@@ -331,12 +334,18 @@ impl Editor {
                     this.save_now(cx);
                 }
             }),
+            // Every change: what it changed becomes events (see `events`).
+            cx.observe_self(|this, _| {
+                let now = this.snapshot();
+                this.events.observe(now);
+            }),
         ];
 
         let first_note = source.doc_key();
         let wraps: Rc<RefCell<std::collections::HashMap<usize, Vec<usize>>>> = Rc::default();
         vim.set_screen_rows(Box::new(WrapRows(wraps.clone())));
-        Editor {
+        let mut editor = Editor {
+            events: events::Bus::default(),
             lines: ListState::new(buffer.text().len_lines(), ListAlignment::Top, px(400.)),
             buffer,
             vim,
@@ -396,7 +405,11 @@ impl Editor {
             _watcher: None,
             _tasks: vec![redraw],
             _subscriptions: subscriptions,
-        }
+        };
+        editor.subscribe_builtin();
+        // The first snapshot opens the note (and counts its words).
+        cx.notify();
+        editor
     }
 
     // ---- input ------------------------------------------------------------
@@ -1545,7 +1558,7 @@ impl Editor {
                 Some(format!("{} isn't installed; using IBM Plex", missing.join(" and ")).into());
         }
         self.config = config;
-        cx.notify();
+        self.emit(events::EditorEvent::ConfigApplied, cx);
     }
 
     /// Counts the focused note's words in the background, at most once per
@@ -2079,12 +2092,18 @@ impl Editor {
             let path = path.clone();
             return self.save_config(&path, cx);
         }
-        let Source::Note { vault, note, .. } = &self.source else {
+        let Source::Note { note, .. } = &self.source else {
             return;
         };
         if !self.buffer.is_dirty() {
             return;
         }
+        // Subscribers may still change the note before it's written.
+        let note = note.clone();
+        self.dispatch_now(events::EditorEvent::NoteSavePre { note }, cx);
+        let Source::Note { vault, note, .. } = &self.source else {
+            return;
+        };
         match self.buffer.save(vault, note) {
             Ok(()) => {
                 self.autosave.saved();
@@ -2092,6 +2111,8 @@ impl Editor {
                 self.index
                     .borrow_mut()
                     .note_saved(note.clone(), &self.buffer.to_string());
+                let note = note.clone();
+                self.emit(events::EditorEvent::NoteSaved { note }, cx);
             }
             Err(err) => {
                 self.notice = Some(format!("Couldn't save. {err}").into());
@@ -2143,7 +2164,7 @@ impl Editor {
         } else if self.parked_notes().contains(&path) {
             self.with_parked(&path, |this| this.reload_from_disk(&event, false));
         }
-        cx.notify();
+        self.emit(events::EditorEvent::VaultChanged, cx);
     }
 
     /// The focused note changed or went away on disk. `live`: it's the
@@ -3296,8 +3317,10 @@ impl Render for Editor {
         let tree = self.buffer.syntax_tree().cloned();
         mnote_core::drop_tree_later(std::mem::replace(&mut self.tree, tree));
         self.refresh_parked_trees();
-        self.count_words_soon(cx);
-        self.blame_soon(cx);
+        // Events from this change go out just after the frame is drawn.
+        if self.events.needs_flush() {
+            cx.on_next_frame(window, |this, _, cx| this.flush_events(cx));
+        }
         // A page for Page Up/Down and ⌃f ⌃b: the lines that fit the window.
         let text_h = window.viewport_size().height / px(1.) - 4. * crate::theme::bar_h();
         let page = (text_h / (text::NOTE_BODY.line_height().max(px(1.)) / px(1.))).floor();

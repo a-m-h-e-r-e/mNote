@@ -48,7 +48,7 @@ impl Source {
 
 /// A document's identity: two panes with equal keys share one [`Doc`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum DocKey {
+pub enum DocKey {
     Scratch,
     Note(NotePath),
     Config,
