@@ -435,51 +435,23 @@ impl Editor {
     }
 
     /// The key after `⌃w`.
-    pub(super) fn pane_command(&mut self, key: mnote_vim::Key, cx: &mut Context<Self>) {
-        use mnote_vim::Key;
-        let c = match key {
-            Key::Char(c) | Key::Ctrl(c) => c,
-            Key::Left => 'h',
-            Key::Down => 'j',
-            Key::Up => 'k',
-            Key::Right => 'l',
-            _ => return,
-        };
-        let dir = match c {
-            'h' => Some(Dir::Left),
-            'j' => Some(Dir::Down),
-            'k' => Some(Dir::Up),
-            'l' => Some(Dir::Right),
-            _ => None,
-        };
-        if let Some(dir) = dir {
-            if let Some(next) = self.layout.neighbor(self.focused, dir) {
-                self.focus_pane(next, cx);
-            }
+    /// `⌃w h/j/k/l`: the pane that way, if there is one.
+    pub(super) fn focus_dir(&mut self, dir: Dir, cx: &mut Context<Self>) {
+        if let Some(next) = self.layout.neighbor(self.focused, dir) {
+            self.focus_pane(next, cx);
+        }
+    }
+
+    /// `⌃w w` / `⌃w W`: the next or previous pane, round the window.
+    pub(super) fn cycle_pane(&mut self, step: isize, cx: &mut Context<Self>) {
+        let order = self.layout.panes();
+        let len = order.len() as isize;
+        if len == 0 {
             return;
         }
-        match c {
-            'w' | 'W' => {
-                let order = self.layout.panes();
-                let at = order.iter().position(|&p| p == self.focused).unwrap_or(0);
-                let len = order.len();
-                let next = if c == 'w' {
-                    (at + 1) % len
-                } else {
-                    (at + len - 1) % len
-                };
-                self.focus_pane(order[next], cx);
-            }
-            'v' => self.split_pane(Axis::Row, cx),
-            's' => self.split_pane(Axis::Column, cx),
-            'c' | 'q' => {
-                if !self.close_pane(cx) {
-                    self.reply = Some(("E444: Cannot close last window".into(), true));
-                }
-            }
-            'o' => self.only_pane(cx),
-            _ => {}
-        }
+        let at = order.iter().position(|&p| p == self.focused).unwrap_or(0) as isize;
+        let next = (at + step).rem_euclid(len) as usize;
+        self.focus_pane(order[next], cx);
     }
 
     /// After edits to the focused note: the same lines change in other

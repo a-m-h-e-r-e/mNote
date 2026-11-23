@@ -26,7 +26,7 @@ pub use input::{InputAction, VimInput};
 pub use keys::{Key, key_notation, parse_keys};
 pub use motion::{Find, Motion, MotionKind, Target};
 pub use registers::{Clipboard, MemoryClipboard, Register};
-pub use state::{Effect, Operator, ScreenRows, Vim};
+pub use state::{Effect, MapRhs, Operator, ScreenRows, Vim};
 
 /// The Vim mode an editor or text input is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

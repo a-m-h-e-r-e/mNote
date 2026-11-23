@@ -146,6 +146,9 @@ pub struct Config {
     /// Vim mappings (`"nnoremap j gj"`), run at start and on save; they
     /// replace the built-in `jk` → `<Esc>`. `None` keeps the built-in.
     pub mappings: Option<Vec<String>>,
+    /// Key bindings from the `[keys]` table: keys in Vim notation, and the
+    /// command they run (`"<leader>d" = "daily"`; `"none"` removes one).
+    pub keys: Vec<(String, String)>,
     /// The corner radius of pickers, modals, the capture panel, the command
     /// line and toasts, in pixels. `None` keeps the design's radii.
     pub panel_radius: Option<u32>,
@@ -200,6 +203,7 @@ impl Default for Config {
             wrap_motion: false,
             wrap: true,
             mappings: None,
+            keys: Vec::new(),
             panel_radius: None,
             panel_shadow: true,
             autosave: true,
@@ -334,6 +338,21 @@ impl Config {
                         Some("system") => true,
                         Some("vim") => false,
                         _ => return Err(wrong("\"system\" or \"vim\"")),
+                    }
+                }
+                "keys" => {
+                    let table = value
+                        .as_table()
+                        .ok_or_else(|| wrong("a table: [keys] with \"<leader>d\" = \"daily\""))?;
+                    for (keys, command) in table {
+                        let command = command.as_str().ok_or_else(|| ConfigError {
+                            line: find_key_line(text, &format!("\"{keys}\""))
+                                .or_else(|| find_key_line(text, keys)),
+                            message: format!(
+                                "keys: \"{keys}\" should name a command in quotes, like \"daily\""
+                            ),
+                        })?;
+                        config.keys.push((keys.clone(), command.to_owned()));
                     }
                 }
                 "mappings" => {
@@ -642,6 +661,22 @@ impl Config {
             out.push('\n');
             out.push_str(&setting.block());
         }
+        out.push('\n');
+        out.push_str(&self.keys_block());
+        out
+    }
+
+    /// The `[keys]` table, with how it works. It's a TOML table, so it
+    /// comes after every other setting.
+    fn keys_block(&self) -> String {
+        let mut out = String::from(KEYS_HELP);
+        out.push_str("[keys]\n");
+        if self.keys.is_empty() {
+            out.push_str("# \"<leader>d\" = \"daily\"\n");
+        }
+        for (keys, command) in &self.keys {
+            out.push_str(&format!("{keys:?} = {command:?}\n"));
+        }
         out
     }
 
@@ -649,7 +684,11 @@ impl Config {
     /// comments, to add to the end of an older file. `None` when nothing is
     /// missing, or the text doesn't parse (it's left as it is). The vault
     /// is never added: without one, mNote asks for it.
-    pub fn missing_settings(text: &str) -> Option<String> {
+    ///
+    /// Returns where to insert them (a byte offset: before the first
+    /// `[table]`, since plain settings can't follow one, else the end) and
+    /// the text. A file without `[keys]` gets that too, at the end.
+    pub fn missing_settings(text: &str) -> Option<(usize, String)> {
         let table: toml::Table = text.parse().ok()?;
         let missing: Vec<String> = Config::default()
             .settings()
@@ -657,15 +696,41 @@ impl Config {
             .filter(|s| s.key != "vault" && !table.contains_key(s.key))
             .map(|s| s.block())
             .collect();
-        if missing.is_empty() {
+        let keys = !table.contains_key("keys");
+        if missing.is_empty() && !keys {
             return None;
         }
-        Some(format!(
-            "\n# Settings this file didn't have yet, added at their defaults.\n\n{}",
-            missing.join("\n")
-        ))
+        let first_table = text
+            .match_indices('\n')
+            .map(|(i, _)| i + 1)
+            .chain(std::iter::once(0))
+            .filter(|&at| text[at..].starts_with('['))
+            .min();
+        let mut added = String::new();
+        if !missing.is_empty() {
+            added.push_str("\n# Settings this file didn't have yet, added at their defaults.\n\n");
+            added.push_str(&missing.join("\n"));
+        }
+        match first_table {
+            Some(at) => {
+                added.push('\n');
+                Some((at, added))
+            }
+            None => {
+                if keys {
+                    added.push('\n');
+                    added.push_str(&Config::default().keys_block());
+                }
+                Some((text.len(), added))
+            }
+        }
     }
 }
+
+/// How `[keys]` works, above the table.
+const KEYS_HELP: &str = "# Key bindings: the keys, then the command they run (:keys lists every\n\
+# binding and command). Keys are written as in Vim: <leader> is the leader,\n\
+# <C-w>v is ⌃w then v, <D-k> is ⌘K. \"none\" removes a binding.\n";
 
 /// One setting in config.toml: its comment and its line.
 struct Setting {
@@ -847,14 +912,20 @@ mod tests {
 
     #[test]
     fn missing_settings_are_added_at_their_defaults() {
+        let insert = |text: &str| -> String {
+            let (at, added) = Config::missing_settings(text).expect("some are missing");
+            format!("{}{added}{}", &text[..at], &text[at..])
+        };
         let old = "vault = \"~/n\"\ntheme = \"dark\"\n";
-        let added = Config::missing_settings(old).expect("some are missing");
+        let (at, added) = Config::missing_settings(old).expect("some are missing");
+        assert_eq!(at, old.len(), "no table: at the end");
         assert!(added.contains("\nautosave = true\n"));
         assert!(added.contains("\nwrap = true\n"));
+        assert!(added.contains("\n[keys]\n"), "the keys table too");
         assert!(!added.contains("\ntheme = "), "theme is already there");
         assert!(!added.contains("\nvault = "), "the vault is never added");
         // The file with them added keeps its own settings.
-        let full = format!("{old}{added}");
+        let full = insert(old);
         let config = Config::parse(&full).expect("still valid");
         assert_eq!(config.theme, ThemeChoice::Dark);
         assert_eq!(Config::missing_settings(&full), None);
@@ -862,6 +933,38 @@ mod tests {
             Config::missing_settings("theme = "),
             None,
             "broken: left alone"
+        );
+        // Settings go before a table, where they still count as settings.
+        let with_keys = "theme = \"dark\"\n\n[keys]\n\"<leader>d\" = \"daily\"\n";
+        let full = insert(with_keys);
+        let config = Config::parse(&full).expect("still valid");
+        assert!(config.autosave);
+        assert_eq!(config.keys, [("<leader>d".to_owned(), "daily".to_owned())]);
+        assert!(full.ends_with("[keys]\n\"<leader>d\" = \"daily\"\n"));
+    }
+
+    #[test]
+    fn keys_are_read_and_written() {
+        let config = Config::parse("[keys]\n\"<leader>d\" = \"daily\"\n\"<C-w>v\" = \"none\"\n")
+            .expect("valid");
+        assert_eq!(
+            config.keys,
+            [
+                ("<C-w>v".to_owned(), "none".to_owned()),
+                ("<leader>d".to_owned(), "daily".to_owned())
+            ],
+            "by key (a key appears once, so order doesn't matter)"
+        );
+        let back = Config::parse(&config.template()).expect("the template reads back");
+        assert_eq!(back.keys, config.keys);
+        let err = Config::parse("[keys]\n\"<leader>d\" = 3\n").expect_err("not a name");
+        assert_eq!(err.line, Some(2));
+        let err = Config::parse("keys = 3").expect_err("not a table");
+        assert!(err.message.contains("[keys]"));
+        assert!(
+            Config::default()
+                .template()
+                .contains("[keys]\n# \"<leader>d\" = \"daily\"\n")
         );
     }
 

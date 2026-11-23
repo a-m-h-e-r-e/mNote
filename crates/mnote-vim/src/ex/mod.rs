@@ -446,10 +446,10 @@ impl Vim {
                 let (lhs, rhs) = args
                     .split_once(char::is_whitespace)
                     .ok_or_else(|| ExError::new(474, "Invalid argument"))?;
-                let (lhs, rhs) = (parse_keys(lhs), parse_keys(rhs.trim()));
-                if lhs.is_empty() || rhs.is_empty() {
+                let (lhs, rhs) = (parse_keys(lhs), crate::state::MapRhs::parse(rhs));
+                let Some(rhs) = rhs.filter(|_| !lhs.is_empty()) else {
                     return Err(ExError::new(474, "Invalid argument"));
-                }
+                };
                 for mode in modes.chars() {
                     let table = self.mapping_table(mode);
                     table.retain(|(l, _)| *l != lhs);
@@ -1036,7 +1036,7 @@ fn map_modes(name: &str) -> &'static str {
 }
 
 impl Vim {
-    fn mapping_table(&mut self, mode: char) -> &mut Vec<(Vec<crate::Key>, Vec<crate::Key>)> {
+    fn mapping_table(&mut self, mode: char) -> &mut crate::state::MapTable {
         match mode {
             'n' => &mut self.nmaps,
             'v' => &mut self.vmaps,
@@ -1055,7 +1055,7 @@ impl Vim {
                 list.push(format!(
                     "{mode}  {:<8} {}",
                     key_notation(lhs),
-                    key_notation(rhs)
+                    rhs.notation()
                 ));
             }
         }

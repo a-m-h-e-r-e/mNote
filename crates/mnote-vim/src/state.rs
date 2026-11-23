@@ -123,6 +123,39 @@ struct ReplaceSession {
     overwritten: Vec<Option<char>>,
 }
 
+/// What a mapping runs: keys, or a command line (`<Cmd>daily<CR>`, as in
+/// Neovim), which runs without being typed into the command line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MapRhs {
+    Keys(Vec<Key>),
+    Command(String),
+}
+
+impl MapRhs {
+    /// From the right-hand side of `:map`: `<Cmd>…<CR>` is a command.
+    pub fn parse(rhs: &str) -> Option<Self> {
+        let rhs = rhs.trim();
+        let lower = rhs.to_ascii_lowercase();
+        if lower.starts_with("<cmd>") && lower.ends_with("<cr>") {
+            let line = rhs[5..rhs.len() - 4].trim();
+            return (!line.is_empty()).then(|| MapRhs::Command(line.to_owned()));
+        }
+        let keys = crate::parse_keys(rhs);
+        (!keys.is_empty()).then_some(MapRhs::Keys(keys))
+    }
+
+    /// As `:map` lists it.
+    pub fn notation(&self) -> String {
+        match self {
+            MapRhs::Keys(keys) => crate::key_notation(keys),
+            MapRhs::Command(line) => format!("<Cmd>{line}<CR>"),
+        }
+    }
+}
+
+/// Mappings for one mode: keys typed, what they run.
+pub(crate) type MapTable = Vec<(Vec<Key>, MapRhs)>;
+
 /// Where long lines wrap on screen, supplied by the app for `gj` / `gk`.
 pub trait ScreenRows {
     /// The characters of line `line` (from 0 in the line) where each screen
@@ -155,10 +188,10 @@ pub struct Vim {
     pub(crate) anchors: crate::anchors::Anchors,
     /// Insert-mode mappings (`:imap`): keys typed, keys they become. `jk`
     /// to `<Esc>` is there by default.
-    pub(crate) imaps: Vec<(Vec<Key>, Vec<Key>)>,
+    pub(crate) imaps: MapTable,
     /// NORMAL and VISUAL mappings (`:nmap`, `:vmap`), non-recursive.
-    pub(crate) nmaps: Vec<(Vec<Key>, Vec<Key>)>,
-    pub(crate) vmaps: Vec<(Vec<Key>, Vec<Key>)>,
+    pub(crate) nmaps: MapTable,
+    pub(crate) vmaps: MapTable,
     /// Keys typed in NORMAL or VISUAL that may yet become a mapping.
     map_pending: Vec<Key>,
     /// Lines in a page, for Page Up/Down and `⌃f` `⌃b` `⌃d` `⌃u` (the app
@@ -230,7 +263,10 @@ impl Default for Vim {
             page: 20,
             screen_rows: None,
             wrap_motion: false,
-            imaps: vec![(vec![Key::Char('j'), Key::Char('k')], vec![Key::Esc])],
+            imaps: vec![(
+                vec![Key::Char('j'), Key::Char('k')],
+                MapRhs::Keys(vec![Key::Esc]),
+            )],
             imap_pending: Vec::new(),
             nmaps: Vec::new(),
             vmaps: Vec::new(),
@@ -440,15 +476,46 @@ impl Vim {
         effect
     }
 
-    /// A mapping's keys, run without mapping them again.
-    fn run_mapping(&mut self, rhs: &[Key], buf: &mut Buffer) -> Effect {
+    /// A mapping's keys, run without mapping them again, or its command.
+    fn run_mapping(&mut self, rhs: &MapRhs, buf: &mut Buffer) -> Effect {
+        let keys = match rhs {
+            MapRhs::Keys(keys) => keys,
+            MapRhs::Command(line) => {
+                self.run_mapped_command(line, buf);
+                return Effect::Handled;
+            }
+        };
         self.in_mapping = true;
         let mut effect = Effect::Handled;
-        for key in rhs {
+        for key in keys {
             effect = self.handle_key(*key, buf);
         }
         self.in_mapping = false;
         effect
+    }
+
+    /// A mapping's command line: runs as `:` would (its message shows, an
+    /// app command goes to the app) without going into the history. Like
+    /// any command line it ends in NORMAL.
+    fn run_mapped_command(&mut self, line: &str, buf: &mut Buffer) {
+        self.cancel();
+        let result = self.execute(line, buf).map(|outcome| {
+            self.app_command = outcome.app;
+            outcome.message
+        });
+        self.message = match result {
+            Ok(Some(text)) => Some(crate::ex::cmdline::Message {
+                text,
+                error: false,
+                line: None,
+            }),
+            Ok(None) => None,
+            Err(err) => Some(crate::ex::cmdline::Message {
+                text: err.to_string(),
+                error: true,
+                line: None,
+            }),
+        };
     }
 
     /// Whether NORMAL or VISUAL keys wait to see if they become a mapping;
@@ -494,13 +561,7 @@ impl Vim {
             for _ in 1..typed.len() {
                 self.insert_key(Key::Backspace, buf);
             }
-            self.in_mapping = true;
-            let mut effect = Effect::Handled;
-            for key in rhs {
-                effect = self.handle_key(key, buf);
-            }
-            self.in_mapping = false;
-            return effect;
+            return self.run_mapping(&rhs, buf);
         }
         let prefix = |keys: &[Key]| {
             self.imaps

@@ -65,11 +65,19 @@ pub struct ExName {
 /// A command in the registry.
 #[derive(Debug, Clone)]
 pub struct Command {
+    /// Its name for key bindings and config.toml's `[keys]` (`find`,
+    /// `pane-left`); for an ex command, its ex name.
+    pub id: String,
     /// Its name in the palette; `None` keeps it out (ex-only, like `:wq`).
     pub label: Option<String>,
-    /// The key binding, as shown in hints (`space f`). A `space …` binding
-    /// is the leader key that runs it.
+    /// Its default key bindings, in Vim notation (`<leader>f`, `<C-w>v`,
+    /// `<D-k>`); see [`crate::keymap`].
+    pub bind: Vec<String>,
+    /// Vim keys that do it, shown when it has no binding (`u`, `gd`).
     pub keys: Option<String>,
+    /// Its ⌘ binding also works over pickers and other overlays (the
+    /// clipboard shortcuts handle those themselves).
+    pub over_overlays: bool,
     /// The ex form shown beside it, without the `:` (`set rnu!`).
     pub ex_form: Option<String>,
     /// The ex command it registers with Vim, if any.
@@ -81,10 +89,13 @@ pub struct Command {
 
 impl Command {
     /// A palette command.
-    pub fn new(label: &str, about: &str, run: Run) -> Self {
+    pub fn new(id: &str, label: &str, about: &str, run: Run) -> Self {
         Command {
+            id: id.to_owned(),
             label: Some(label.to_owned()),
+            bind: Vec::new(),
             keys: None,
+            over_overlays: false,
             ex_form: None,
             ex: None,
             about: about.to_owned(),
@@ -95,8 +106,11 @@ impl Command {
     /// An ex command that isn't in the palette (`:wq`, `:vsplit`).
     pub fn ex_only(name: &str, abbrev: usize, args: ArgKind, about: &str, run: Run) -> Self {
         Command {
+            id: name.to_owned(),
             label: None,
+            bind: Vec::new(),
             keys: None,
+            over_overlays: false,
             ex_form: None,
             ex: Some(ExName {
                 name: name.to_owned(),
@@ -108,9 +122,27 @@ impl Command {
         }
     }
 
-    /// Its key binding.
+    /// The Vim keys that do it, shown beside it (`u`, `gd`).
     pub fn keys(mut self, keys: &str) -> Self {
         self.keys = Some(keys.to_owned());
+        self
+    }
+
+    /// A different id (when the ex name is taken by another command's id).
+    pub fn with_id(mut self, id: &str) -> Self {
+        self.id = id.to_owned();
+        self
+    }
+
+    /// A default key binding (`<leader>f`).
+    pub fn bind(mut self, notation: &str) -> Self {
+        self.bind.push(notation.to_owned());
+        self
+    }
+
+    /// Its ⌘ binding also works over pickers and overlays.
+    pub fn over_overlays(mut self) -> Self {
+        self.over_overlays = true;
         self
     }
 
@@ -133,7 +165,9 @@ impl Command {
     /// The quiet text at the right of its row: keys, then the ex form.
     pub fn detail(&self) -> String {
         let ex = self.ex_form.as_ref().map(|ex| format!(":{ex}"));
-        let keys = self.keys.as_deref().map(with_leader);
+        let keys = crate::keymap::current()
+            .shown_for(&self.id)
+            .or_else(|| self.keys.clone());
         match (keys, ex) {
             (Some(keys), Some(ex)) => format!("{keys} · {ex}"),
             (Some(keys), None) => keys,
@@ -216,9 +250,14 @@ pub fn by_ex(name: &str) -> Option<usize> {
         .position(|c| c.ex.as_ref().is_some_and(|ex| ex.name == name))
 }
 
-/// The command bound to `keys` (`space f`).
-pub fn by_keys(keys: &str) -> Option<usize> {
-    all().iter().position(|c| c.keys.as_deref() == Some(keys))
+/// The command with this id (`pane-left`).
+pub fn by_id(id: &str) -> Option<usize> {
+    all().iter().position(|c| c.id == id)
+}
+
+/// The command a mapping or app command names: its ex name or its id.
+pub fn find(name: &str) -> Option<usize> {
+    by_ex(name).or_else(|| by_id(name))
 }
 
 /// Sets the leader key (config.toml's `leader`).
@@ -244,8 +283,10 @@ pub fn with_leader(keys: &str) -> String {
 mod tests {
     use super::*;
 
-    fn find(label: &str) -> Command {
+    fn labelled(label: &str) -> Command {
         install(crate::editor::commands::builtin());
+        let (map, _) = crate::keymap::Keymap::build(&all(), &[]);
+        crate::keymap::set(map);
         all()
             .iter()
             .find(|c| c.label.as_deref() == Some(label))
@@ -255,8 +296,9 @@ mod tests {
 
     #[test]
     fn details_show_keys_then_ex() {
-        assert_eq!(find("Find a note").detail(), "space f");
-        let undo = find("Undo");
+        assert_eq!(labelled("Find a note").detail(), "space f");
+        assert_eq!(labelled("Split side by side").detail(), "⌃w v · :vsplit");
+        let undo = labelled("Undo");
         assert_eq!(undo.detail(), "u · :undo");
         assert!(undo.haystack().contains(":undo"));
     }
@@ -307,9 +349,14 @@ mod tests {
         let all = all();
         let daily = by_ex("daily").expect(":daily");
         assert_eq!(all[daily].label.as_deref(), Some("Open today's note"));
-        assert!(all[by_ex("vsplit").expect(":vsplit")].label.is_none());
-        let f = by_keys("space f").expect("space f");
+        assert!(all[by_ex("wq").expect(":wq")].label.is_none());
+        let f = by_id("find").expect("find");
         assert_eq!(all[f].label.as_deref(), Some("Find a note"));
+        assert_eq!(find("daily"), Some(daily), "by ex name");
+        assert_eq!(
+            find("pane-left").map(|i| all[i].id.as_str()),
+            Some("pane-left")
+        );
         assert_eq!(by_ex("nope"), None);
     }
 

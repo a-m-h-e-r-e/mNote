@@ -139,8 +139,12 @@ pub struct Editor {
     index_ready: bool,
     /// The open picker, drawn over the note; it gets every key.
     picker: Option<Picker>,
-    /// `space` was pressed in NORMAL mode: the next key is a leader command.
-    leader: bool,
+    /// Keys typed in NORMAL that start a key binding (`space`, `⌃w`), until
+    /// it completes or turns out not to be one (see [`crate::keymap`]).
+    keyseq: Vec<mnote_vim::Key>,
+    /// Runs a binding that's also the start of a longer one, if no key
+    /// follows in a moment.
+    keyseq_task: Option<Task<()>>,
     /// The results list (`⌃q` in content search) and where `:cnext` is.
     list: Vec<ListEntry>,
     list_pos: usize,
@@ -175,8 +179,6 @@ pub struct Editor {
     /// A line of an unfocused pane is being drawn: no caret, selection or
     /// typed-command preview.
     drawing_other: bool,
-    /// `⌃w` was pressed: the next key is a pane command.
-    pane_key: bool,
     /// The unfocused pane being drawn (while `drawing_other`).
     drawing_pane: PaneId,
     /// Where a mouse drag started (a character), while the button is down.
@@ -289,8 +291,10 @@ impl Editor {
     }
 
     fn build(buffer: Buffer, source: Source, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // The command registry, and with it the app's ex commands in Vim.
+        // The command registry (and with it the app's ex commands in Vim)
+        // and its default key bindings; config.toml's `[keys]` come later.
         crate::commands::install(commands::builtin());
+        crate::keymap::set(crate::keymap::Keymap::build(&crate::commands::all(), &[]).0);
         let clipboard = Rc::new(RefCell::new(ClipboardState::default()));
         let mut vim = Vim::new();
         vim.set_clipboard(Box::new(SharedClipboard(clipboard.clone())));
@@ -348,7 +352,8 @@ impl Editor {
             index: Rc::default(),
             index_ready: false,
             picker: None,
-            leader: false,
+            keyseq: Vec::new(),
+            keyseq_task: None,
             list: Vec::new(),
             list_pos: 0,
             folder_edit: None,
@@ -371,7 +376,6 @@ impl Editor {
             next_pane: 1,
             parked: Vec::new(),
             drawing_other: false,
-            pane_key: false,
             drawing_pane: PaneId(0),
             drag_anchor: None,
             map_task: None,
@@ -409,8 +413,7 @@ impl Editor {
         // While inserting, typed characters go through the system's input
         // (see `ime`), so accents and composed input work: let them pass.
         if self.takes_text()
-            && !self.leader
-            && !self.pane_key
+            && self.keyseq.is_empty()
             && !stroke.modifiers.control
             && stroke.key_char.is_some()
             && matches!(
@@ -420,29 +423,23 @@ impl Editor {
         {
             return;
         }
-        if stroke.modifiers.platform && stroke.key == "k" && self.picker.is_none() {
-            cx.stop_propagation();
-            return self.open_picker(Picker::new(Box::new(CommandPalette::default())), cx);
-        }
-        // ⌘S saves, as `:w` does.
-        if stroke.modifiers.platform
-            && stroke.key == "s"
-            && !stroke.modifiers.shift
-            && self.picker.is_none()
-            && self.folder_edit.is_none()
-            && self.first_run.is_none()
-        {
-            cx.stop_propagation();
-            self.run_app_command(AppCommand::new("write"), cx);
-            return cx.notify();
-        }
+        // ⌘ bindings (⌘K, ⌘S, ⌘C …), from the keymap. Over a picker or
+        // another overlay only those made for it run.
         if stroke.modifiers.platform
             && !stroke.modifiers.control
             && !stroke.modifiers.alt
-            && self.clipboard_shortcut(&stroke.key, cx)
+            && !stroke.modifiers.shift
+            && let Some(c) = single_key(&stroke.key)
+            && let Some(id) = crate::keymap::current().cmd(c).map(str::to_owned)
+            && let Some(ix) = crate::commands::by_id(&id)
         {
-            cx.stop_propagation();
-            return;
+            let overlay =
+                self.picker.is_some() || self.folder_edit.is_some() || self.first_run.is_some();
+            if !overlay || crate::commands::all()[ix].over_overlays {
+                cx.stop_propagation();
+                self.run_command(ix, cx);
+                return cx.notify();
+            }
         }
         let Some(key) = keys::vim_key(stroke) else {
             return;
@@ -463,21 +460,7 @@ impl Editor {
             self.picker_key(key, cx);
             return true;
         }
-        if std::mem::take(&mut self.leader) {
-            self.leader_key(key, cx);
-            return true;
-        }
-        if std::mem::take(&mut self.pane_key) {
-            self.pane_command(key, cx);
-            cx.notify();
-            return true;
-        }
-        if key == mnote_vim::Key::Ctrl('w')
-            && self.vim.mode() == Mode::Normal
-            && !self.vim.is_pending()
-            && self.vim.cmd_window().is_none()
-        {
-            self.pane_key = true;
+        if self.binding_key(key, cx) {
             return true;
         }
         // The system clipboard is read just before a paste that may use it:
@@ -500,17 +483,6 @@ impl Editor {
         if key == mnote_vim::Key::Esc && self.esc_hides() {
             self.save_now(cx);
             cx.hide();
-            return true;
-        }
-        // The leader (config.toml's `leader`) comes before Vim, so a leader
-        // like `,` isn't taken by Vim's own `,`.
-        if key == mnote_vim::Key::Char(crate::commands::leader())
-            && self.vim.mode() == Mode::Normal
-            && !self.vim.is_pending()
-            && self.vim.cmd_window().is_none()
-        {
-            self.reply = None;
-            self.leader = true;
             return true;
         }
         let mode_before = self.shown_mode();
@@ -602,15 +574,91 @@ impl Editor {
     /// The key after `space` in NORMAL mode: `f` finds notes, `/` searches
     /// text, `@` lists this note's headings, `#` lists tags, `b` lists
     /// backlinks, `e` explores, `x` toggles a task, `m` cycles the view.
-    /// The key after the leader: the registry's command bound to
-    /// `space <key>`.
-    fn leader_key(&mut self, key: mnote_vim::Key, cx: &mut Context<Self>) {
-        let mnote_vim::Key::Char(c) = key else {
-            return;
-        };
-        if let Some(ix) = crate::commands::by_keys(&format!("space {c}")) {
+    /// A key for the keymap: one that continues a binding being typed, or
+    /// starts one in NORMAL with nothing half typed (so the leader comes
+    /// before Vim's own `,` or space, and `⌃w` before Vim). Returns whether
+    /// the keymap took it.
+    fn binding_key(&mut self, key: mnote_vim::Key, cx: &mut Context<Self>) -> bool {
+        use crate::keymap::Lookup;
+        let starting = self.keyseq.is_empty();
+        if starting
+            && !(self.vim.mode() == Mode::Normal
+                && !self.vim.is_pending()
+                && self.vim.cmd_window().is_none())
+        {
+            return false;
+        }
+        self.keyseq_task = None;
+        self.keyseq.push(key);
+        let keymap = crate::keymap::current();
+        match keymap.lookup(&self.keyseq, crate::commands::leader()) {
+            Lookup::Prefix => {
+                if starting {
+                    self.reply = None;
+                }
+            }
+            Lookup::Exact(id) => {
+                self.keyseq.clear();
+                self.run_command_id(&id, cx);
+            }
+            Lookup::ExactOrLonger(id) => {
+                self.keyseq_task = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(MAPPING_TIMEOUT).await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.keyseq.clear();
+                        this.keyseq_task = None;
+                        this.run_command_id(&id, cx);
+                        cx.notify();
+                    });
+                }));
+            }
+            Lookup::None => {
+                // A key that starts nothing goes on to Vim; one that ends a
+                // started binding wrongly is dropped, as Vim drops `⌃w z`.
+                let typed = std::mem::take(&mut self.keyseq);
+                if typed.len() == 1 {
+                    return false;
+                }
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    /// Runs the registry's command with this id (from a key binding).
+    fn run_command_id(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(ix) = crate::commands::by_id(id) {
             self.run_command(ix, cx);
         }
+    }
+
+    /// ⌘K: the command palette (not over another picker).
+    fn open_palette(&mut self, cx: &mut Context<Self>) {
+        if self.picker.is_none() {
+            self.open_picker(Picker::new(Box::new(CommandPalette::default())), cx);
+        }
+    }
+
+    /// `:keys`: every binding and its command.
+    fn list_bindings(&mut self) {
+        let keymap = crate::keymap::current();
+        let all = crate::commands::all();
+        let mut lines: Vec<String> = keymap
+            .bindings()
+            .iter()
+            .map(|b| {
+                let label = crate::commands::by_id(&b.command)
+                    .and_then(|i| all[i].label.clone())
+                    .unwrap_or_default();
+                format!(
+                    "{:<12} {:<24} {label}",
+                    crate::keymap::show(&b.strokes),
+                    b.command
+                )
+            })
+            .collect();
+        lines.insert(0, "Keys         Command                  ".to_owned());
+        self.vim.show_message(lines.join("\n"));
     }
 
     /// `space b`: the notes that link to this one.
@@ -1341,9 +1389,9 @@ impl Editor {
         self.show_doc(next);
         // Added as one change (u takes it back), saved like any edit. They're
         // at their defaults, so nothing changes until one is edited.
-        if let Some(missing) = missing {
+        if let Some((at, missing)) = missing {
             let rope = self.buffer.text();
-            let end = rope.len_chars();
+            let end = rope.byte_to_char(at.min(rope.len_bytes()));
             let gap = if end == 0 || rope.char(end - 1) == '\n' {
                 ""
             } else {
@@ -1357,12 +1405,13 @@ impl Editor {
                 .replace(&mut self.buffer, end..end, &format!("{gap}{missing}"));
             self.sync_lines();
             self.schedule_autosave(cx);
+            let what = match added {
+                0 => "the [keys] table".to_owned(),
+                1 => "1 setting".to_owned(),
+                n => format!("{n} settings"),
+            };
             self.reply = Some((
-                format!(
-                    "Added {added} setting{} this file didn't have yet, at the end (u undoes)",
-                    if added == 1 { "" } else { "s" }
-                )
-                .into(),
+                format!("Added {what} this file didn't have yet (u undoes)").into(),
                 false,
             ));
         }
@@ -1432,6 +1481,13 @@ impl Editor {
         let _ = self.vim.execute(wrap, &mut self.buffer);
         crate::theme::Theme::set_choice(config.theme, cx);
         crate::commands::set_leader(config.leader);
+        // Key bindings: the commands' defaults, then config.toml's [keys].
+        let (keymap, problems) =
+            crate::keymap::Keymap::build(&crate::commands::all(), &config.keys);
+        crate::keymap::set(keymap);
+        if let Some(first) = problems.first() {
+            self.notice = Some(format!("config.toml keys: {first}").into());
+        }
         self.vim.share_clipboard(config.system_clipboard);
         self.vim.set_wrap_motion(config.wrap_motion);
         // config.toml's mappings replace the built-in ones (only mapping
@@ -2995,6 +3051,15 @@ fn has_bar_caret(mode: Mode) -> bool {
     matches!(mode, Mode::Insert | Mode::Command)
 }
 
+/// A keystroke's key as one lower-case character (`k` for ⌘K).
+fn single_key(key: &str) -> Option<char> {
+    let mut chars = key.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => Some(c.to_ascii_lowercase()),
+        _ => None,
+    }
+}
+
 fn char_to_byte(s: &str, chars: usize) -> usize {
     s.char_indices().nth(chars).map_or(s.len(), |(b, _)| b)
 }
@@ -3324,15 +3389,11 @@ impl Render for Editor {
                     .when(self.vim.command_line().is_some(), |bar| {
                         bar.hint("⇥ complete · ↑ history · ⌃f edit")
                     })
-                    .when(
-                        self.vim.command_line().is_none() && self.view != styled::View::Styled,
-                        |bar| {
-                            bar.hint(format!(
-                                "{} view: {}",
-                                crate::commands::with_leader("space m"),
-                                self.view.next().name()
-                            ))
-                        },
+                    .when_some(
+                        crate::keymap::current().shown_for("view").filter(|_| {
+                            self.vim.command_line().is_none() && self.view != styled::View::Styled
+                        }),
+                        |bar, keys| bar.hint(format!("{keys} view: {}", self.view.next().name())),
                     ),
             )
             .child({

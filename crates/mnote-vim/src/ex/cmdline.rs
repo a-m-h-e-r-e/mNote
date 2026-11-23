@@ -193,6 +193,16 @@ impl Vim {
     }
 
     /// A command the app should carry out (`:w`, `:q`, …), once.
+    /// Shows `text` where command-line messages go, until the next key (for
+    /// the app's own listings, such as `:keys`).
+    pub fn show_message(&mut self, text: String) {
+        self.message = Some(Message {
+            text,
+            error: false,
+            line: None,
+        });
+    }
+
     pub fn take_app_command(&mut self) -> Option<AppCommand> {
         self.app_command.take()
     }
@@ -1595,6 +1605,38 @@ mod mapping_tests {
         vim.set_wrap_motion(true);
         keys(&mut vim, &mut buf, "j");
         assert_eq!(vim.cursor(), 5, "plain j by screen row");
+    }
+
+    #[test]
+    fn mappings_can_run_command_lines() {
+        crate::ex::tests::test_app_commands();
+        let mut vim = crate::Vim::new();
+        let mut buf = mnote_core::Buffer::new("a a\n");
+        let type_keys = |vim: &mut crate::Vim, buf: &mut mnote_core::Buffer, keys: &str| {
+            for key in crate::parse_keys(keys) {
+                vim.handle_key(key, buf);
+            }
+        };
+        vim.execute("nnoremap gs <Cmd>s/a/b/g<CR>", &mut buf)
+            .expect("maps");
+        vim.execute("nnoremap gD <Cmd>daily<CR>", &mut buf)
+            .expect("maps");
+        type_keys(&mut vim, &mut buf, "gs");
+        assert_eq!(buf.to_string(), "b b\n");
+        assert_eq!(vim.mode(), crate::Mode::Normal);
+        type_keys(&mut vim, &mut buf, "gD");
+        assert_eq!(
+            vim.take_app_command(),
+            Some(crate::ex::AppCommand::new("daily"))
+        );
+        let listed = vim.execute("nmap", &mut buf).expect("lists").message;
+        assert!(listed.is_some_and(|l| l.contains("gs       <Cmd>s/a/b/g<CR>")));
+        // An error shows like a typed command's.
+        vim.execute("nnoremap gx <Cmd>frob<CR>", &mut buf)
+            .expect("maps");
+        type_keys(&mut vim, &mut buf, "gx");
+        assert!(vim.message().is_some_and(|m| m.error));
+        assert!(vim.execute("nnoremap gy <Cmd><CR>", &mut buf).is_err());
     }
 
     #[test]

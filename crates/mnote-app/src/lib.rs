@@ -5,6 +5,7 @@ pub mod capture;
 pub mod commands;
 pub mod editor;
 pub mod folder_edit;
+pub mod keymap;
 pub mod picker;
 #[cfg(target_os = "macos")]
 pub mod summon;

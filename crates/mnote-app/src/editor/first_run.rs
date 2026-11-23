@@ -344,10 +344,14 @@ impl Editor {
                     .font_family(crate::theme::mono())
                     .text_size(px(11.))
                     .text_color(Theme::color(p.ink_3))
-                    .child(SharedString::from(format!(
-                        "Saved in ~/.config/mnote/config.toml · {} opens it any time",
-                        crate::commands::with_leader("space ,")
-                    ))),
+                    .child(SharedString::from(
+                        match crate::keymap::current().shown_for("settings") {
+                            Some(keys) => format!(
+                                "Saved in ~/.config/mnote/config.toml · {keys} opens it any time"
+                            ),
+                            None => "Saved in ~/.config/mnote/config.toml".to_owned(),
+                        },
+                    )),
             );
         Some(element.into_any_element())
     }
