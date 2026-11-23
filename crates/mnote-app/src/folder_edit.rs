@@ -10,7 +10,6 @@ use gpui::{
 };
 use mnote_core::Buffer;
 use mnote_core::folder_edit::{Change, FolderEntry, PlanError, folder_text, plan};
-use mnote_vim::ex::AppCommand;
 use mnote_vim::text::{line_count, line_len, line_of, line_start};
 use mnote_vim::{Key, Mode, Vim};
 
@@ -127,9 +126,10 @@ impl FolderEditor {
         if let Some(message) = self.vim.message() {
             self.message = Some(message.text.clone());
         }
-        match self.vim.take_app_command() {
-            Some(AppCommand::Write { .. } | AppCommand::WriteQuit { .. }) => self.review(),
-            Some(AppCommand::Quit { force }) => {
+        let command = self.vim.take_app_command();
+        match command.as_ref().map(|c| (c.name.as_str(), c.bang)) {
+            Some(("write" | "wq" | "xit", _)) => self.review(),
+            Some(("quit", force)) => {
                 if self.changes().is_empty() || force {
                     FolderOutcome::Close
                 } else {
@@ -495,6 +495,7 @@ mod tests {
 
     #[test]
     fn edits_then_review_then_apply() {
+        crate::commands::install(crate::editor::commands::builtin());
         let mut ed = editor();
         assert_eq!(
             keys(&mut ed, "<esc>"),
@@ -521,6 +522,7 @@ mod tests {
 
     #[test]
     fn quitting_and_bad_lines() {
+        crate::commands::install(crate::editor::commands::builtin());
         let mut ed = editor();
         keys(&mut ed, "dd");
         assert_eq!(

@@ -27,7 +27,7 @@ use super::{
     CodePreview, Confirm, Job, JobResult, ListEntry, PickerAction, PickerDelegate, PreviewContent,
     Row, RowKind,
 };
-use crate::commands::COMMANDS;
+use crate::commands::{self, Command};
 use crate::ui::Hint;
 
 /// Results kept per query; more than anyone scrolls through.
@@ -96,6 +96,10 @@ pub struct Finder {
     search: NoteSearch,
     results: Results,
     /// Label, keys and ex form of each command, what `>` matches.
+    /// The registry, the commands listed for `>` (their indexes) and what
+    /// a query matches in each.
+    commands: std::rc::Rc<Vec<Command>>,
+    command_ix: Vec<usize>,
     command_haystacks: Vec<String>,
     /// Where `/` searches; `None` for a scratch note.
     vault: Option<Vault>,
@@ -111,12 +115,18 @@ impl Finder {
             .path
             .unwrap_or_else(|| NotePath::new("scratch.md").expect("a valid note path"));
         let entry = NoteEntry::new(path, &current.text, None);
+        let commands = commands::all();
+        let command_ix: Vec<usize> = (0..commands.len())
+            .filter(|&i| commands[i].label.is_some())
+            .collect();
         Finder {
             index,
             current: NoteIndex::from_entries(vec![entry]),
             current_text: current.text,
             search: NoteSearch::new(),
-            command_haystacks: COMMANDS.iter().map(|c| c.haystack()).collect(),
+            command_haystacks: command_ix.iter().map(|&i| commands[i].haystack()).collect(),
+            commands,
+            command_ix,
             results: Results::Notes {
                 hits: Vec::new(),
                 create: None,
@@ -358,10 +368,11 @@ impl PickerDelegate for Finder {
             }
             Results::Commands(hits) => {
                 let hit = &hits[ix];
-                let command = &COMMANDS[hit.item];
-                let len = command.label.chars().count();
+                let command = &self.commands[self.command_ix[hit.item]];
+                let label = command.label.clone().unwrap_or_default();
+                let len = label.chars().count();
                 Row {
-                    label: command.label.into(),
+                    label: label.into(),
                     // Letters matched in the keys or ex form aren't in the label.
                     matches: hit
                         .indices
@@ -440,11 +451,11 @@ impl PickerDelegate for Finder {
                 })
             }
             Results::Commands(hits) => {
-                let command = &COMMANDS[hits.get(ix)?.item];
+                let command = &self.commands[self.command_ix[hits.get(ix)?.item]];
                 Some(PreviewContent {
-                    title: command.label.into(),
+                    title: command.label.clone().unwrap_or_default().into(),
                     meta: Some(command.detail().into()),
-                    lines: vec![command.about.into()],
+                    lines: vec![command.about.clone().into()],
                     code: None,
                 })
             }
@@ -505,7 +516,9 @@ impl PickerDelegate for Finder {
                 let line = self.current.notes()[hit.note].headings[hit.heading].line;
                 Confirm::Act(PickerAction::GoToLine(line))
             }
-            Results::Commands(hits) => Confirm::Act(PickerAction::Command(hits[ix].item)),
+            Results::Commands(hits) => {
+                Confirm::Act(PickerAction::Command(self.command_ix[hits[ix].item]))
+            }
             Results::Content(c) => match c.rows.get(ix) {
                 Some(&(f, Some(h))) => Confirm::Act(PickerAction::JumpTo {
                     path: c.files[f].path.clone(),
@@ -718,6 +731,7 @@ mod tests {
 
     #[test]
     fn headings_of_this_note_and_commands() {
+        crate::commands::install(crate::editor::commands::builtin());
         let mut f = finder();
         f.set_query("@");
         assert_eq!(
@@ -730,9 +744,9 @@ mod tests {
         assert_eq!(preview.meta.as_ref().map(|m| m.as_ref()), Some("line 5"));
 
         f.set_query(">noh");
-        let noh = COMMANDS
+        let noh = commands::all()
             .iter()
-            .position(|c| c.ex == Some("noh"))
+            .position(|c| c.ex_form.as_deref() == Some("noh"))
             .expect("listed");
         assert_eq!(f.confirm(0), Confirm::Act(PickerAction::Command(noh)));
         assert_eq!(f.row(0).detail.as_ref().map(|d| d.as_ref()), Some(":noh"));

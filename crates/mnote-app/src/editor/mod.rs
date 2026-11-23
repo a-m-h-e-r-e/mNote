@@ -10,6 +10,7 @@
 //! typed, matches and `:s` replacements are painted into the note as a
 //! preview; nothing changes until `enter`.
 
+pub mod commands;
 mod first_run;
 mod ime;
 pub(crate) mod keys;
@@ -39,7 +40,7 @@ use mnote_vim::ex::cmdwin::CmdWindow;
 use mnote_vim::text::{clamp_normal, line_count, line_len, line_of, line_start};
 use mnote_vim::{Clipboard, Effect, Mode, Vim};
 
-use crate::commands::{COMMANDS, Run};
+use crate::commands::{Invocation, Run};
 use crate::folder_edit::{FolderEditor, FolderOutcome};
 use crate::picker::backlinks::BacklinksPicker;
 use crate::picker::explorer::{Explorer, FileHistory, FileUndo};
@@ -288,6 +289,8 @@ impl Editor {
     }
 
     fn build(buffer: Buffer, source: Source, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // The command registry, and with it the app's ex commands in Vim.
+        crate::commands::install(commands::builtin());
         let clipboard = Rc::new(RefCell::new(ClipboardState::default()));
         let mut vim = Vim::new();
         vim.set_clipboard(Box::new(SharedClipboard(clipboard.clone())));
@@ -430,13 +433,7 @@ impl Editor {
             && self.first_run.is_none()
         {
             cx.stop_propagation();
-            self.run_app_command(
-                AppCommand::Write {
-                    path: None,
-                    force: false,
-                },
-                cx,
-            );
+            self.run_app_command(AppCommand::new("write"), cx);
             return cx.notify();
         }
         if stroke.modifiers.platform
@@ -605,30 +602,15 @@ impl Editor {
     /// The key after `space` in NORMAL mode: `f` finds notes, `/` searches
     /// text, `@` lists this note's headings, `#` lists tags, `b` lists
     /// backlinks, `e` explores, `x` toggles a task, `m` cycles the view.
+    /// The key after the leader: the registry's command bound to
+    /// `space <key>`.
     fn leader_key(&mut self, key: mnote_vim::Key, cx: &mut Context<Self>) {
-        if key == mnote_vim::Key::Char('e') {
-            return self.open_explorer(None, cx);
-        }
-        if key == mnote_vim::Key::Char('x') {
-            return self.toggle_task(cx);
-        }
-        if key == mnote_vim::Key::Char('m') {
-            return self.set_view(self.view.next(), cx);
-        }
-        if key == mnote_vim::Key::Char('b') {
-            return self.open_backlinks(cx);
-        }
-        if key == mnote_vim::Key::Char(',') {
-            return self.open_config(cx);
-        }
-        let query = match key {
-            mnote_vim::Key::Char('f') => "",
-            mnote_vim::Key::Char('/') => "/",
-            mnote_vim::Key::Char('@') => "@",
-            mnote_vim::Key::Char('#') => "#",
-            _ => return,
+        let mnote_vim::Key::Char(c) = key else {
+            return;
         };
-        self.open_finder(query, cx);
+        if let Some(ix) = crate::commands::by_keys(&format!("space {c}")) {
+            self.run_command(ix, cx);
+        }
     }
 
     /// `space b`: the notes that link to this one.
@@ -892,24 +874,11 @@ impl Editor {
     }
 
     /// Runs a command from the palette or the finder's `>` scope.
+    /// Runs the registry's command `ix` (from the palette or a key).
     fn run_command(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let Some(command) = COMMANDS.get(ix) else {
-            return;
-        };
-        match command.run {
-            Run::Ex(ex) => self.picker_action(PickerAction::RunEx(ex.to_owned()), cx),
-            Run::Finder(query) => self.open_finder(query, cx),
-            Run::Keys(keys) => {
-                // A leading space is the leader binding: replay it with the
-                // real leader.
-                let keys = match keys.strip_prefix(' ') {
-                    Some(rest) => format!("{}{rest}", crate::commands::leader()),
-                    None => keys.to_owned(),
-                };
-                for key in mnote_vim::parse_keys(&keys) {
-                    self.press(key, cx);
-                }
-            }
+        let all = crate::commands::all();
+        if let Some(command) = all.get(ix) {
+            self.run(&command.run, &Invocation::default(), cx);
         }
     }
 
@@ -1835,82 +1804,114 @@ impl Editor {
     }
 
     /// Commands from the command line that belong to the app.
+    /// An app command from the command line (or `gd`): the registry's
+    /// command with that ex name runs, with its argument and `!`.
     fn run_app_command(&mut self, command: AppCommand, cx: &mut Context<Self>) {
-        match command {
-            AppCommand::Write { path: None, .. } => {
-                if let Err(err) = self.write(cx) {
-                    self.reply = Some((err.into(), true));
-                } else if let Source::Note { note, .. } = &self.source {
-                    self.reply = Some((format!("\"{}\" written", note.file_name()).into(), false));
-                }
-            }
-            AppCommand::Write { path: Some(_), .. } => {
-                self.reply = Some(("Writing to another file isn't supported yet".into(), true));
-            }
-            AppCommand::Quit { force } => self.quit(false, force, cx),
-            AppCommand::WriteQuit { force } => self.quit(true, force, cx),
-            AppCommand::Edit { .. } => self.not_yet(":edit"),
-            AppCommand::View(name) => match name.as_deref().map(str::trim) {
-                None | Some("") => self.set_view(self.view.next(), cx),
-                Some(name) => match styled::View::from_name(name) {
-                    Some(view) => self.set_view(view, cx),
-                    None => {
-                        self.reply = Some((
-                            format!("E475: Invalid argument: {name} (styled, source or plain)")
-                                .into(),
-                            true,
-                        ))
-                    }
-                },
-            },
-            AppCommand::Explore(folder) => self.open_explorer(folder, cx),
-            AppCommand::Find(_) => self.not_yet(":find"),
-            AppCommand::Daily => self.open_daily(cx),
-            AppCommand::ListNext => self.list_step(1, cx),
-            AppCommand::ListPrevious => self.list_step(-1, cx),
-            AppCommand::FollowLink => self.follow_link(cx),
-            AppCommand::Split { vertical, path } => {
-                let axis = if vertical { Axis::Row } else { Axis::Column };
-                let target = match path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
-                    None => None,
-                    Some(name) => {
-                        let found = {
-                            let index = self.index.borrow();
-                            index.resolve(name).map(|i| index.notes()[i].path.clone())
-                        };
-                        match found {
-                            Some(note) => Some(note),
-                            None => {
-                                self.reply =
-                                    Some((format!("E32: No note named {name}").into(), true));
-                                return;
-                            }
-                        }
-                    }
+        let all = crate::commands::all();
+        let Some(found) = crate::commands::by_ex(&command.name).and_then(|i| all.get(i)) else {
+            self.reply = Some((
+                format!("E492: Not an editor command: {}", command.name).into(),
+                true,
+            ));
+            return;
+        };
+        let call = Invocation {
+            args: command.arg().map(str::to_owned),
+            bang: command.bang,
+        };
+        self.run(&found.run, &call, cx);
+    }
+
+    /// Runs a command's [`Run`].
+    fn run(&mut self, run: &Run, call: &Invocation, cx: &mut Context<Self>) {
+        match run {
+            Run::Ex(ex) => self.picker_action(PickerAction::RunEx(ex.clone()), cx),
+            Run::Finder(query) => self.open_finder(query, cx),
+            Run::Keys(keys) => {
+                // A leading space is the leader binding: replay it with the
+                // real leader.
+                let keys = match keys.strip_prefix(' ') {
+                    Some(rest) => format!("{}{rest}", crate::commands::leader()),
+                    None => keys.clone(),
                 };
-                self.split_pane(axis, cx);
-                if let Some(note) = target {
-                    self.switch_to(note, cx);
+                for key in mnote_vim::parse_keys(&keys) {
+                    self.press(key, cx);
                 }
             }
-            AppCommand::Close => {
-                if !self.close_pane(cx) {
-                    self.reply = Some(("E444: Cannot close last window".into(), true));
-                }
-            }
-            AppCommand::Only => self.only_pane(cx),
-            AppCommand::ListOpen => {
-                if self.list.is_empty() {
+            Run::Action(action) => action(self, call, cx),
+        }
+    }
+
+    /// `:w [path]` (and ⌘S): saves now.
+    fn write_command(&mut self, call: &Invocation, cx: &mut Context<Self>) {
+        if call.args.is_some() {
+            self.reply = Some(("Writing to another file isn't supported yet".into(), true));
+        } else if let Err(err) = self.write(cx) {
+            self.reply = Some((err.into(), true));
+        } else if let Source::Note { note, .. } = &self.source {
+            self.reply = Some((format!("\"{}\" written", note.file_name()).into(), false));
+        }
+    }
+
+    /// `:view [styled|source|plain]`, and `space m` (no argument cycles).
+    fn view_command(&mut self, name: Option<&str>, cx: &mut Context<Self>) {
+        match name.map(str::trim) {
+            None | Some("") => self.set_view(self.view.next(), cx),
+            Some(name) => match styled::View::from_name(name) {
+                Some(view) => self.set_view(view, cx),
+                None => {
                     self.reply = Some((
-                        "E42: No results list (⌃q in a / search makes one)".into(),
+                        format!("E475: Invalid argument: {name} (styled, source or plain)").into(),
                         true,
-                    ));
-                } else {
-                    let list = ListPicker::new(self.list.clone());
-                    self.picker = Some(Picker::new(Box::new(list)));
-                    self.restart_blink(cx);
+                    ))
+                }
+            },
+        }
+    }
+
+    /// `:split [note]` / `:vsplit [note]`: a new pane, on that note or this one.
+    fn split_command(&mut self, vertical: bool, path: Option<&str>, cx: &mut Context<Self>) {
+        let axis = if vertical { Axis::Row } else { Axis::Column };
+        let target = match path.map(str::trim).filter(|p| !p.is_empty()) {
+            None => None,
+            Some(name) => {
+                let found = {
+                    let index = self.index.borrow();
+                    index.resolve(name).map(|i| index.notes()[i].path.clone())
+                };
+                match found {
+                    Some(note) => Some(note),
+                    None => {
+                        self.reply = Some((format!("E32: No note named {name}").into(), true));
+                        return;
+                    }
                 }
             }
+        };
+        self.split_pane(axis, cx);
+        if let Some(note) = target {
+            self.switch_to(note, cx);
+        }
+    }
+
+    /// `:close`.
+    fn close_command(&mut self, cx: &mut Context<Self>) {
+        if !self.close_pane(cx) {
+            self.reply = Some(("E444: Cannot close last window".into(), true));
+        }
+    }
+
+    /// `:copen`: the results list in a picker.
+    fn open_results_list(&mut self, cx: &mut Context<Self>) {
+        if self.list.is_empty() {
+            self.reply = Some((
+                "E42: No results list (⌃q in a / search makes one)".into(),
+                true,
+            ));
+        } else {
+            let list = ListPicker::new(self.list.clone());
+            self.picker = Some(Picker::new(Box::new(list)));
+            self.restart_blink(cx);
         }
     }
 

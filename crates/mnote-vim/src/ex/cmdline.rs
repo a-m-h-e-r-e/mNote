@@ -1039,19 +1039,14 @@ mod tests {
 
     #[test]
     fn errors_and_app_commands() {
+        crate::ex::tests::test_app_commands();
         let (mut vim, mut buf) = setup("text\n");
         type_keys(&mut vim, &mut buf, ":frob<cr>");
         let message = vim.message().expect("error");
         assert!(message.error);
         assert_eq!(message.text, "E492: Not an editor command: frob");
         type_keys(&mut vim, &mut buf, ":w<cr>");
-        assert_eq!(
-            vim.take_app_command(),
-            Some(AppCommand::Write {
-                path: None,
-                force: false
-            })
-        );
+        assert_eq!(vim.take_app_command(), Some(AppCommand::new("write")));
         assert_eq!(vim.take_app_command(), None);
     }
 
@@ -1059,7 +1054,7 @@ mod tests {
     fn gd_asks_the_app_to_follow_a_link() {
         let (mut vim, mut buf) = setup("see [[ui-design]]\n");
         type_keys(&mut vim, &mut buf, "wwgd");
-        assert_eq!(vim.take_app_command(), Some(AppCommand::FollowLink));
+        assert_eq!(vim.take_app_command(), Some(AppCommand::new("follow")));
         assert_eq!(vim.mode(), crate::Mode::Normal);
         type_keys(&mut vim, &mut buf, "dgd");
         assert_eq!(
@@ -1400,6 +1395,7 @@ mod editing_tests {
 
     #[test]
     fn tab_completes_paths_from_the_app() {
+        crate::ex::tests::test_app_commands();
         let (mut vim, mut buf) = (Vim::new(), Buffer::new("x\n"));
         vim.set_completer(Box::new(Paths));
         type_keys(&mut vim, &mut buf, ":e in<tab>");

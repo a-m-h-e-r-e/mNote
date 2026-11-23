@@ -2,8 +2,8 @@
 //! `:view` modes and note paths. Pure functions over the typed text, so the
 //! popup's contents are easy to test.
 
-use super::Options;
 use super::parse;
+use super::{ArgKind, Options};
 
 /// One completion: what gets inserted and a short description.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,21 +46,13 @@ impl Completion {
 /// Commands offered by completion, with what each does. Abbreviations that
 /// are only aliases (`t`, `display`, `xit`) are left out.
 const COMMANDS: &[(&str, &str)] = &[
-    ("cnext", "next place in the results list"),
-    ("copen", "show the results list"),
-    ("cprevious", "previous place in the results list"),
     ("copy", "copy lines below an address"),
-    ("daily", "open today's note"),
     ("delete", "delete lines"),
-    ("edit", "open a note"),
-    ("explore", "open the explorer"),
-    ("find", "find a note"),
     ("global", "run a command on matching lines"),
     ("move", "move lines below an address"),
     ("nohlsearch", "clear search highlights"),
     ("normal", "run normal-mode keys on lines"),
     ("put", "put a register below a line"),
-    ("quit", "close the window"),
     ("redo", "redo a change"),
     ("registers", "list registers"),
     ("set", "set an option"),
@@ -72,9 +64,6 @@ const COMMANDS: &[(&str, &str)] = &[
     ("substitute", "replace matches"),
     ("undo", "undo a change"),
     ("vglobal", "run a command on other lines"),
-    ("view", "styled, source or plain"),
-    ("wq", "save and close"),
-    ("write", "save the note"),
     ("yank", "yank lines"),
 ];
 
@@ -97,16 +86,24 @@ pub fn candidates(
     let trimmed = rest.trim_start();
     let name_at = rest_at + (rest.len() - trimmed.len());
 
-    // Still typing the command's name.
+    // Still typing the command's name: Vim's and the app's, by name.
     if trimmed.chars().all(|c| c.is_ascii_alphabetic()) {
-        let items = COMMANDS
+        let app = parse::app_commands();
+        let mut items: Vec<Candidate> = COMMANDS
             .iter()
+            .map(|(name, detail)| (*name, *detail))
+            .chain(app.iter().map(|c| (c.name, c.spec.detail.as_str())))
             .filter(|(name, _)| name.starts_with(trimmed))
             .map(|(name, detail)| Candidate {
-                text: (*name).to_owned(),
-                detail: (*detail).to_owned(),
+                text: name.to_owned(),
+                detail: detail.to_owned(),
             })
             .collect();
+        // By name; variants of one command (`sort`, `sort!`) keep their order.
+        items.sort_by_key(|c| {
+            let end = c.text.find(|ch: char| !ch.is_ascii_alphabetic());
+            c.text[..end.unwrap_or(c.text.len())].to_owned()
+        });
         return Some((name_at, items));
     }
 
@@ -126,17 +123,16 @@ pub fn candidates(
 
     let items = match name {
         "set" => option_candidates(word, options),
-        "view" => ["styled", "source", "plain"]
-            .iter()
-            .filter(|v| v.starts_with(word))
-            .map(|v| Candidate {
-                text: (*v).to_owned(),
-                detail: format!("{v} view"),
-            })
-            .collect(),
-        "edit" | "write" | "find" => path_candidates(word, paths(), false),
-        "explore" => path_candidates(word, paths(), true),
-        _ => return None,
+        name => match parse::app_command(name)?.args {
+            ArgKind::Choice(choices) => choices
+                .into_iter()
+                .filter(|(v, _)| v.starts_with(word))
+                .map(|(text, detail)| Candidate { text, detail })
+                .collect(),
+            ArgKind::Note => path_candidates(word, paths(), false),
+            ArgKind::Folder => path_candidates(word, paths(), true),
+            ArgKind::None | ArgKind::Any => return None,
+        },
     };
     Some((start, items))
 }
@@ -208,6 +204,7 @@ mod tests {
 
     #[test]
     fn command_names_after_a_range() {
+        crate::ex::tests::test_app_commands();
         assert_eq!(
             names("'<,'>so"),
             ["sort", "sort!", "sort i", "sort n", "sort u"]
@@ -220,6 +217,7 @@ mod tests {
 
     #[test]
     fn options_views_and_paths() {
+        crate::ex::tests::test_app_commands();
         assert_eq!(names("set ig"), ["ignorecase"]);
         assert_eq!(
             names("set no"),

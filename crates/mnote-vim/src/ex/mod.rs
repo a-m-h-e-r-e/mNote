@@ -1,8 +1,8 @@
 //! Ex commands: what runs after `:` (decision D-002).
 //!
 //! [`Vim::execute`] parses a command line and runs it against the buffer as
-//! one undo step. Text commands run here; commands that belong to the app
-//! (`:w`, `:q`, `:e`, `:view`, `:explore`, `:find`, `:daily`) come back as an
+//! one undo step. Text commands run here; commands the app registered
+//! ([`set_app_commands`]: `:w`, `:q`, `:daily`, `:split`) come back as an
 //! [`AppCommand`]. Errors use Vim's numbers and wording (`E486: Pattern not
 //! found: modal`).
 
@@ -73,43 +73,65 @@ impl ExError {
     }
 }
 
-/// A command for the app rather than the text.
+/// A command for the app rather than the text: a name the app registered
+/// with [`set_app_commands`] (`:w`, `:daily`, `:split`), or `follow` from
+/// `gd`. The app looks the name up in its command registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AppCommand {
-    /// `:w [path]`
-    Write { path: Option<String>, force: bool },
-    /// `:q`
-    Quit { force: bool },
-    /// `:wq`, `:x`
-    WriteQuit { force: bool },
-    /// `:e [path]`
-    Edit { path: Option<String>, force: bool },
-    /// `:view [styled|source|plain]` (no argument cycles).
-    View(Option<String>),
-    /// `:explore [folder]`
-    Explore(Option<String>),
-    /// `:find [query]`
-    Find(Option<String>),
-    /// `:daily`
-    Daily,
-    /// `:cnext`: the next place in the results list.
-    ListNext,
-    /// `:cprevious` / `:cNext`
-    ListPrevious,
-    /// `:copen`: the results list in a picker.
-    ListOpen,
-    /// `gd`: follow the `[[link]]` at the cursor.
-    FollowLink,
-    /// `:split [note]` (`vertical`: `:vsplit`): a new pane, on that note or
-    /// this one.
-    Split {
-        vertical: bool,
-        path: Option<String>,
-    },
-    /// `:close`: closes the focused pane.
-    Close,
-    /// `:only`: closes every other pane.
-    Only,
+pub struct AppCommand {
+    /// The full name, after abbreviation (`w` → `write`).
+    pub name: String,
+    /// What followed the name and `!`, trimmed.
+    pub args: String,
+    pub bang: bool,
+}
+
+impl AppCommand {
+    pub fn new(name: &str) -> Self {
+        AppCommand {
+            name: name.to_owned(),
+            args: String::new(),
+            bang: false,
+        }
+    }
+
+    /// The argument, if one was given.
+    pub fn arg(&self) -> Option<&str> {
+        (!self.args.is_empty()).then_some(self.args.as_str())
+    }
+}
+
+/// What an app command's argument is, for completion and checking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArgKind {
+    /// No argument: one is an error (`E488: Trailing characters`).
+    None,
+    /// Anything, not completed.
+    Any,
+    /// A note path, completed from the vault.
+    Note,
+    /// A folder, completed from the vault.
+    Folder,
+    /// One of these words, each with what it means.
+    Choice(Vec<(String, String)>),
+}
+
+/// An ex command the app adds (see [`set_app_commands`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandSpec {
+    pub name: String,
+    /// The shortest abbreviation accepted (`write` takes `w`: 1).
+    pub abbrev: usize,
+    /// What it does, for completion.
+    pub detail: String,
+    pub args: ArgKind,
+}
+
+/// Registers the app's ex commands (replacing any before), for every Vim on
+/// this thread: they parse with their abbreviations after Vim's own (so
+/// `:s` stays `substitute`), complete, colour, and run as an
+/// [`AppCommand`].
+pub fn set_app_commands(specs: Vec<CommandSpec>) {
+    parse::set_app_commands(specs);
 }
 
 /// What a successful command produced.
@@ -314,7 +336,6 @@ impl Vim {
                 Err(ExError::trailing(args))
             }
         };
-        let arg = || (!args.is_empty()).then(|| args.to_owned());
         match cmd.name {
             "goto" => {
                 let (_, last) = self.lines(&cmd, buf.text(), DefaultRange::Current)?;
@@ -412,22 +433,6 @@ impl Vim {
                 result
             }
             "registers" | "display" => Ok(ExOutcome::message(self.list_registers())),
-            "write" => Ok(ExOutcome::app(AppCommand::Write {
-                path: arg(),
-                force: cmd.bang,
-            })),
-            "wq" | "xit" => Ok(ExOutcome::app(AppCommand::WriteQuit { force: cmd.bang })),
-            "quit" => {
-                no_args(args)?;
-                Ok(ExOutcome::app(AppCommand::Quit { force: cmd.bang }))
-            }
-            "edit" => Ok(ExOutcome::app(AppCommand::Edit {
-                path: arg(),
-                force: cmd.bang,
-            })),
-            "view" => Ok(ExOutcome::app(AppCommand::View(arg()))),
-            "explore" => Ok(ExOutcome::app(AppCommand::Explore(arg()))),
-            "find" => Ok(ExOutcome::app(AppCommand::Find(arg()))),
             "map" | "noremap" | "nmap" | "nnoremap" | "vmap" | "vnoremap" | "imap" | "inoremap" => {
                 let modes = map_modes(cmd.name);
                 if args.is_empty() {
@@ -466,31 +471,20 @@ impl Vim {
                 }
                 Ok(ExOutcome::default())
             }
-            "cnext" | "cprevious" | "cNext" | "copen" => {
-                no_args(args)?;
-                Ok(ExOutcome::app(match cmd.name {
-                    "cnext" => AppCommand::ListNext,
-                    "copen" => AppCommand::ListOpen,
-                    _ => AppCommand::ListPrevious,
-                }))
-            }
-            "daily" => {
-                no_args(args)?;
-                Ok(ExOutcome::app(AppCommand::Daily))
-            }
-            "split" | "vsplit" => Ok(ExOutcome::app(AppCommand::Split {
-                vertical: cmd.name == "vsplit",
-                path: arg(),
-            })),
-            "close" | "only" => {
-                no_args(args)?;
-                Ok(ExOutcome::app(if cmd.name == "close" {
-                    AppCommand::Close
-                } else {
-                    AppCommand::Only
-                }))
-            }
-            other => Err(ExError::not_a_command(other)),
+            name => match parse::app_command(name) {
+                // One the app registered: it runs it.
+                Some(spec) => {
+                    if spec.args == ArgKind::None {
+                        no_args(args)?;
+                    }
+                    Ok(ExOutcome::app(AppCommand {
+                        name: name.to_owned(),
+                        args: args.to_owned(),
+                        bang: cmd.bang,
+                    }))
+                }
+                None => Err(ExError::not_a_command(name)),
+            },
         }
     }
 
@@ -1070,8 +1064,44 @@ impl Vim {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// The app's ex commands as mNote registers them, for these tests.
+    pub(crate) fn test_app_commands() {
+        let spec = |name: &str, abbrev: usize, args: ArgKind| CommandSpec {
+            name: name.into(),
+            abbrev,
+            detail: format!("{name} (test)"),
+            args,
+        };
+        let views = ArgKind::Choice(
+            ["styled", "source", "plain"]
+                .iter()
+                .map(|v| ((*v).to_owned(), format!("{v} view")))
+                .collect(),
+        );
+        set_app_commands(vec![
+            spec("write", 1, ArgKind::Note),
+            spec("wq", 2, ArgKind::None),
+            spec("xit", 1, ArgKind::None),
+            spec("quit", 1, ArgKind::None),
+            spec("edit", 1, ArgKind::Note),
+            spec("view", 4, views),
+            spec("explore", 3, ArgKind::Folder),
+            spec("find", 3, ArgKind::Note),
+            spec("daily", 3, ArgKind::None),
+            spec("cnext", 2, ArgKind::None),
+            spec("cNext", 2, ArgKind::None),
+            spec("cprevious", 2, ArgKind::None),
+            spec("copen", 4, ArgKind::None),
+            spec("split", 2, ArgKind::Note),
+            spec("vsplit", 2, ArgKind::Note),
+            spec("close", 3, ArgKind::None),
+            spec("only", 2, ArgKind::None),
+            spec("follow", 3, ArgKind::None),
+        ]);
+    }
 
     /// Runs `command` on `before` (cursor at its `|`); returns the text with
     /// `|` at the new cursor and the outcome.
@@ -1287,58 +1317,43 @@ mod tests {
 
     #[test]
     fn app_commands_go_back_to_the_app() {
+        test_app_commands();
         let app = |cmd: &str| ex("|x", cmd).1.unwrap_or_else(|e| panic!("{cmd}: {e}")).app;
-        assert_eq!(
-            app("w"),
-            Some(AppCommand::Write {
-                path: None,
-                force: false
+        let call = |name: &str, args: &str, bang: bool| {
+            Some(AppCommand {
+                name: name.into(),
+                args: args.into(),
+                bang,
             })
-        );
-        assert_eq!(
-            app("w! copy.md"),
-            Some(AppCommand::Write {
-                path: Some("copy.md".into()),
-                force: true
-            })
-        );
-        assert_eq!(app("wq"), Some(AppCommand::WriteQuit { force: false }));
-        assert_eq!(app("x"), Some(AppCommand::WriteQuit { force: false }));
-        assert_eq!(app("q!"), Some(AppCommand::Quit { force: true }));
-        assert_eq!(
-            app("e notes/x.md"),
-            Some(AppCommand::Edit {
-                path: Some("notes/x.md".into()),
-                force: false
-            })
-        );
-        assert_eq!(
-            app("view source"),
-            Some(AppCommand::View(Some("source".into())))
-        );
-        assert_eq!(app("explore"), Some(AppCommand::Explore(None)));
-        assert_eq!(
-            app("vs ideas"),
-            Some(AppCommand::Split {
-                vertical: true,
-                path: Some("ideas".into())
-            })
-        );
-        assert_eq!(
-            app("sp"),
-            Some(AppCommand::Split {
-                vertical: false,
-                path: None
-            })
-        );
-        assert_eq!(app("clo"), Some(AppCommand::Close));
-        assert_eq!(app("on"), Some(AppCommand::Only));
-        assert_eq!(
-            app("find road"),
-            Some(AppCommand::Find(Some("road".into())))
-        );
-        assert_eq!(app("daily"), Some(AppCommand::Daily));
+        };
+        assert_eq!(app("w"), call("write", "", false));
+        assert_eq!(app("w! copy.md"), call("write", "copy.md", true));
+        assert_eq!(app("wq"), call("wq", "", false));
+        assert_eq!(app("x"), call("xit", "", false));
+        assert_eq!(app("q!"), call("quit", "", true));
+        assert_eq!(app("e notes/x.md"), call("edit", "notes/x.md", false));
+        assert_eq!(app("view source"), call("view", "source", false));
+        assert_eq!(app("explore"), call("explore", "", false));
+        assert_eq!(app("vs ideas"), call("vsplit", "ideas", false));
+        assert_eq!(app("sp"), call("split", "", false));
+        assert_eq!(app("clo"), call("close", "", false));
+        assert_eq!(app("on"), call("only", "", false));
+        assert_eq!(app("find road"), call("find", "road", false));
+        assert_eq!(app("daily"), call("daily", "", false));
+        assert_eq!(app("cN"), call("cNext", "", false));
         assert_eq!(err("|x", "q now"), "E488: Trailing characters: now");
+        // Vim's own come first: `:s` is substitute, `:co` copy.
+        assert_eq!(parse::lookup("s"), Some("substitute"));
+        assert_eq!(parse::lookup("co"), Some("copy"));
+        assert_eq!(parse::lookup("da"), None, "daily needs dai");
+        assert_eq!(AppCommand::new("daily").arg(), None);
+    }
+
+    #[test]
+    fn without_app_commands_their_names_are_unknown() {
+        set_app_commands(Vec::new());
+        assert_eq!(err("|x", "w"), "E492: Not an editor command: w");
+        test_app_commands();
     }
 
     #[test]

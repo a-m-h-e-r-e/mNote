@@ -1147,7 +1147,7 @@ impl Vim {
             // `gd` follows the link under the cursor: the app does that.
             (Pending::G, Key::Char('d')) => {
                 self.cancel();
-                self.app_command = Some(crate::ex::AppCommand::FollowLink);
+                self.app_command = Some(crate::ex::AppCommand::new("follow"));
                 return Effect::Handled;
             }
             (Pending::G, Key::Char(c @ ('u' | 'U' | '~'))) => {

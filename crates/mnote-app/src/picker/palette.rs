@@ -8,10 +8,15 @@ use mnote_core::index::StringHit;
 use mnote_vim::Mode;
 
 use super::{Confirm, PickerAction, PickerDelegate, PreviewContent, Row};
-use crate::commands::COMMANDS;
+use std::rc::Rc;
+
+use crate::commands::{self, Command};
 use crate::ui::Hint;
 
 pub struct CommandPalette {
+    /// The registry, and the indexes of its commands the palette lists.
+    all: Rc<Vec<Command>>,
+    listed: Vec<usize>,
     haystacks: Vec<String>,
     search: NoteSearch,
     hits: Vec<StringHit>,
@@ -19,11 +24,21 @@ pub struct CommandPalette {
 
 impl Default for CommandPalette {
     fn default() -> Self {
+        let all = commands::all();
+        let listed: Vec<usize> = (0..all.len()).filter(|&i| all[i].label.is_some()).collect();
         CommandPalette {
-            haystacks: COMMANDS.iter().map(|c| c.haystack()).collect(),
+            haystacks: listed.iter().map(|&i| all[i].haystack()).collect(),
+            all,
+            listed,
             search: NoteSearch::new(),
             hits: Vec::new(),
         }
+    }
+}
+
+impl CommandPalette {
+    fn command(&self, hit: usize) -> &Command {
+        &self.all[self.listed[self.hits[hit].item]]
     }
 }
 
@@ -41,7 +56,7 @@ impl PickerDelegate for CommandPalette {
 
     fn set_query(&mut self, query: &str) {
         let haystacks = self.haystacks.iter().map(String::as_str);
-        self.hits = self.search.strings(query, haystacks, COMMANDS.len());
+        self.hits = self.search.strings(query, haystacks, self.listed.len());
     }
 
     fn len(&self) -> usize {
@@ -50,10 +65,11 @@ impl PickerDelegate for CommandPalette {
 
     fn row(&self, ix: usize) -> Row {
         let hit = &self.hits[ix];
-        let command = &COMMANDS[hit.item];
-        let len = command.label.chars().count();
+        let command = self.command(ix);
+        let label = command.label.clone().unwrap_or_default();
+        let len = label.chars().count();
         Row {
-            label: command.label.into(),
+            label: label.into(),
             // Letters matched in the keys or ex form aren't in the label.
             matches: hit
                 .indices
@@ -75,7 +91,8 @@ impl PickerDelegate for CommandPalette {
     }
 
     fn footer(&self, ix: usize) -> Option<SharedString> {
-        Some(COMMANDS[self.hits.get(ix)?.item].about.into())
+        self.hits.get(ix)?;
+        Some(self.command(ix).about.clone().into())
     }
 
     fn compact(&self) -> bool {
@@ -83,7 +100,7 @@ impl PickerDelegate for CommandPalette {
     }
 
     fn confirm(&mut self, ix: usize) -> Confirm {
-        Confirm::Act(PickerAction::Command(self.hits[ix].item))
+        Confirm::Act(PickerAction::Command(self.listed[self.hits[ix].item]))
     }
 
     fn hints(&self, _mode: Mode) -> Vec<Hint> {
@@ -101,10 +118,12 @@ mod tests {
 
     #[test]
     fn matches_labels_keys_and_ex_forms() {
+        commands::install(crate::editor::commands::builtin());
         let mut palette = CommandPalette::default();
         palette.set_query("");
-        assert_eq!(palette.len(), COMMANDS.len(), "everything, in order");
-        assert_eq!(palette.row(0).label.as_ref(), COMMANDS[0].label);
+        let listed = commands::all().iter().filter(|c| c.label.is_some()).count();
+        assert_eq!(palette.len(), listed, "everything in the palette, in order");
+        assert_eq!(palette.row(0).label.as_ref(), "Find a note");
 
         palette.set_query("tog rel");
         assert_eq!(
@@ -132,6 +151,9 @@ mod tests {
         let Confirm::Act(PickerAction::Command(i)) = palette.confirm(0) else {
             panic!("a command");
         };
-        assert_eq!(COMMANDS[i].label, "Command-line history");
+        assert_eq!(
+            commands::all()[i].label.as_deref(),
+            Some("Command-line history")
+        );
     }
 }

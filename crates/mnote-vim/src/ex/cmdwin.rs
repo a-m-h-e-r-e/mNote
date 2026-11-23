@@ -92,10 +92,11 @@ impl Vim {
             }
         }
         // `:q` (or `:wq`, `:x`) inside the window closes it.
-        if matches!(
-            win.vim.take_app_command(),
-            Some(super::AppCommand::Quit { .. } | super::AppCommand::WriteQuit { .. })
-        ) {
+        if win
+            .vim
+            .take_app_command()
+            .is_some_and(|c| matches!(c.name.as_str(), "quit" | "wq" | "xit"))
+        {
             return;
         }
         self.cmdwin = Some(win);
@@ -142,6 +143,7 @@ mod tests {
 
     #[test]
     fn closing_the_window() {
+        crate::ex::tests::test_app_commands();
         let mut buf = Buffer::new("x\n");
         let mut vim = Vim::new();
         type_keys(&mut vim, &mut buf, "q:ihello<esc>");

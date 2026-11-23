@@ -62,19 +62,10 @@ const COMMANDS: &[(&str, usize)] = &[
     ("vmap", 2),
     ("vnoremap", 2),
     ("vunmap", 2),
-    ("cnext", 2),
-    ("cNext", 2),
-    ("cprevious", 2),
-    ("copen", 4),
-    ("split", 2),
-    ("vsplit", 2),
-    ("close", 3),
-    ("only", 2),
     ("global", 1),
     ("vglobal", 1),
     ("delete", 1),
     ("display", 2),
-    ("daily", 3),
     ("move", 1),
     ("t", 1),
     ("copy", 2),
@@ -87,14 +78,6 @@ const COMMANDS: &[(&str, usize)] = &[
     ("undo", 1),
     ("redo", 3),
     ("registers", 3),
-    ("write", 1),
-    ("wq", 2),
-    ("xit", 1),
-    ("quit", 1),
-    ("edit", 1),
-    ("explore", 3),
-    ("view", 4),
-    ("find", 3),
 ];
 
 /// Splits `input` (without the leading `:`) into range, name, `!` and args.
@@ -141,16 +124,76 @@ pub fn parse(input: &str) -> Result<Parsed<'_>, ExError> {
     })
 }
 
+/// A command's full name from what was typed: Vim's own first, then the
+/// app's (so `:s` stays `substitute` and `:sp` is the app's `split`).
 pub(crate) fn lookup(word: &str) -> Option<&'static str> {
     COMMANDS
         .iter()
         .find(|(full, min)| word.len() >= *min && full.starts_with(word))
         .map(|(full, _)| *full)
+        .or_else(|| {
+            APP.with(|app| {
+                app.borrow()
+                    .iter()
+                    .find(|c| word.len() >= c.abbrev.max(1) && c.name.starts_with(word))
+                    .map(|c| c.name)
+            })
+        })
 }
 
 /// Whether `word` starts some command's name (`so` while typing `sort`).
 pub(crate) fn is_command_prefix(word: &str) -> bool {
     COMMANDS.iter().any(|(full, _)| full.starts_with(word))
+        || APP.with(|app| app.borrow().iter().any(|c| c.name.starts_with(word)))
+}
+
+/// An app command as registered, with its name kept for the program's life
+/// (parsed names are `&'static str`; the app registers a few dozen once).
+pub(crate) struct AppSpec {
+    pub name: &'static str,
+    pub abbrev: usize,
+    pub spec: super::CommandSpec,
+}
+
+thread_local! {
+    static APP: std::cell::RefCell<std::rc::Rc<[AppSpec]>> =
+        std::cell::RefCell::new(std::rc::Rc::from(Vec::new()));
+}
+
+pub(crate) fn set_app_commands(specs: Vec<super::CommandSpec>) {
+    let old = APP.with(|app| app.borrow().clone());
+    let specs: Vec<AppSpec> = specs
+        .into_iter()
+        .map(|spec| {
+            // Reuse a name kept before rather than keeping it again.
+            let name = old
+                .iter()
+                .find(|o| o.name == spec.name)
+                .map(|o| o.name)
+                .unwrap_or_else(|| Box::leak(spec.name.clone().into_boxed_str()));
+            AppSpec {
+                name,
+                abbrev: spec.abbrev,
+                spec,
+            }
+        })
+        .collect();
+    APP.with(|app| *app.borrow_mut() = std::rc::Rc::from(specs));
+}
+
+/// The app's command named `name` (its full name).
+pub(crate) fn app_command(name: &str) -> Option<super::CommandSpec> {
+    APP.with(|app| {
+        app.borrow()
+            .iter()
+            .find(|c| c.name == name)
+            .map(|c| c.spec.clone())
+    })
+}
+
+/// Every app command, for completion.
+pub(crate) fn app_commands() -> std::rc::Rc<[AppSpec]> {
+    APP.with(|app| app.borrow().clone())
 }
 
 pub(crate) fn parse_range(input: &str) -> Result<(Range, &str), ExError> {
@@ -316,6 +359,7 @@ mod tests {
 
     #[test]
     fn names_abbreviations_and_bang() {
+        crate::ex::tests::test_app_commands();
         let p = parse("s/a/b/g").expect("ok");
         assert_eq!((p.name, p.args), ("substitute", "/a/b/g"));
         assert_eq!(parse("g!/x/d").expect("ok").name, "global");
