@@ -403,6 +403,7 @@ impl Editor {
             PickerAction::ListGo(n) => self.list_go(n, cx),
             PickerAction::Command(n) => self.run_command(n, cx),
             PickerAction::EditFolder(folder) => self.open_folder_editor(folder, cx),
+            PickerAction::Callback(callback) => (callback.0)(self, cx),
             PickerAction::RunEx(command) => {
                 let revision = self.buffer.revision();
                 match self.vim.execute(&command, &mut self.buffer) {

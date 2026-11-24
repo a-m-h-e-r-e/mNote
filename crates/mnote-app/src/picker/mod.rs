@@ -8,6 +8,7 @@
 //! on top of itself.
 
 pub mod backlinks;
+pub mod custom;
 pub mod explorer;
 pub mod finder;
 pub mod list;
@@ -138,7 +139,31 @@ pub enum PickerAction {
     Command(usize),
     /// Edit this folder (vault-relative) as text.
     EditFolder(String),
+    /// Run code in the app (a plugin's `on_select`).
+    Callback(PickerCallback),
 }
+
+/// What a picker callback runs, with the editor.
+pub type PickerFn =
+    std::rc::Rc<dyn Fn(&mut crate::editor::Editor, &mut gpui::Context<crate::editor::Editor>)>;
+
+/// Code a picker row runs when chosen (a plugin's picker).
+#[derive(Clone)]
+pub struct PickerCallback(pub PickerFn);
+
+impl std::fmt::Debug for PickerCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PickerCallback")
+    }
+}
+
+impl PartialEq for PickerCallback {
+    fn eq(&self, other: &Self) -> bool {
+        std::rc::Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for PickerCallback {}
 
 /// A place in the results list.
 #[derive(Debug, Clone, PartialEq, Eq)]

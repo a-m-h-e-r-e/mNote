@@ -180,6 +180,13 @@ impl Bus {
         self.last = Some(now);
     }
 
+    /// Takes `now` as the last snapshot without sending events: what a
+    /// subscriber itself changed doesn't come back to it (a TextChanged
+    /// handler that edits would otherwise run forever).
+    pub fn resync(&mut self, now: Snapshot) {
+        self.last = Some(now);
+    }
+
     /// Whether events wait and no flush is asked for yet (then asks).
     pub fn needs_flush(&mut self) -> bool {
         let needed = !self.queue.is_empty() && !self.scheduled;

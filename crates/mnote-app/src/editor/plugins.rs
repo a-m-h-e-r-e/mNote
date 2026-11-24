@@ -33,13 +33,15 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use gpui::Context;
+use gpui::prelude::FluentBuilder;
+use gpui::{Context, IntoElement, Styled};
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 use mnote_core::config::Config;
 use mnote_vim::ex::ArgKind;
 use mnote_vim::text::{clamp_normal, line_count, line_of, line_start};
 
 use super::Editor;
+use super::events::{EditorEvent, EventKind};
 use crate::commands::{Command, Invocation, Run};
 
 /// A command or key slower than this says so.
@@ -52,12 +54,43 @@ enum Rhs {
     Ex(String),
 }
 
+/// Something a script asked the editor to start (it has no editor or
+/// window while it runs).
+enum Request {
+    Picker {
+        title: String,
+        items: Vec<crate::picker::custom::Item>,
+        on_select: usize,
+    },
+    Job {
+        cmd: Vec<String>,
+        on_stdout: Option<usize>,
+        on_exit: Option<usize>,
+    },
+}
+
+/// A row a block renderer returned: text, in a theme colour.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockRow {
+    pub text: String,
+    pub color: Option<String>,
+}
+
+/// Rendered blocks by language and text; `None` while one renders.
+type BlockCache = std::collections::HashMap<(String, String), Option<Rc<Vec<BlockRow>>>>;
+
 /// What `init.lua` asked for while it ran, for the editor to install.
 #[derive(Default)]
 struct HostState {
     callbacks: Vec<RegistryKey>,
     commands: Vec<(String, String, usize)>,
     bindings: Vec<(char, String, Rhs, Option<String>)>,
+    /// `mnote.on`: the event, a note pattern, the callback.
+    subscriptions: Vec<(EventKind, Option<String>, usize)>,
+    /// Pickers and jobs to start.
+    requests: Vec<Request>,
+    /// `mnote.blocks.register`: a fence language and its render callback.
+    blocks: Vec<(String, usize)>,
     /// `mnote.notify` texts waiting to be shown.
     notices: Vec<String>,
     /// config.toml's `[plugins.*]` tables, for `mnote.config`.
@@ -68,6 +101,8 @@ struct HostState {
 pub struct LuaHost {
     lua: Lua,
     state: Rc<RefCell<HostState>>,
+    /// Rendered blocks by language and text; `None` while one renders.
+    block_rows: RefCell<BlockCache>,
     /// Where the code came from, for messages (`init.lua`).
     source: String,
 }
@@ -84,6 +119,8 @@ const SCOPED: &[(&str, &str)] = &[
     ("buf", "insert"),
     ("", "note"),
     ("", "mode"),
+    ("", "decorate"),
+    ("", "undecorate"),
 ];
 
 impl LuaHost {
@@ -97,6 +134,7 @@ impl LuaHost {
         let host = LuaHost {
             lua: Lua::new(),
             state: Rc::default(),
+            block_rows: RefCell::default(),
             source,
         };
         host.set_plugins(config);
@@ -218,6 +256,127 @@ impl LuaHost {
             })?,
         )?;
 
+        let state = self.state.clone();
+        mnote.set(
+            "on",
+            lua.create_function(
+                move |lua, (name, a, b): (String, Value, Option<Function>)| {
+                    let kind = event_kind(&name).ok_or_else(|| {
+                        mlua::Error::runtime(format!("there's no event called {name}"))
+                    })?;
+                    let (pattern, f) = match (a, b) {
+                        (Value::Function(f), None) => (None, f),
+                        (Value::Table(opts), Some(f)) => {
+                            (opts.get::<Option<String>>("pattern")?, f)
+                        }
+                        _ => {
+                            return Err(mlua::Error::runtime(
+                                "mnote.on(event, fn) or mnote.on(event, { pattern = \"…\" }, fn)",
+                            ));
+                        }
+                    };
+                    let mut s = state.borrow_mut();
+                    s.callbacks.push(lua.create_registry_value(f)?);
+                    let ix = s.callbacks.len() - 1;
+                    s.subscriptions.push((kind, pattern, ix));
+                    Ok(())
+                },
+            )?,
+        )?;
+
+        let picker = lua.create_table()?;
+        let state = self.state.clone();
+        picker.set(
+            "open",
+            lua.create_function(move |lua, spec: Table| {
+                let title = spec
+                    .get::<Option<String>>("title")?
+                    .unwrap_or_else(|| "Pick".into());
+                let on_select: Function = spec.get("on_select").map_err(|_| {
+                    mlua::Error::runtime("a picker needs on_select = function(item, index)")
+                })?;
+                let mut items = Vec::new();
+                for item in spec.get::<Table>("items")?.sequence_values::<Value>() {
+                    items.push(match item? {
+                        Value::Table(t) => crate::picker::custom::Item {
+                            text: t.get("text")?,
+                            detail: t.get("detail")?,
+                        },
+                        other => crate::picker::custom::Item {
+                            text: lua
+                                .coerce_string(other)?
+                                .map_or_else(String::new, |s| s.to_string_lossy()),
+                            detail: None,
+                        },
+                    });
+                }
+                let mut s = state.borrow_mut();
+                s.callbacks.push(lua.create_registry_value(on_select)?);
+                let on_select = s.callbacks.len() - 1;
+                s.requests.push(Request::Picker {
+                    title,
+                    items,
+                    on_select,
+                });
+                Ok(())
+            })?,
+        )?;
+        mnote.set("picker", picker)?;
+
+        let job = lua.create_table()?;
+        let state = self.state.clone();
+        job.set(
+            "start",
+            lua.create_function(move |lua, (cmd, opts): (Vec<String>, Option<Table>)| {
+                if cmd.is_empty() {
+                    return Err(mlua::Error::runtime(
+                        "a job needs a command, like {\"git\", \"log\"}",
+                    ));
+                }
+                let mut s = state.borrow_mut();
+                let mut callback = |name: &str| -> mlua::Result<Option<usize>> {
+                    let f = opts
+                        .as_ref()
+                        .map(|o| o.get::<Option<Function>>(name))
+                        .transpose()?
+                        .flatten();
+                    Ok(match f {
+                        Some(f) => {
+                            s.callbacks.push(lua.create_registry_value(f)?);
+                            Some(s.callbacks.len() - 1)
+                        }
+                        None => None,
+                    })
+                };
+                let on_stdout = callback("on_stdout")?;
+                let on_exit = callback("on_exit")?;
+                s.requests.push(Request::Job {
+                    cmd,
+                    on_stdout,
+                    on_exit,
+                });
+                Ok(())
+            })?,
+        )?;
+        mnote.set("job", job)?;
+
+        let blocks = lua.create_table()?;
+        let state = self.state.clone();
+        blocks.set(
+            "register",
+            lua.create_function(move |lua, (lang, opts): (String, Table)| {
+                let render: Function = opts
+                    .get("render")
+                    .map_err(|_| mlua::Error::runtime("a block needs render = function(lines)"))?;
+                let mut s = state.borrow_mut();
+                s.callbacks.push(lua.create_registry_value(render)?);
+                let ix = s.callbacks.len() - 1;
+                s.blocks.push((lang, ix));
+                Ok(())
+            })?,
+        )?;
+        mnote.set("blocks", blocks)?;
+
         mnote.set("buf", lua.create_table()?)?;
         lua.globals().set("mnote", mnote)?;
         self.install_stubs()
@@ -249,9 +408,14 @@ impl LuaHost {
         Ok(())
     }
 
-    /// Calls callback `ix` with `call`, with `mnote.buf` and friends bound
-    /// to `editor` for the call.
-    fn call(&self, editor: &mut Editor, ix: usize, call: &Invocation) -> mlua::Result<()> {
+    /// Calls callback `ix` with what `args` makes, `mnote.buf` and friends
+    /// bound to `editor` for the call; returns what it returned first.
+    fn call_with(
+        &self,
+        editor: &mut Editor,
+        ix: usize,
+        args: impl FnOnce(&Lua) -> mlua::Result<mlua::MultiValue>,
+    ) -> mlua::Result<Value> {
         let f: Function = {
             let state = self.state.borrow();
             let key = state
@@ -260,9 +424,7 @@ impl LuaHost {
                 .ok_or_else(|| mlua::Error::runtime("that function is gone"))?;
             self.lua.registry_value(key)?
         };
-        let arg = self.lua.create_table()?;
-        arg.set("args", call.args.clone().unwrap_or_default())?;
-        arg.set("bang", call.bang)?;
+        let args = args(&self.lua)?;
         let editor = RefCell::new(editor);
         let result = self.lua.scope(|scope| {
             let mnote: Table = self.lua.globals().get("mnote")?;
@@ -342,7 +504,22 @@ impl LuaHost {
                 "mode",
                 scope.create_function(move |_, ()| Ok(e.borrow().vim.mode().label()))?,
             )?;
-            f.call::<()>(arg)
+            mnote.set(
+                "decorate",
+                scope.create_function(move |_, (ns, opts): (String, Table)| {
+                    let mut e = e.borrow_mut();
+                    let (range, kind) = decoration(&e.buffer, &opts)?;
+                    Ok(e.buffer.marks_mut().add(&ns, range, kind))
+                })?,
+            )?;
+            mnote.set(
+                "undecorate",
+                scope.create_function(move |_, ns: String| {
+                    e.borrow_mut().buffer.marks_mut().clear(&ns);
+                    Ok(())
+                })?,
+            )?;
+            f.call::<Value>(args)
         });
         // Outside the call, the stubs explain again.
         let _ = self.install_stubs();
@@ -446,6 +623,7 @@ impl Editor {
         };
         self.install_plugin(&host);
         self.lua = Some(host.clone());
+        self.start_requests(&host, cx);
         self.show_plugin_notices(&host, cx);
     }
 
@@ -470,7 +648,37 @@ impl Editor {
             );
         }
         let bindings = std::mem::take(&mut state.bindings);
+        let subscriptions = std::mem::take(&mut state.subscriptions);
+        let blocks = std::mem::take(&mut state.blocks);
         drop(state);
+        for (kind, pattern, ix) in subscriptions {
+            let h = host.clone();
+            self.events.on(
+                &[kind],
+                Rc::new(move |e, event, cx| {
+                    let note = e.source.key().map(|n| n.to_string());
+                    if let Some(pattern) = &pattern
+                        && !note.as_deref().is_some_and(|n| glob(pattern, n))
+                    {
+                        return;
+                    }
+                    let event = event.clone();
+                    e.run_lua_with(&h, ix, None, cx, move |lua| {
+                        Ok(mlua::MultiValue::from_vec(vec![Value::Table(event_table(
+                            lua,
+                            &event,
+                            note.as_deref(),
+                        )?)]))
+                    });
+                    // What the handler changed doesn't come back to it.
+                    let now = e.snapshot();
+                    e.events.resync(now);
+                }),
+            );
+        }
+        for (lang, ix) in blocks {
+            self.register_lua_block(host, lang, ix);
+        }
         for (n, (mode, keys, rhs, desc)) in bindings.into_iter().enumerate() {
             // A hidden command for the key; `i` / `v` keys reach it through
             // a Vim mapping to its ex name (letters only).
@@ -502,6 +710,56 @@ impl Editor {
         }
     }
 
+    /// A block a script rendered: its rows, in the note's font, beside the
+    /// fence line's number.
+    fn lua_block_row(
+        &self,
+        number: gpui::SharedString,
+        current: bool,
+        rows: &[BlockRow],
+        p: &crate::theme::Palette,
+    ) -> gpui::AnyElement {
+        use crate::theme::{StyledExt, Theme, size, space, text};
+        use gpui::{ParentElement, div, px};
+        let ink = |name: &Option<String>| {
+            name.as_deref()
+                .and_then(|n| p.token(n))
+                .map_or(Theme::color(p.ink), Theme::color)
+        };
+        div()
+            .flex()
+            .w_full()
+            .py(px(space::S1))
+            .when(current, |row| row.bg(Theme::color(p.well)))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(size::GUTTER_W))
+                    .pr(px(space::S8))
+                    .text_right()
+                    .text_style(text::NOTE_BODY)
+                    .text_color(Theme::color(if current { p.ink } else { p.ink_3 }))
+                    .child(number),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .max_w(px(size::MEASURE))
+                    .px(px(space::S3))
+                    .py(px(space::S2))
+                    .rounded(px(crate::theme::radius::MD))
+                    .bg(Theme::color(p.well))
+                    .text_style(text::NOTE_BODY)
+                    .children(rows.iter().map(|row| {
+                        div()
+                            .text_color(ink(&row.color))
+                            .child(gpui::SharedString::from(row.text.clone()))
+                    })),
+            )
+            .into_any_element()
+    }
+
     fn show_plugin_notices(&mut self, host: &LuaHost, cx: &mut Context<Self>) {
         let notices = std::mem::take(&mut host.state.borrow_mut().notices);
         if let Some(last) = notices.last() {
@@ -519,10 +777,31 @@ impl Editor {
         repeat: Option<&str>,
         cx: &mut Context<Self>,
     ) {
+        let args = call.args.clone().unwrap_or_default();
+        let bang = call.bang;
+        self.run_lua_with(host, ix, repeat, cx, move |lua| {
+            let arg = lua.create_table()?;
+            arg.set("args", args)?;
+            arg.set("bang", bang)?;
+            Ok(mlua::MultiValue::from_vec(vec![Value::Table(arg)]))
+        });
+    }
+
+    /// Runs Lua callback `ix` with what `args` makes, as one undo step, then
+    /// starts what it asked for (pickers, jobs) and shows its notices.
+    /// Returns what it returned (`Nil` after an error, which is shown).
+    fn run_lua_with(
+        &mut self,
+        host: &Rc<LuaHost>,
+        ix: usize,
+        repeat: Option<&str>,
+        cx: &mut Context<Self>,
+        args: impl FnOnce(&Lua) -> mlua::Result<mlua::MultiValue>,
+    ) -> Value {
         let started = Instant::now();
         let revision = self.buffer.revision();
         self.buffer.begin_change(self.vim.cursor());
-        let result = host.call(self, ix, call);
+        let result = host.call_with(self, ix, args);
         let cursor = clamp_normal(self.buffer.text(), self.vim.cursor());
         self.vim.set_cursor(cursor);
         self.buffer.end_change(cursor);
@@ -535,21 +814,350 @@ impl Editor {
             }
         }
         let took = started.elapsed();
-        match result {
-            Err(err) => self.show_toast(host.message(&err), false, cx),
-            Ok(()) if took > SLOW => self.show_toast(
-                format!(
-                    "{}: that took {} ms; keys wait for it",
-                    host.source,
-                    took.as_millis()
-                ),
-                false,
-                cx,
-            ),
-            Ok(()) => self.show_plugin_notices(host, cx),
-        }
+        self.start_requests(host, cx);
+        let value = match result {
+            Err(err) => {
+                self.show_toast(host.message(&err), false, cx);
+                Value::Nil
+            }
+            Ok(value) => {
+                if took > SLOW {
+                    self.show_toast(
+                        format!(
+                            "{}: that took {} ms; keys wait for it",
+                            host.source,
+                            took.as_millis()
+                        ),
+                        false,
+                        cx,
+                    );
+                } else {
+                    self.show_plugin_notices(host, cx);
+                }
+                value
+            }
+        };
         cx.notify();
+        value
     }
+
+    /// Opens the pickers and starts the jobs a script asked for.
+    fn start_requests(&mut self, host: &Rc<LuaHost>, cx: &mut Context<Self>) {
+        let requests = std::mem::take(&mut host.state.borrow_mut().requests);
+        for request in requests {
+            match request {
+                Request::Picker {
+                    title,
+                    items,
+                    on_select,
+                } => {
+                    let h = host.clone();
+                    let picker = crate::picker::custom::CustomPicker::new(
+                        title,
+                        items.clone(),
+                        Rc::new(move |index| {
+                            let h = h.clone();
+                            let item = items.get(index).map(|i| i.text.clone()).unwrap_or_default();
+                            crate::picker::PickerCallback(Rc::new(move |e, cx| {
+                                let item = item.clone();
+                                e.run_lua_with(&h, on_select, None, cx, move |lua| {
+                                    Ok(mlua::MultiValue::from_vec(vec![
+                                        Value::String(lua.create_string(&item)?),
+                                        Value::Integer(index as i64 + 1),
+                                    ]))
+                                });
+                            }))
+                        }),
+                    );
+                    self.open_picker(crate::picker::Picker::new(Box::new(picker)), cx);
+                }
+                Request::Job {
+                    cmd,
+                    on_stdout,
+                    on_exit,
+                } => self.start_job(host, cmd, on_stdout, on_exit, cx),
+            }
+        }
+    }
+
+    /// Runs `cmd` off the UI thread (in the vault's folder), handing each
+    /// line it prints, then its exit code, to the callbacks.
+    fn start_job(
+        &mut self,
+        host: &Rc<LuaHost>,
+        cmd: Vec<String>,
+        on_stdout: Option<usize>,
+        on_exit: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        enum Out {
+            Line(String),
+            Exit(i64),
+        }
+        let (tx, rx) = async_channel::unbounded::<Out>();
+        let dir = self.vault.as_ref().map(|v| v.root().to_path_buf());
+        let spawned = std::thread::Builder::new()
+            .name("mnote-job".into())
+            .spawn(move || {
+                use std::io::BufRead;
+                let mut command = std::process::Command::new(&cmd[0]);
+                command
+                    .args(&cmd[1..])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null());
+                if let Some(dir) = dir {
+                    command.current_dir(dir);
+                }
+                let code = match command.spawn() {
+                    Ok(mut child) => {
+                        if let Some(out) = child.stdout.take() {
+                            for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+                                let _ = tx.send_blocking(Out::Line(line));
+                            }
+                        }
+                        child
+                            .wait()
+                            .ok()
+                            .and_then(|s| s.code())
+                            .map_or(-1, i64::from)
+                    }
+                    Err(_) => -1,
+                };
+                let _ = tx.send_blocking(Out::Exit(code));
+            });
+        if spawned.is_err() {
+            return;
+        }
+        let h = host.clone();
+        self._tasks.push(cx.spawn(async move |this, cx| {
+            while let Ok(out) = rx.recv().await {
+                let (ix, value) = match out {
+                    Out::Line(line) => (on_stdout, Ok::<_, String>(line)),
+                    Out::Exit(code) => (on_exit, Err(code.to_string())),
+                };
+                let Some(ix) = ix else { continue };
+                let h = h.clone();
+                let alive = this.update(cx, |e, cx| {
+                    e.run_lua_with(&h, ix, None, cx, move |lua| {
+                        Ok(mlua::MultiValue::from_vec(vec![match value {
+                            Ok(line) => Value::String(lua.create_string(&line)?),
+                            Err(code) => Value::Integer(code.parse().unwrap_or(-1)),
+                        }]))
+                    });
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// A block renderer for fences of `lang`: the block's rows come from
+    /// the script, rendered after the frame (never while drawing) and kept
+    /// until its text changes. With the cursor in the block, it shows as
+    /// typed.
+    fn register_lua_block(&mut self, host: &Rc<LuaHost>, lang: String, ix: usize) {
+        use mnote_core::styled::{LineKind, line_kind};
+        let h = host.clone();
+        let name = format!("lua:{lang}");
+        self.register_block(
+            &name,
+            Rc::new(move |e, line, cx| {
+                let rope = e.buffer.text();
+                // The block this line belongs to: an open fence, a line in
+                // it, or the close fence right after one.
+                let block = match line.kind {
+                    LineKind::FenceOpen { lang: l, block } | LineKind::Code { lang: l, block }
+                        if *l == lang =>
+                    {
+                        block.clone()
+                    }
+                    LineKind::FenceClose if line.ix > 0 => {
+                        match line_kind(e.tree.as_ref(), rope, line.ix - 1) {
+                            LineKind::Code { lang: l, block }
+                            | LineKind::FenceOpen { lang: l, block }
+                                if l == lang =>
+                            {
+                                block
+                            }
+                            _ => return None,
+                        }
+                    }
+                    _ => return None,
+                };
+                // Editing it: as typed.
+                if (block.start.saturating_sub(1)..=block.end).contains(&line.cursor_line) {
+                    return None;
+                }
+                let text: Vec<String> = block.clone().map(|l| line_text(&e.buffer, l)).collect();
+                let key = (lang.clone(), text.join("\n"));
+                let cached = h.block_rows.borrow().get(&key).cloned();
+                let rows = match cached {
+                    Some(Some(rows)) => rows,
+                    Some(None) => return None,
+                    None => {
+                        // Rendered by the script after this frame.
+                        h.block_rows.borrow_mut().insert(key.clone(), None);
+                        let h = h.clone();
+                        cx.spawn(async move |this, cx| {
+                            let _ = this.update(cx, |e, cx| {
+                                let lines = text.clone();
+                                let value = e.run_lua_with(&h, ix, None, cx, move |lua| {
+                                    Ok(mlua::MultiValue::from_vec(vec![Value::Table(
+                                        lua.create_sequence_from(lines)?,
+                                    )]))
+                                });
+                                let rows = block_rows(value);
+                                h.block_rows.borrow_mut().insert(key, Some(Rc::new(rows)));
+                                cx.notify();
+                            });
+                        })
+                        .detach();
+                        return None;
+                    }
+                };
+                if !matches!(line.kind, LineKind::FenceOpen { .. }) {
+                    return Some(gpui::div().h(gpui::px(0.)).into_any_element());
+                }
+                Some(e.lua_block_row(line.gutter.clone(), line.current, &rows, line.palette))
+            }),
+        );
+    }
+}
+
+/// The event called `name` (`"NoteSaved"`).
+fn event_kind(name: &str) -> Option<EventKind> {
+    Some(match name {
+        "NoteOpened" => EventKind::NoteOpened,
+        "NoteSavePre" => EventKind::NoteSavePre,
+        "NoteSaved" => EventKind::NoteSaved,
+        "TextChanged" => EventKind::TextChanged,
+        "ModeChanged" => EventKind::ModeChanged,
+        "InsertLeave" => EventKind::InsertLeave,
+        "CursorMoved" => EventKind::CursorMoved,
+        "VaultChanged" => EventKind::VaultChanged,
+        "ConfigApplied" => EventKind::ConfigApplied,
+        "PaneFocused" => EventKind::PaneFocused,
+        _ => return None,
+    })
+}
+
+/// An event as a handler gets it: `{ event = "NoteSaved", note = "…" }`,
+/// with `line` / `column`, `from` / `to` (modes) or `revision` as it has.
+fn event_table(lua: &Lua, event: &EditorEvent, note: Option<&str>) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("event", format!("{:?}", event.kind()))?;
+    t.set("note", note)?;
+    match event {
+        EditorEvent::CursorMoved { line, column } => {
+            t.set("line", *line)?;
+            t.set("column", *column)?;
+        }
+        EditorEvent::ModeChanged { from, to } => {
+            t.set("from", from.label())?;
+            t.set("to", to.label())?;
+        }
+        EditorEvent::TextChanged { revision, .. } => t.set("revision", *revision)?,
+        EditorEvent::NoteSaved { note } | EditorEvent::NoteSavePre { note } => {
+            t.set("note", note.to_string())?;
+        }
+        _ => {}
+    }
+    Ok(t)
+}
+
+/// A pattern with `*` (any characters) against a note path:
+/// `journal/*` matches `journal/2026-11-24.md`.
+fn glob(pattern: &str, text: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let (first, last) = (parts[0], parts[parts.len() - 1]);
+    if parts.len() == 1 {
+        return pattern == text;
+    }
+    if !text.starts_with(first) || !text[first.len()..].ends_with(last) {
+        return false;
+    }
+    let mut rest = &text[first.len()..text.len() - last.len()];
+    for part in &parts[1..parts.len() - 1] {
+        match rest.find(part) {
+            Some(at) => rest = &rest[at + part.len()..],
+            None => return false,
+        }
+    }
+    true
+}
+
+/// A decoration from Lua options: `line` (0-based) and, for a highlight,
+/// `col` / `end_col` (default: the whole line) with `fg` / `bg`; or
+/// `line_bg`; or `text` (with `color`, `right`); or `sign` (with `color`).
+fn decoration(
+    buf: &mnote_core::Buffer,
+    opts: &Table,
+) -> mlua::Result<(std::ops::Range<usize>, mnote_core::MarkKind)> {
+    use mnote_core::MarkKind;
+    let text = buf.text();
+    let count = line_count(text).max(1);
+    let line: usize = opts.get::<usize>("line")?.min(count - 1);
+    let start = line_start(text, line);
+    let len = mnote_vim::text::line_len(text, line);
+    let col: usize = opts.get::<Option<usize>>("col")?.unwrap_or(0).min(len);
+    let end_col: usize = opts
+        .get::<Option<usize>>("end_col")?
+        .unwrap_or(len)
+        .min(len);
+    let color = opts.get::<Option<String>>("color")?;
+    let kind = if let Some(bg) = opts.get::<Option<String>>("line_bg")? {
+        MarkKind::LineBackground { background: bg }
+    } else if let Some(t) = opts.get::<Option<String>>("text")? {
+        MarkKind::VirtualText {
+            text: t,
+            color: color.unwrap_or_else(|| "ink_3".into()),
+            right: opts.get::<Option<bool>>("right")?.unwrap_or(false),
+        }
+    } else if let Some(sign) = opts.get::<Option<String>>("sign")? {
+        MarkKind::Sign {
+            text: sign,
+            color: color.unwrap_or_else(|| "ink_3".into()),
+        }
+    } else {
+        MarkKind::Highlight {
+            color: opts.get::<Option<String>>("fg")?,
+            background: opts.get::<Option<String>>("bg")?,
+        }
+    };
+    Ok((start + col..start + end_col.max(col), kind))
+}
+
+/// A block renderer's result as rows: strings, or `{ text = …, color = … }`.
+fn block_rows(value: Value) -> Vec<BlockRow> {
+    let Value::Table(t) = value else {
+        return vec![BlockRow {
+            text: "(the block renderer returned no rows)".into(),
+            color: Some("danger".into()),
+        }];
+    };
+    t.sequence_values::<Value>()
+        .filter_map(Result::ok)
+        .map(|row| match row {
+            Value::Table(r) => BlockRow {
+                text: r
+                    .get::<Option<String>>("text")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default(),
+                color: r.get::<Option<String>>("color").ok().flatten(),
+            },
+            Value::String(s) => BlockRow {
+                text: s.to_string_lossy(),
+                color: None,
+            },
+            other => BlockRow {
+                text: format!("{other:?}"),
+                color: None,
+            },
+        })
+        .collect()
 }
 
 /// `0` → `a`, `25` → `z`, `26` → `ba`: a number as letters, for ex names.
@@ -569,6 +1177,69 @@ fn letters(mut n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn patterns_events_and_rows() {
+        assert!(glob("journal/*", "journal/2026-11-24.md"));
+        assert!(!glob("journal/*", "ideas/a.md"));
+        assert!(glob("*.md", "a/b.md"));
+        assert!(glob("a*c*e", "abcde"));
+        assert!(!glob("a*c*e", "abde"));
+        assert!(glob("exact.md", "exact.md") && !glob("exact.md", "other.md"));
+        assert_eq!(event_kind("NoteSaved"), Some(EventKind::NoteSaved));
+        assert_eq!(event_kind("Nope"), None);
+        let lua = Lua::new();
+        let value: Value = lua
+            .load(r#"return { "plain", { text = "red", color = "danger" } }"#)
+            .eval()
+            .expect("rows");
+        assert_eq!(
+            block_rows(value),
+            [
+                BlockRow {
+                    text: "plain".into(),
+                    color: None
+                },
+                BlockRow {
+                    text: "red".into(),
+                    color: Some("danger".into())
+                }
+            ]
+        );
+        assert_eq!(block_rows(Value::Nil)[0].color.as_deref(), Some("danger"));
+    }
+
+    #[test]
+    fn decorations_from_lua_options() {
+        use mnote_core::MarkKind;
+        let lua = Lua::new();
+        let buf = rope("one\ntwo words\n");
+        let opts = |code: &str| -> Table { lua.load(code).eval().expect("a table") };
+        let (range, kind) = decoration(&buf, &opts("return { line = 1, col = 4, bg = 'match' }"))
+            .expect("a highlight");
+        assert_eq!(range, 8..13);
+        assert_eq!(
+            kind,
+            MarkKind::Highlight {
+                color: None,
+                background: Some("match".into())
+            }
+        );
+        let (_, kind) = decoration(
+            &buf,
+            &opts("return { line = 0, text = '3 tasks', right = true }"),
+        )
+        .expect("virtual text");
+        assert!(matches!(kind, MarkKind::VirtualText { right: true, .. }));
+        let (_, kind) = decoration(&buf, &opts("return { line = 9, sign = '●' }")).expect("a sign");
+        assert!(
+            matches!(kind, MarkKind::Sign { .. }),
+            "a line past the end clamps"
+        );
+        let (_, kind) = decoration(&buf, &opts("return { line = 0, line_bg = 'danger_wash' }"))
+            .expect("a line background");
+        assert!(matches!(kind, MarkKind::LineBackground { .. }));
+    }
 
     fn rope(text: &str) -> mnote_core::Buffer {
         mnote_core::Buffer::new(text)
@@ -627,6 +1298,14 @@ mod tests {
             mnote.notify("hello " .. (mnote.config("demo").greeting or "?"))
             local ok, err = pcall(mnote.buf.get_text)
             assert(not ok and tostring(err):find("inside a command"))
+            mnote.on("NoteSaved", function(ev) end)
+            mnote.on("TextChanged", { pattern = "journal/*" }, function(ev) end)
+            mnote.picker.open({ title = "T", items = { "a", { text = "b", detail = "x" } },
+              on_select = function(item, i) end })
+            mnote.job.start({ "echo", "hi" }, { on_exit = function(code) end })
+            mnote.blocks.register("chart", { render = function(lines) return lines end })
+            assert(not pcall(mnote.on, "Nope", function() end))
+            assert(not pcall(mnote.decorate, "x", { line = 0 }))
             "#,
         )
         .expect("write");
@@ -640,6 +1319,10 @@ mod tests {
         assert_eq!(state.commands[0].0, "Today");
         assert_eq!(state.bindings.len(), 2);
         assert_eq!(state.notices, ["hello world"]);
+        assert_eq!(state.subscriptions.len(), 2);
+        assert_eq!(state.subscriptions[1].1.as_deref(), Some("journal/*"));
+        assert_eq!(state.requests.len(), 2, "a picker and a job");
+        assert_eq!(state.blocks[0].0, "chart");
         drop(state);
 
         std::fs::write(&path, "mnote.command.create('bad name', function() end)").expect("write");
