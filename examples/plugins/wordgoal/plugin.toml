@@ -1,0 +1,4 @@
+name = "wordgoal"
+version = "1.0.0"
+api = 1
+description = "Shows the note's word count against a goal"

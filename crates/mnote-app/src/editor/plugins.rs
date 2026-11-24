@@ -103,9 +103,14 @@ pub struct LuaHost {
     state: Rc<RefCell<HostState>>,
     /// Rendered blocks by language and text; `None` while one renders.
     block_rows: RefCell<BlockCache>,
-    /// Where the code came from, for messages (`init.lua`).
+    /// Where the code came from, for messages (`init.lua`, a plugin's name).
     source: String,
+    /// Errors so far; at [`MAX_ERRORS`] the plugin is turned off.
+    errors: std::cell::Cell<u32>,
 }
+
+/// A plugin that fails this many times is turned off for the session.
+const MAX_ERRORS: u32 = 3;
 
 /// The functions of `mnote.buf` and friends that need the editor: outside a
 /// command or key they explain that instead.
@@ -126,25 +131,63 @@ const SCOPED: &[(&str, &str)] = &[
 impl LuaHost {
     /// Runs `path` (`init.lua`) with the `mnote` API.
     pub fn load(path: &Path, config: &Config) -> Result<LuaHost, String> {
-        let code = std::fs::read_to_string(path)
-            .map_err(|err| format!("Couldn't read {}: {err}", path.display()))?;
         let source = path
             .file_name()
             .map_or_else(|| "init.lua".into(), |n| n.to_string_lossy().into_owned());
+        Self::run(path, None, source, config)
+    }
+
+    /// Runs plugin `name`'s `init.lua` from its folder; `require` finds the
+    /// plugin's own modules in its `lua/` folder.
+    pub fn load_plugin(name: &str, dir: &Path, config: &Config) -> Result<LuaHost, String> {
+        Self::run(&dir.join("init.lua"), Some(dir), name.to_owned(), config)
+    }
+
+    fn run(
+        path: &Path,
+        dir: Option<&Path>,
+        source: String,
+        config: &Config,
+    ) -> Result<LuaHost, String> {
+        let code = std::fs::read_to_string(path)
+            .map_err(|err| format!("{source}: couldn't read {}: {err}", path.display()))?;
         let host = LuaHost {
             lua: Lua::new(),
             state: Rc::default(),
             block_rows: RefCell::default(),
             source,
+            errors: std::cell::Cell::new(0),
         };
         host.set_plugins(config);
         host.install_api().map_err(|err| host.message(&err))?;
+        if let Some(dir) = dir {
+            let lua_dir = dir.join("lua");
+            let package: Table = host
+                .lua
+                .globals()
+                .get("package")
+                .map_err(|e| host.message(&e))?;
+            let path: String = package.get("path").map_err(|e| host.message(&e))?;
+            let own = format!("{0}/?.lua;{0}/?/init.lua;{path}", lua_dir.to_string_lossy());
+            package.set("path", own).map_err(|e| host.message(&e))?;
+        }
         host.lua
             .load(&code)
             .set_name(format!("@{}", host.source))
             .exec()
             .map_err(|err| host.message(&err))?;
         Ok(host)
+    }
+
+    /// Turned off after repeated errors.
+    pub fn is_off(&self) -> bool {
+        self.errors.get() >= MAX_ERRORS
+    }
+
+    /// Counts an error; returns whether that turned the plugin off.
+    fn failed(&self) -> bool {
+        self.errors.set(self.errors.get() + 1);
+        self.errors.get() == MAX_ERRORS
     }
 
     /// Keeps config.toml's `[plugins.*]` tables for `mnote.config`.
@@ -416,6 +459,9 @@ impl LuaHost {
         ix: usize,
         args: impl FnOnce(&Lua) -> mlua::Result<mlua::MultiValue>,
     ) -> mlua::Result<Value> {
+        if self.is_off() {
+            return Ok(Value::Nil);
+        }
         let f: Function = {
             let state = self.state.borrow();
             let key = state
@@ -600,36 +646,9 @@ pub fn init_path() -> Option<PathBuf> {
 }
 
 impl Editor {
-    /// Loads `init.lua` (once), registering its commands and keys. Without
-    /// one, nothing happens. A mistake in it is shown, and mNote carries on.
-    pub(super) fn load_plugins(&mut self, config: &Config, cx: &mut Context<Self>) {
-        if let Some(host) = &self.lua {
-            host.set_plugins(config);
-            return;
-        }
-        if self.plugins_tried {
-            return;
-        }
-        self.plugins_tried = true;
-        let Some(path) = init_path().filter(|p| p.is_file()) else {
-            return;
-        };
-        let host = match LuaHost::load(&path, config) {
-            Ok(host) => Rc::new(host),
-            Err(err) => {
-                self.show_toast(err, false, cx);
-                return;
-            }
-        };
-        self.install_plugin(&host);
-        self.lua = Some(host.clone());
-        self.start_requests(&host, cx);
-        self.show_plugin_notices(&host, cx);
-    }
-
     /// Puts what the script registered into the command registry, the
     /// keymap's defaults and Vim's mappings.
-    fn install_plugin(&mut self, host: &Rc<LuaHost>) {
+    pub(super) fn install_plugin(&mut self, host: &Rc<LuaHost>) {
         let mut state = host.state.borrow_mut();
         for (name, desc, ix) in std::mem::take(&mut state.commands) {
             let h = host.clone();
@@ -679,10 +698,10 @@ impl Editor {
         for (lang, ix) in blocks {
             self.register_lua_block(host, lang, ix);
         }
-        for (n, (mode, keys, rhs, desc)) in bindings.into_iter().enumerate() {
+        for (mode, keys, rhs, desc) in bindings {
             // A hidden command for the key; `i` / `v` keys reach it through
             // a Vim mapping to its ex name (letters only).
-            let ex = format!("Luakey{}", letters(n));
+            let ex = format!("Luakey{}", letters(next_key_id()));
             let run = match rhs {
                 Rhs::Callback(ix) => {
                     let h = host.clone();
@@ -760,7 +779,7 @@ impl Editor {
             .into_any_element()
     }
 
-    fn show_plugin_notices(&mut self, host: &LuaHost, cx: &mut Context<Self>) {
+    pub(super) fn show_plugin_notices(&mut self, host: &LuaHost, cx: &mut Context<Self>) {
         let notices = std::mem::take(&mut host.state.borrow_mut().notices);
         if let Some(last) = notices.last() {
             self.show_toast(last.clone(), false, cx);
@@ -817,7 +836,16 @@ impl Editor {
         self.start_requests(host, cx);
         let value = match result {
             Err(err) => {
-                self.show_toast(host.message(&err), false, cx);
+                let text = if host.failed() {
+                    format!(
+                        "{} is turned off for this session after {MAX_ERRORS} errors: {}",
+                        host.source,
+                        host.message(&err)
+                    )
+                } else {
+                    host.message(&err)
+                };
+                self.show_toast(text, false, cx);
                 Value::Nil
             }
             Ok(value) => {
@@ -842,7 +870,7 @@ impl Editor {
     }
 
     /// Opens the pickers and starts the jobs a script asked for.
-    fn start_requests(&mut self, host: &Rc<LuaHost>, cx: &mut Context<Self>) {
+    pub(super) fn start_requests(&mut self, host: &Rc<LuaHost>, cx: &mut Context<Self>) {
         let requests = std::mem::take(&mut host.state.borrow_mut().requests);
         for request in requests {
             match request {
@@ -1160,6 +1188,172 @@ fn block_rows(value: Value) -> Vec<BlockRow> {
         .collect()
 }
 
+/// Every `mnote` function: its call and what it does. The API reference
+/// (`docs/plugins.md`) is generated from this, and a test checks that each
+/// function the Lua state has is here.
+pub const API: &[(&str, &str, &str)] = &[
+    (
+        "mnote.command.create",
+        "(name, fn, { desc })",
+        "Adds `:name` (letters only) and a palette entry. `fn` gets `{ args, bang }`. Its edits are one undo step, and `.` repeats it.",
+    ),
+    (
+        "mnote.keymap.set",
+        "(mode, keys, fn | \"command\" | \":ex line\", { desc })",
+        "Binds keys in Vim notation (`<leader>t`, `<C-w>x`). `\"n\"` binds in NORMAL through the keymap; `\"i\"` and `\"v\"` through Vim mappings.",
+    ),
+    (
+        "mnote.on",
+        "(event, [{ pattern }], fn)",
+        "Calls `fn(event)` for an editor event (see Events), optionally only for notes matching `pattern` (`journal/*`). Runs after the frame; `NoteSavePre` runs before the write and may edit.",
+    ),
+    ("mnote.notify", "(text)", "Shows a toast."),
+    (
+        "mnote.config",
+        "(name) -> table",
+        "The `[plugins.<name>]` table from config.toml (empty without one).",
+    ),
+    (
+        "mnote.picker.open",
+        "({ title, items, on_select })",
+        "Opens a picker. `items` are strings or `{ text, detail }`; `on_select(text, index)` runs for the chosen one.",
+    ),
+    (
+        "mnote.job.start",
+        "(cmd, { on_stdout, on_exit })",
+        "Runs a command (`{ \"git\", \"log\" }`) in the vault's folder, off the UI thread. `on_stdout(line)` for each line, then `on_exit(code)`.",
+    ),
+    (
+        "mnote.blocks.register",
+        "(lang, { render })",
+        "Draws ```lang fences in the styled view: `render(lines)` returns rows, strings or `{ text, color }`. Rendered after the frame and kept until the block changes; with the cursor in it, it shows as typed.",
+    ),
+    (
+        "mnote.buf.get_lines",
+        "(first, last) -> lines",
+        "Lines `first` to `last` (0-based, `last` not included; negative counts from the end, `-1` being past the last line).",
+    ),
+    (
+        "mnote.buf.set_lines",
+        "(first, last, lines)",
+        "Replaces those lines (an empty range inserts).",
+    ),
+    ("mnote.buf.get_text", "() -> text", "The whole note."),
+    ("mnote.buf.line_count", "() -> n", "How many lines it has."),
+    (
+        "mnote.buf.cursor",
+        "() -> line, column",
+        "Where the cursor is (0-based).",
+    ),
+    (
+        "mnote.buf.set_cursor",
+        "(line, column)",
+        "Moves the cursor.",
+    ),
+    ("mnote.buf.insert", "(text)", "Inserts text at the cursor."),
+    (
+        "mnote.note",
+        "() -> path | nil",
+        "The open note's path in the vault.",
+    ),
+    (
+        "mnote.mode",
+        "() -> mode",
+        "Vim's mode: `NORMAL`, `INSERT`, `VISUAL`…",
+    ),
+    (
+        "mnote.decorate",
+        "(namespace, opts) -> id",
+        "Draws over the note, moving with edits: `{ line, col, end_col, fg, bg }` colours text; `{ line, line_bg }` a line; `{ line, text, color, right }` adds text after it; `{ line, sign, color }` a gutter sign. Colours are theme token names (`match`, `danger`, `ink_3`).",
+    ),
+    (
+        "mnote.undecorate",
+        "(namespace)",
+        "Removes every decoration in the namespace.",
+    ),
+];
+
+/// The events `mnote.on` takes.
+pub const EVENTS: &[(&str, &str)] = &[
+    (
+        "NoteOpened",
+        "the focused pane shows another note (and at start); `note`",
+    ),
+    (
+        "NoteSavePre",
+        "a note is about to be written; runs before it, may edit; `note`",
+    ),
+    ("NoteSaved", "a note was written; `note`"),
+    ("TextChanged", "the note's text changed; `note`, `revision`"),
+    ("ModeChanged", "Vim's mode changed; `from`, `to`"),
+    ("InsertLeave", "INSERT or REPLACE ended"),
+    ("CursorMoved", "the cursor moved; `line`, `column`"),
+    ("VaultChanged", "notes changed on disk outside mNote"),
+    ("ConfigApplied", "config.toml was applied"),
+    ("PaneFocused", "another pane took focus"),
+];
+
+/// The plugin API reference, as `docs/plugins.md` holds it (written by a
+/// test, so it never goes stale).
+#[cfg(test)]
+pub fn api_reference() -> String {
+    let mut out = String::from(
+        "<!-- Generated from crates/mnote-app/src/editor/plugins.rs (API, EVENTS).\n     MNOTE_WRITE_DOCS=1 cargo test -p mnote-app plugin_docs rewrites it. -->\n\n\
+# mNote plugins\n\n\
+Plugins are Lua 5.4. Each lives in a folder of its own:\n\n\
+```\n~/.config/mnote/plugins/tasks/\n  plugin.toml   name, version, api, description\n  init.lua      runs when the plugin loads\n  lua/          its own modules, for require\n```\n\n",
+    );
+    out.push_str(&format!(
+        "plugin.toml:\n\n```toml\nname = \"tasks\"\nversion = \"1.0.0\"\napi = {}\ndescription = \"Marks open tasks and lists them\"\n```\n\n",
+        super::plugin_list::PLUGIN_API
+    ));
+    out.push_str(
+        "A plugin runs when config.toml turns it on (above any `[table]`, or as its own table):\n\n\
+```toml\nplugins.tasks.enabled = true\n```\n\n\
+The first time it would run, or after its code changed, mNote asks: a plugin can do anything you can. \
+`:plugins` lists the installed plugins, whether each runs, and how long it took to load. \
+A plugin for another API version is skipped; one with an error is reported and the others still load; \
+one that fails three times is turned off until mNote restarts. Commands and keys slower than 2 ms say so. \
+`~/.config/mnote/init.lua`, your own, loads last and needs no folder.\n\n\
+Settings for a plugin go in its table and reach it through `mnote.config(\"tasks\")`.\n\n## API\n\n",
+    );
+    for (name, call, about) in API {
+        out.push_str(&format!("- `{name}{call}`: {about}\n"));
+    }
+    out.push_str("\n## Events\n\nEach handler gets a table with `event` and `note`, and:\n\n");
+    for (name, about) in EVENTS {
+        out.push_str(&format!("- `{name}`: {about}\n"));
+    }
+    out.push_str("\n## Examples\n\n`examples/plugins/` holds `tasks` (signs, a count, a picker and a ```progress block) and `wordgoal` (a daily word goal from its settings). Copy a folder into `~/.config/mnote/plugins/` and turn it on.\n");
+    out
+}
+
+impl Editor {
+    /// `:pluginapi`: every `mnote` function and event, in short.
+    pub(super) fn list_plugin_api(&mut self) {
+        let mut lines: Vec<String> = API
+            .iter()
+            .map(|(name, call, _)| format!("{name}{call}"))
+            .collect();
+        lines.push(format!(
+            "Events: {}",
+            EVENTS
+                .iter()
+                .map(|(n, _)| *n)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        lines.push("More in docs/plugins.md".into());
+        self.vim.show_message(lines.join("\n"));
+    }
+}
+
+/// A fresh number for a key's hidden command, unique across plugins.
+fn next_key_id() -> usize {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// `0` → `a`, `25` → `z`, `26` → `ba`: a number as letters, for ex names.
 fn letters(mut n: usize) -> String {
     let mut out = Vec::new();
@@ -1177,6 +1371,63 @@ fn letters(mut n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_api_function_is_documented() {
+        let dir = std::env::temp_dir().join(format!("mnote-api-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("init.lua");
+        std::fs::write(&path, "").expect("write");
+        let host = LuaHost::load(&path, &Config::default()).expect("loads");
+        let names: Vec<String> = host
+            .lua
+            .load(
+                r#"
+                local out = {}
+                local function walk(t, prefix)
+                  for k, v in pairs(t) do
+                    if type(v) == "function" then table.insert(out, prefix .. k)
+                    elseif type(v) == "table" then walk(v, prefix .. k .. ".") end
+                  end
+                end
+                walk(mnote, "mnote.")
+                return out
+                "#,
+            )
+            .eval()
+            .expect("names");
+        for name in &names {
+            assert!(
+                API.iter().any(|(n, _, _)| n == name),
+                "{name} isn't documented"
+            );
+        }
+        for (name, _, _) in API {
+            assert!(
+                names.contains(&name.to_string()),
+                "{name} is documented but missing"
+            );
+        }
+        for (event, _) in EVENTS {
+            assert!(event_kind(event).is_some(), "{event}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plugin_docs_are_up_to_date() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/plugins.md");
+        let want = api_reference();
+        if std::env::var_os("MNOTE_WRITE_DOCS").is_some() {
+            std::fs::create_dir_all(path.parent().expect("docs")).expect("docs dir");
+            std::fs::write(&path, &want).expect("write docs");
+        }
+        let have = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            have == want,
+            "docs/plugins.md is out of date: MNOTE_WRITE_DOCS=1 cargo test -p mnote-app plugin_docs"
+        );
+    }
 
     #[test]
     fn patterns_events_and_rows() {

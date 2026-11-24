@@ -380,6 +380,22 @@ pub fn builtin() -> Vec<Command> {
         .shown_as("keys")
         .ex("keys", 3, ArgKind::None),
         Command::new(
+            "plugins",
+            "Show plugins",
+            "Lists installed plugins: version, whether each runs, and its load time.",
+            act(|e, _, _| e.list_plugins()),
+        )
+        .shown_as("plugins")
+        .ex("plugins", 4, ArgKind::None),
+        Command::new(
+            "plugin-api",
+            "Show the plugin API",
+            "Every mnote function and event a plugin can use, in short.",
+            act(|e, _, _| e.list_plugin_api()),
+        )
+        .shown_as("pluginapi")
+        .ex("pluginapi", 7, ArgKind::None),
+        Command::new(
             "quit",
             "Quit",
             "Saves the note and closes mNote.",

@@ -1,4 +1,6 @@
--- A sample mNote plugin: copy it to ~/.config/mnote/init.lua.
+-- tasks: an example mNote plugin. Install: copy this folder to
+-- ~/.config/mnote/plugins/tasks and add `plugins.tasks.enabled = true` to
+-- config.toml.
 --
 -- * Open tasks (`- [ ]`) get a sign in the gutter, and the first line says
 --   how many there are, as the note opens and as you type.

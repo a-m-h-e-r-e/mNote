@@ -22,6 +22,7 @@ pub(crate) mod line;
 mod lines;
 mod overlays;
 mod panes;
+mod plugin_list;
 mod plugins;
 mod saving;
 mod services;
@@ -228,7 +229,7 @@ pub struct Editor {
     events: events::Bus,
     /// The Lua plugin host, when `init.lua` loaded (see `plugins`), and
     /// whether loading was tried.
-    lua: Option<Rc<plugins::LuaHost>>,
+    plugins: Vec<plugin_list::Entry>,
     plugins_tried: bool,
     /// Block renderers, tried in order (see `blocks`).
     blocks: Rc<Vec<(String, blocks::BlockRenderer)>>,
@@ -354,7 +355,7 @@ impl Editor {
         let mut editor = Editor {
             events: events::Bus::default(),
             blocks: Rc::default(),
-            lua: None,
+            plugins: Vec::new(),
             plugins_tried: false,
             lines: ListState::new(buffer.text().len_lines(), ListAlignment::Top, px(400.)),
             buffer,

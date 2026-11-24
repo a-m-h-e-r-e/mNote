@@ -91,3 +91,9 @@ The same on a large note (336 KB of long lines), wrapped and not, in a throwaway
 ```bash
 tools/bench-large-note.sh
 ```
+
+The plugin API reference (`docs/plugins.md`) is generated from the API table in `crates/mnote-app/src/editor/plugins.rs`; a test fails when it's stale. After changing the Lua API:
+
+```bash
+MNOTE_WRITE_DOCS=1 cargo test -p mnote-app plugin_docs
+```
