@@ -44,6 +44,9 @@ nucleo-matcher = { version = "0.3.1", default-features = false, features = ["uni
 # async-channel: carries file-watcher events to the UI thread. Already in gpui's tree.
 async-channel = "2.5.0"
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }
+# mlua: the plugin host (AMI-204). Lua 5.4, built from its C sources (vendored),
+# so plugins need no system Lua. Lua itself is ~300 KB; std has no interpreter.
+mlua = { version = "=0.12.2", default-features = false, features = ["lua54", "vendored"] }
 
 [workspace.lints.rust]
 # deny, not forbid, so the one macOS integration module can lift it (CLAUDE.md).

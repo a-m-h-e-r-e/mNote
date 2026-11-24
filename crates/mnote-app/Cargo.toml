@@ -13,6 +13,8 @@ path = "src/main.rs"
 [dependencies]
 async-channel.workspace = true
 gpui.workspace = true
+mlua.workspace = true
+toml.workspace = true
 mnote-core.workspace = true
 mnote-vim.workspace = true
 

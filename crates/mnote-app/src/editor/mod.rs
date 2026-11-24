@@ -22,6 +22,7 @@ pub(crate) mod line;
 mod lines;
 mod overlays;
 mod panes;
+mod plugins;
 mod saving;
 mod services;
 mod styled;
@@ -225,6 +226,10 @@ pub struct Editor {
     _subscriptions: Vec<Subscription>,
     /// Editor events and their subscribers.
     events: events::Bus,
+    /// The Lua plugin host, when `init.lua` loaded (see `plugins`), and
+    /// whether loading was tried.
+    lua: Option<Rc<plugins::LuaHost>>,
+    plugins_tried: bool,
     /// Block renderers, tried in order (see `blocks`).
     blocks: Rc<Vec<(String, blocks::BlockRenderer)>>,
 }
@@ -349,6 +354,8 @@ impl Editor {
         let mut editor = Editor {
             events: events::Bus::default(),
             blocks: Rc::default(),
+            lua: None,
+            plugins_tried: false,
             lines: ListState::new(buffer.text().len_lines(), ListAlignment::Top, px(400.)),
             buffer,
             vim,
@@ -610,6 +617,8 @@ impl Editor {
     /// and (on macOS) the global keys. At startup and when config.toml is
     /// saved.
     pub fn apply_config(&mut self, config: Config, cx: &mut Context<Self>) {
+        // Plugins first, so their commands and keys join the keymap below.
+        self.load_plugins(&config, cx);
         // Only a changed setting moves the view, so `space m` choices stay.
         if config.view != self.config.view {
             self.view = styled::View::from_config(config.view);
