@@ -49,9 +49,19 @@ impl fmt::Display for Origin {
     }
 }
 
-/// The undo step an edit belongs to: edits with the same id undo together.
+/// The undo step an edit belongs to: edits with the same id undo together,
+/// in one buffer or across several (ADR-0010). Ids are unique in the
+/// process, so a group made in one buffer can't be mistaken for another's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct GroupId(pub u64);
+
+impl GroupId {
+    /// A new id, never handed out before.
+    pub fn fresh() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        GroupId(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
 
 /// One recorded edit: the characters `range` (on the text before it) became
 /// `new_text`.

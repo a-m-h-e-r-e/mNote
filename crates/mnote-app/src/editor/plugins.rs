@@ -74,6 +74,18 @@ enum Request {
     Keys(Vec<mnote_vim::Key>),
     /// `mnote.cmd`: an Ex line.
     Ex(String),
+    /// `mnote.apply_edits`: line edits to several notes, as one undo step.
+    ApplyEdits {
+        edits: Vec<(NotePath, Vec<LineEdit>)>,
+        label: String,
+    },
+}
+
+/// Lines `first..last` (as `mnote.buf.set_lines` counts them) become `lines`.
+struct LineEdit {
+    first: i64,
+    last: i64,
+    lines: Vec<String>,
 }
 
 /// A row a block renderer returned: text, in a theme colour.
@@ -461,6 +473,46 @@ impl LuaHost {
             })?,
         )?;
 
+        let state = self.state.clone();
+        mnote.set(
+            "apply_edits",
+            lua.create_function(move |_, (list, opts): (Table, Option<Table>)| {
+                let label = opts
+                    .map(|o| o.get::<Option<String>>("label"))
+                    .transpose()?
+                    .flatten()
+                    .unwrap_or_else(|| "Edit notes".into());
+                let mut edits: Vec<(NotePath, Vec<LineEdit>)> = Vec::new();
+                for item in list.sequence_values::<Table>() {
+                    let item = item?;
+                    let path: String = item.get("note")?;
+                    let note = NotePath::new(&path)
+                        .or_else(|_| NotePath::new(format!("{path}.md")))
+                        .map_err(|_| {
+                            mlua::Error::runtime(format!("{path} isn't a note path in the vault"))
+                        })?;
+                    let edit = LineEdit {
+                        first: item.get("first")?,
+                        last: item.get("last")?,
+                        lines: item
+                            .get::<Option<Vec<String>>>("lines")?
+                            .unwrap_or_default(),
+                    };
+                    match edits.iter_mut().find(|(n, _)| *n == note) {
+                        Some((_, list)) => list.push(edit),
+                        None => edits.push((note, vec![edit])),
+                    }
+                }
+                if !edits.is_empty() {
+                    state
+                        .borrow_mut()
+                        .requests
+                        .push(Request::ApplyEdits { edits, label });
+                }
+                Ok(())
+            })?,
+        )?;
+
         // Filled in for each call (they need the window); stubs meanwhile.
         mnote.set("clipboard", lua.create_table()?)?;
 
@@ -574,7 +626,7 @@ impl LuaHost {
                     move |_, (first, last, lines): (i64, i64, Vec<String>)| {
                         let mut e = e.borrow_mut();
                         let e = &mut **e;
-                        let (range, new) = line_edit(&e.buffer, first, last, &lines);
+                        let (range, new) = line_edit(e.buffer.text(), first, last, &lines);
                         e.vim.edit_text(&mut e.buffer, range, &new);
                         Ok(())
                     },
@@ -635,8 +687,10 @@ impl LuaHost {
                 "decorate",
                 scope.create_function(move |_, (ns, opts): (String, Table)| {
                     let mut e = e.borrow_mut();
-                    let (range, kind) = decoration(&e.buffer, &opts)?;
-                    Ok(e.buffer.marks_mut().add(&ns, range, kind))
+                    let (range, kind, start_bias, end_bias) = decoration(&e.buffer, &opts)?;
+                    Ok(e.buffer
+                        .marks_mut()
+                        .add_with_bias(&ns, range, kind, start_bias, end_bias))
                 })?,
             )?;
             mnote.set(
@@ -673,12 +727,11 @@ fn line_text(buf: &mnote_core::Buffer, line: usize) -> String {
 /// range and its new text, keeping a note without a final newline without
 /// one.
 fn line_edit(
-    buf: &mnote_core::Buffer,
+    text: &mnote_core::Rope,
     first: i64,
     last: i64,
     lines: &[String],
 ) -> (std::ops::Range<usize>, String) {
-    let text = buf.text();
     let count = line_count(text);
     let (first, last) = (index(first, count), index(last, count));
     let last = last.max(first);
@@ -1003,8 +1056,47 @@ impl Editor {
                     self.picker_action(crate::picker::PickerAction::RunEx(line), cx);
                     self.vim.set_origin(user);
                 }
+                Request::ApplyEdits { edits, label } => {
+                    let edits = self.char_edits(edits);
+                    if let Err(err) = self.apply_edit_group(edits, host.origin(), &label, cx) {
+                        self.show_toast(format!("mnote.apply_edits: {err}"), false, cx);
+                    }
+                }
             }
         }
+    }
+
+    /// Line edits to character edits, on each note's current text (open, or
+    /// as saved). A note that can't be read gets no edits, and is reported
+    /// when the group applies.
+    fn char_edits(
+        &self,
+        edits: Vec<(NotePath, Vec<LineEdit>)>,
+    ) -> Vec<super::edit_groups::NoteEdits> {
+        edits
+            .into_iter()
+            .map(|(note, list)| {
+                let key = super::DocKey::Note(note.clone());
+                let text = if self.source.doc_key() == key {
+                    Some(self.buffer.text().clone())
+                } else if let Some(i) = self.parked_index(&key) {
+                    Some(self.parked[i].buffer.text().clone())
+                } else {
+                    self.vault
+                        .as_ref()
+                        .and_then(|v| v.read(&note).ok())
+                        .map(|t| mnote_core::Rope::from_str(&t))
+                };
+                let ranges = text
+                    .map(|text| {
+                        list.iter()
+                            .map(|e| line_edit(&text, e.first, e.last, &e.lines))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                (note, ranges)
+            })
+            .collect()
     }
 
     /// `mnote.open`: the note (it must exist), at `line` if given.
@@ -1239,11 +1331,17 @@ fn glob(pattern: &str, text: &str) -> bool {
 /// A decoration from Lua options: `line` (0-based) and, for a highlight,
 /// `col` / `end_col` (default: the whole line) with `fg` / `bg`; or
 /// `line_bg`; or `text` (with `color`, `right`); or `sign` (with `color`).
-fn decoration(
-    buf: &mnote_core::Buffer,
-    opts: &Table,
-) -> mlua::Result<(std::ops::Range<usize>, mnote_core::MarkKind)> {
+/// A decoration's range, kind, and the bias of its two ends.
+type Decoration = (
+    std::ops::Range<usize>,
+    mnote_core::MarkKind,
+    mnote_core::text::Bias,
+    mnote_core::text::Bias,
+);
+
+fn decoration(buf: &mnote_core::Buffer, opts: &Table) -> mlua::Result<Decoration> {
     use mnote_core::MarkKind;
+    use mnote_core::text::Bias;
     let text = buf.text();
     let count = line_count(text).max(1);
     let line: usize = opts.get::<usize>("line")?.min(count - 1);
@@ -1255,6 +1353,26 @@ fn decoration(
         .unwrap_or(len)
         .min(len);
     let color = opts.get::<Option<String>>("color")?;
+    let ghost = opts.get::<Option<String>>("ghost")?;
+    // Ghost text follows typing at its position; everything else stays.
+    let bias = match opts.get::<Option<String>>("bias")?.as_deref() {
+        Some("after") => Bias::After,
+        Some("before") => Bias::Before,
+        Some(other) => {
+            return Err(mlua::Error::runtime(format!(
+                "bias is \"before\" or \"after\", not {other:?}"
+            )));
+        }
+        None if ghost.is_some() => Bias::After,
+        None => Bias::Before,
+    };
+    if let Some(text) = ghost {
+        let kind = MarkKind::Ghost {
+            text,
+            color: color.unwrap_or_else(|| "ink_3".into()),
+        };
+        return Ok((start + col..start + col, kind, bias, bias));
+    }
     let kind = if let Some(bg) = opts.get::<Option<String>>("line_bg")? {
         MarkKind::LineBackground { background: bg }
     } else if let Some(t) = opts.get::<Option<String>>("text")? {
@@ -1274,7 +1392,7 @@ fn decoration(
             background: opts.get::<Option<String>>("bg")?,
         }
     };
-    Ok((start + col..start + end_col.max(col), kind))
+    Ok((start + col..start + end_col.max(col), kind, bias, bias))
 }
 
 /// A block renderer's result as rows: strings, or `{ text = …, color = … }`.
@@ -1384,7 +1502,7 @@ pub const API: &[(&str, &str, &str)] = &[
     (
         "mnote.decorate",
         "(namespace, opts) -> id",
-        "Draws over the note, moving with edits: `{ line, col, end_col, fg, bg }` colours text; `{ line, line_bg }` a line; `{ line, text, color, right }` adds text after it; `{ line, sign, color }` a gutter sign. Colours are theme token names (`match`, `danger`, `ink_3`).",
+        "Draws over the note, moving with edits: `{ line, col, end_col, fg, bg }` colours text; `{ line, line_bg }` a line; `{ line, text, color, right }` adds text after it; `{ line, sign, color }` a gutter sign; `{ line, col, ghost, color }` draws text inside the line that isn't part of it (the cursor skips it). `bias = \"before\"` or `\"after\"`: which side of text typed exactly at an end the decoration stays on (ghost text: after; the rest: before). Colours are theme token names (`match`, `danger`, `ink_3`).",
     ),
     (
         "mnote.undecorate",
@@ -1395,6 +1513,11 @@ pub const API: &[(&str, &str, &str)] = &[
         "mnote.open",
         "(path, { line })",
         "Opens a note of the vault (`journal/today`, `.md` optional), at `line` (0-based) if given, once the function returns. A note that doesn't exist is reported.",
+    ),
+    (
+        "mnote.apply_edits",
+        "({ { note, first, last, lines }, … }, { label })",
+        "Replaces lines `first..last` (as `mnote.buf.set_lines` counts them) in several notes as one undo step, once the function returns. Notes that aren't open are opened in the background, edited and saved. `u` in any of them undoes the whole edit in all of them that haven't changed since. Edits to one note mustn't overlap.",
     ),
     (
         "mnote.feedkeys",
@@ -1584,6 +1707,12 @@ mod tests {
             mnote.feedkeys("gg<C-w>v")
             mnote.cmd(":set so=3")
             mnote.cmd("   ")
+            mnote.apply_edits({
+              { note = "a", first = 0, last = 1, lines = { "x" } },
+              { note = "b.md", first = 2, last = 2, lines = { "y" } },
+              { note = "a", first = 3, last = 4 },
+            }, { label = "Rename tag" })
+            mnote.apply_edits({})
             "#,
         )
         .expect("loads");
@@ -1594,6 +1723,14 @@ mod tests {
                 Request::Open { note, line } => format!("open {note} {line:?}"),
                 Request::Keys(keys) => format!("keys {}", mnote_vim::key_notation(keys)),
                 Request::Ex(line) => format!("ex {line}"),
+                Request::ApplyEdits { edits, label } => format!(
+                    "apply {label}: {}",
+                    edits
+                        .iter()
+                        .map(|(note, list)| format!("{note}×{}", list.len()))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
                 Request::Picker { .. } | Request::Job { .. } => "other".into(),
             })
             .collect();
@@ -1604,6 +1741,7 @@ mod tests {
                 "open ideas.md None",
                 "keys gg<C-w>v",
                 "ex set so=3",
+                "apply Rename tag: a.md×2 b.md×1",
             ]
         );
         let err = host(r#"mnote.open("../outside")"#)
@@ -1684,8 +1822,9 @@ mod tests {
         let lua = Lua::new();
         let buf = rope("one\ntwo words\n");
         let opts = |code: &str| -> Table { lua.load(code).eval().expect("a table") };
-        let (range, kind) = decoration(&buf, &opts("return { line = 1, col = 4, bg = 'match' }"))
-            .expect("a highlight");
+        let (range, kind, ..) =
+            decoration(&buf, &opts("return { line = 1, col = 4, bg = 'match' }"))
+                .expect("a highlight");
         assert_eq!(range, 8..13);
         assert_eq!(
             kind,
@@ -1694,20 +1833,35 @@ mod tests {
                 background: Some("match".into())
             }
         );
-        let (_, kind) = decoration(
+        let (_, kind, ..) = decoration(
             &buf,
             &opts("return { line = 0, text = '3 tasks', right = true }"),
         )
         .expect("virtual text");
         assert!(matches!(kind, MarkKind::VirtualText { right: true, .. }));
-        let (_, kind) = decoration(&buf, &opts("return { line = 9, sign = '●' }")).expect("a sign");
+        let (_, kind, ..) =
+            decoration(&buf, &opts("return { line = 9, sign = '●' }")).expect("a sign");
         assert!(
             matches!(kind, MarkKind::Sign { .. }),
             "a line past the end clamps"
         );
-        let (_, kind) = decoration(&buf, &opts("return { line = 0, line_bg = 'danger_wash' }"))
+        let (_, kind, ..) = decoration(&buf, &opts("return { line = 0, line_bg = 'danger_wash' }"))
             .expect("a line background");
         assert!(matches!(kind, MarkKind::LineBackground { .. }));
+        // Ghost text: a point inside the line, following what's typed there.
+        use mnote_core::text::Bias;
+        let (range, kind, start, end) =
+            decoration(&buf, &opts("return { line = 1, col = 3, ghost = ': x' }")).expect("ghost");
+        assert_eq!(range, 7..7);
+        assert!(matches!(kind, MarkKind::Ghost { ref text, .. } if text == ": x"));
+        assert_eq!((start, end), (Bias::After, Bias::After));
+        let (.., start, _) = decoration(
+            &buf,
+            &opts("return { line = 0, sign = 's', bias = 'after' }"),
+        )
+        .expect("biased");
+        assert_eq!(start, Bias::After);
+        assert!(decoration(&buf, &opts("return { line = 0, bias = 'left' }")).is_err());
     }
 
     fn rope(text: &str) -> mnote_core::Buffer {
@@ -1717,7 +1871,7 @@ mod tests {
     fn edit(text: &str, first: i64, last: i64, lines: &[&str]) -> String {
         let buf = rope(text);
         let lines: Vec<String> = lines.iter().map(|l| (*l).to_owned()).collect();
-        let (range, new) = line_edit(&buf, first, last, &lines);
+        let (range, new) = line_edit(buf.text(), first, last, &lines);
         let mut out: String = buf.to_string();
         let start = out
             .char_indices()

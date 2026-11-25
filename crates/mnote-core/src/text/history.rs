@@ -4,6 +4,10 @@
 //! most recent child. Undoing and then editing starts a new branch instead of
 //! throwing the undone work away, as in Vim.
 
+use std::sync::Arc;
+
+use super::changes::{GroupId, Origin};
+
 /// One replacement, in character offsets on the text as it was when the
 /// replacement was applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +24,12 @@ pub(crate) struct Step {
     pub inverse: Vec<Replace>,
     pub cursor_before: usize,
     pub cursor_after: usize,
+    /// The edit group it belongs to, shared by every buffer it spans.
+    pub group: GroupId,
+    /// Who made it (its first edit's origin).
+    pub origin: Origin,
+    /// What it did, for messages ("Rename `foo`").
+    pub label: Option<Arc<str>>,
 }
 
 #[derive(Debug)]
@@ -35,6 +45,16 @@ pub(crate) struct History {
     nodes: Vec<Node>,
     current: usize,
     saved: Option<usize>,
+}
+
+impl Step {
+    pub fn info(&self) -> super::StepInfo {
+        super::StepInfo {
+            group: self.group,
+            origin: self.origin.clone(),
+            label: self.label.clone(),
+        }
+    }
 }
 
 const ROOT: usize = 0;
@@ -73,6 +93,17 @@ impl History {
         self.current = self.nodes[node].parent;
         self.nodes[self.current].last_child = Some(node);
         Some(&self.nodes[node].step)
+    }
+
+    /// The step undo would reverse, without moving.
+    pub fn peek_undo(&self) -> Option<&Step> {
+        (self.current != ROOT).then(|| &self.nodes[self.current].step)
+    }
+
+    /// The step redo would re-apply, without moving.
+    pub fn peek_redo(&self) -> Option<&Step> {
+        let child = self.nodes[self.current].last_child?;
+        Some(&self.nodes[child].step)
     }
 
     /// The step to re-apply for redo, moving to the newest child.

@@ -406,7 +406,9 @@ impl Editor {
             PickerAction::Callback(callback) => (callback.0)(self, cx),
             PickerAction::RunEx(command) => {
                 let revision = self.buffer.revision();
-                match self.vim.execute(&command, &mut self.buffer) {
+                let result = self.vim.execute(&command, &mut self.buffer);
+                self.carry_undo(cx);
+                match result {
                     Ok(outcome) => {
                         if let Some(message) = outcome.message {
                             self.reply = Some((message.into(), false));

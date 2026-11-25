@@ -50,9 +50,10 @@ Settings for a plugin go in its table and reach it through `mnote.config("tasks"
 - `mnote.buf.insert(text)`: Inserts text at the cursor.
 - `mnote.note() -> path | nil`: The open note's path in the vault.
 - `mnote.mode() -> mode`: Vim's mode: `NORMAL`, `INSERT`, `VISUAL`…
-- `mnote.decorate(namespace, opts) -> id`: Draws over the note, moving with edits: `{ line, col, end_col, fg, bg }` colours text; `{ line, line_bg }` a line; `{ line, text, color, right }` adds text after it; `{ line, sign, color }` a gutter sign. Colours are theme token names (`match`, `danger`, `ink_3`).
+- `mnote.decorate(namespace, opts) -> id`: Draws over the note, moving with edits: `{ line, col, end_col, fg, bg }` colours text; `{ line, line_bg }` a line; `{ line, text, color, right }` adds text after it; `{ line, sign, color }` a gutter sign; `{ line, col, ghost, color }` draws text inside the line that isn't part of it (the cursor skips it). `bias = "before"` or `"after"`: which side of text typed exactly at an end the decoration stays on (ghost text: after; the rest: before). Colours are theme token names (`match`, `danger`, `ink_3`).
 - `mnote.undecorate(namespace)`: Removes every decoration in the namespace.
 - `mnote.open(path, { line })`: Opens a note of the vault (`journal/today`, `.md` optional), at `line` (0-based) if given, once the function returns. A note that doesn't exist is reported.
+- `mnote.apply_edits({ { note, first, last, lines }, … }, { label })`: Replaces lines `first..last` (as `mnote.buf.set_lines` counts them) in several notes as one undo step, once the function returns. Notes that aren't open are opened in the background, edited and saved. `u` in any of them undoes the whole edit in all of them that haven't changed since. Edits to one note mustn't overlap.
 - `mnote.feedkeys(keys)`: Runs keys in Vim notation (`ggdd`, `<C-w>v`, `<leader>f`) as if typed, through the keymap, mappings and Vim, once the function returns.
 - `mnote.cmd(line)`: Runs an Ex line (`set so=5`, `w`, `daily`; a leading `:` is fine) once the function returns.
 - `mnote.clipboard.get() -> text | nil`: The system clipboard's text.

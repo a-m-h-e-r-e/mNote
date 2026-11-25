@@ -155,38 +155,69 @@ impl Editor {
             .marked
             .clone()
             .filter(|_| current && self.vim.mode() == Mode::Insert);
+        let marked_len = marked.as_ref().map_or(0, String::len);
+        let shown_len = look.shown.text.len();
+
+        // Text drawn inside the line that isn't part of the note: what's
+        // being composed at the caret, then ghost decorations. Positions are
+        // bytes of the shown text; `inserts` maps them to what's drawn.
+        let mut added: Vec<(usize, String, line::Styling)> = Vec::new();
+        if let Some(marked) = &marked {
+            added.push((
+                caret_byte.min(shown_len),
+                marked.clone(),
+                line::Styling {
+                    color: Some(Theme::color(p.cursor)),
+                    underline: true,
+                    ..line::Styling::default()
+                },
+            ));
+        }
+        if !substituted {
+            for mark in &marks {
+                let mnote_core::MarkKind::Ghost {
+                    text: ghost,
+                    color: c,
+                } = &mark.kind
+                else {
+                    continue;
+                };
+                let at = mark.range.start;
+                if at < start || at > start + len || ghost.is_empty() {
+                    continue;
+                }
+                added.push((
+                    to_shown(char_to_byte(&content, at - start)).min(shown_len),
+                    ghost.clone(),
+                    line::Styling {
+                        color: Some(color(c).unwrap_or(Theme::color(p.ink_3))),
+                        ..line::Styling::default()
+                    },
+                ));
+            }
+        }
+        // Stable: at one position, composed text comes before ghost text.
+        added.sort_by_key(|(at, ..)| *at);
+        let inserts = Inserts(added.iter().map(|(at, t, _)| (*at, t.len())).collect());
         let mut text: String = look.shown.text.to_string();
         let mut styling = look.styling.clone();
-        let marked_len = marked.as_ref().map_or(0, String::len);
-        if let Some(marked) = &marked {
-            let at = caret_byte.min(text.len());
-            text.insert_str(at, marked);
-            let shift = |r: std::ops::Range<usize>| {
-                let from = if r.start >= at {
-                    r.start + marked_len
-                } else {
-                    r.start
-                };
-                let to = if r.end > at {
-                    r.end + marked_len
-                } else {
-                    r.end
-                };
-                from..to
-            };
-            for s in &mut styling {
-                s.bytes = shift(s.bytes.clone());
-            }
-            for h in &mut highlights {
-                h.bytes = shift(h.bytes.clone());
-            }
-            styling.push(line::Styling {
-                bytes: at..at + marked_len,
-                color: Some(Theme::color(p.cursor)),
-                underline: true,
-                ..line::Styling::default()
-            });
+        for s in &mut styling {
+            s.bytes = inserts.range(s.bytes.clone());
         }
+        for h in &mut highlights {
+            h.bytes = inserts.range(h.bytes.clone());
+        }
+        let mut offset = 0;
+        for (at, piece, style) in &added {
+            let drawn = at + offset;
+            text.insert_str(drawn, piece);
+            styling.push(line::Styling {
+                bytes: drawn..drawn + piece.len(),
+                ..style.clone()
+            });
+            offset += piece.len();
+        }
+        let drawn_len = text.len();
 
         let mut line = LineText::new(
             text.into(),
@@ -210,10 +241,17 @@ impl Editor {
                 self.focused
             };
             let view = cx.entity().downgrade();
-            let map = Rc::new((content.clone(), look.shown.clone(), substituted));
-            // A byte of the shown text to a character of the note's line.
+            let map = Rc::new((
+                content.clone(),
+                look.shown.clone(),
+                substituted,
+                inserts.clone(),
+            ));
+            // A drawn byte to a character of the note's line (inside
+            // inserted text: where it's inserted).
             let to_char = move |byte: usize| {
-                let (content, shown, substituted) = &*map;
+                let (content, shown, substituted, inserts) = &*map;
+                let byte = inserts.back(byte);
                 if *substituted {
                     let mut b = byte.min(content.len());
                     while !content.is_char_boundary(b) {
@@ -244,18 +282,20 @@ impl Editor {
 
         if let Some(chars) = self.selection_on_line(ix, start, len) {
             let to_byte = |c: usize| to_shown(char_to_byte(&content, c));
+            let drawn = inserts.range(to_byte(chars.start)..to_byte(chars.end.min(len)));
             let end = if chars.end > len {
-                look.shown.text.len() + 1
+                drawn_len + 1
             } else {
-                to_byte(chars.end)
+                drawn.end
             };
-            line = line.selection(to_byte(chars.start)..end, Theme::color(p.select));
+            line = line.selection(drawn.start..end, Theme::color(p.select));
         }
         let mode = self.vim.mode();
         // In command mode the caret is in the command line.
         if current && mode != Mode::Command && (self.caret_on || mode != Mode::Insert) {
             line = line.caret(Some(Caret {
-                byte: caret_byte + marked_len,
+                // Before ghost text at the same place, after composed text.
+                byte: inserts.before(caret_byte) + marked_len,
                 shape: self.vim.mode().caret(),
                 color: Theme::color(p.cursor),
                 on_color: Theme::color(p.on_cursor),
@@ -926,5 +966,98 @@ impl Editor {
             }
             _ => None,
         }
+    }
+}
+
+/// Text drawn inside a line that isn't part of it (ghost text, text being
+/// composed): where each piece goes in the shown text, and how long it is,
+/// sorted. Maps shown bytes to drawn bytes and back.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Inserts(Vec<(usize, usize)>);
+
+impl Inserts {
+    /// Where shown byte `b` is drawn, before anything inserted there.
+    fn before(&self, b: usize) -> usize {
+        b + self
+            .0
+            .iter()
+            .filter(|(at, _)| *at < b)
+            .map(|(_, l)| l)
+            .sum::<usize>()
+    }
+
+    /// Where shown byte `b` is drawn, after anything inserted there.
+    fn after(&self, b: usize) -> usize {
+        b + self
+            .0
+            .iter()
+            .filter(|(at, _)| *at <= b)
+            .map(|(_, l)| l)
+            .sum::<usize>()
+    }
+
+    /// A shown range as drawn: text inserted at its start comes before it,
+    /// text inserted at its end after it.
+    fn range(&self, r: std::ops::Range<usize>) -> std::ops::Range<usize> {
+        if r.is_empty() {
+            let at = self.after(r.start);
+            return at..at;
+        }
+        self.after(r.start)..self.before(r.end)
+    }
+
+    /// A drawn byte back to the shown text; inside inserted text, the
+    /// place it's inserted.
+    fn back(&self, drawn: usize) -> usize {
+        let mut offset = 0;
+        for (at, len) in &self.0 {
+            let start = at + offset;
+            if drawn < start {
+                break;
+            }
+            if drawn < start + len {
+                return *at;
+            }
+            offset += len;
+        }
+        drawn - offset
+    }
+}
+
+#[cfg(test)]
+mod insert_tests {
+    use super::Inserts;
+
+    #[test]
+    fn drawn_and_shown_bytes_map_both_ways() {
+        // "abcdef" with 3 bytes drawn at 2 and 2 bytes at 4: "ab___cd__ef".
+        let i = Inserts(vec![(2, 3), (4, 2)]);
+        assert_eq!((i.before(2), i.after(2)), (2, 5));
+        assert_eq!(i.before(5), 10);
+        assert_eq!(
+            i.range(2..4),
+            5..7,
+            "a range starting at ghost text starts after it"
+        );
+        assert_eq!(i.range(0..2), 0..2, "and one ending there ends before it");
+        for (drawn, shown) in [
+            (0, 0),
+            (2, 2),
+            (3, 2),
+            (4, 2),
+            (5, 2),
+            (6, 3),
+            (7, 4),
+            (8, 4),
+            (9, 4),
+            (10, 5),
+        ] {
+            assert_eq!(i.back(drawn), shown, "drawn byte {drawn}");
+        }
+        let none = Inserts::default();
+        assert_eq!(
+            (none.before(3), none.range(1..2), none.back(4)),
+            (3, 1..2, 4)
+        );
     }
 }

@@ -13,6 +13,7 @@
 mod actions;
 pub mod blocks;
 pub mod commands;
+mod edit_groups;
 pub mod events;
 mod first_run;
 mod ime;
@@ -181,6 +182,9 @@ pub struct Editor {
     next_pane: u32,
     /// Open notes other than the focused pane's.
     parked: Vec<Doc>,
+    /// Which notes each edit group spanning several notes touched, so `u`
+    /// in one carries to the others.
+    edit_groups: mnote_core::text::GroupDocs<DocKey>,
     /// A line of an unfocused pane is being drawn: no caret, selection or
     /// typed-command preview.
     drawing_other: bool,
@@ -395,6 +399,7 @@ impl Editor {
             layout: Layout::Pane(PaneId(0)),
             next_pane: 1,
             parked: Vec::new(),
+            edit_groups: Default::default(),
             drawing_other: false,
             drawing_pane: PaneId(0),
             drag_anchor: None,

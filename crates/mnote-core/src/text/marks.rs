@@ -8,6 +8,8 @@
 
 use std::ops::Range;
 
+use super::Bias;
+
 /// What a decoration draws.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MarkKind {
@@ -27,6 +29,10 @@ pub enum MarkKind {
     },
     /// A short sign in the gutter, before the line number.
     Sign { text: String, color: String },
+    /// Text drawn inside the line at the mark's start, not part of the
+    /// note: an inlay hint, later an inline suggestion. The cursor and the
+    /// selection skip over it.
+    Ghost { text: String, color: String },
 }
 
 /// A decoration.
@@ -37,6 +43,10 @@ pub struct Mark {
     /// Characters; for line decorations, any position on the line.
     pub range: Range<usize>,
     pub kind: MarkKind,
+    /// Which side of text inserted exactly at its start, and at its end,
+    /// the mark stays on.
+    pub start_bias: Bias,
+    pub end_bias: Bias,
 }
 
 /// A buffer's decorations.
@@ -47,13 +57,31 @@ pub struct Marks {
 }
 
 impl Marks {
+    /// Adds a decoration that stays before text inserted exactly at either
+    /// end (typing at its end doesn't extend it).
     pub fn add(&mut self, namespace: &str, range: Range<usize>, kind: MarkKind) -> u64 {
+        self.add_with_bias(namespace, range, kind, Bias::Before, Bias::Before)
+    }
+
+    /// Adds a decoration whose ends stay before or after text inserted
+    /// exactly at them: a ghost text at the cursor uses `After` for both,
+    /// so it moves along as the user types.
+    pub fn add_with_bias(
+        &mut self,
+        namespace: &str,
+        range: Range<usize>,
+        kind: MarkKind,
+        start_bias: Bias,
+        end_bias: Bias,
+    ) -> u64 {
         self.next_id += 1;
         self.marks.push(Mark {
             id: self.next_id,
             namespace: namespace.to_owned(),
             range,
             kind,
+            start_bias,
+            end_bias,
         });
         self.next_id
     }
@@ -84,8 +112,11 @@ impl Marks {
     /// with `added` characters. Text after the edit shifts; a decoration
     /// whose text went keeps its place at the edit.
     pub(crate) fn edited(&mut self, removed: Range<usize>, added: usize) {
-        let shift = |pos: usize, end: bool| {
-            if pos <= removed.start {
+        let shift = |pos: usize, end: bool, bias: Bias| {
+            if removed.is_empty() && pos == removed.start && bias == Bias::After {
+                // Text inserted exactly here goes before the mark.
+                pos + added
+            } else if pos <= removed.start {
                 pos
             } else if pos >= removed.end {
                 pos - removed.len() + added
@@ -96,8 +127,8 @@ impl Marks {
             }
         };
         for m in &mut self.marks {
-            let start = shift(m.range.start, false);
-            let end = shift(m.range.end, true).max(start);
+            let start = shift(m.range.start, false, m.start_bias);
+            let end = shift(m.range.end, true, m.end_bias).max(start);
             m.range = start..end;
         }
     }
@@ -132,6 +163,38 @@ mod tests {
         );
         marks.remove(a);
         assert!(marks.is_empty());
+    }
+
+    #[test]
+    fn the_bias_decides_at_an_insertion_point() {
+        let mut marks = Marks::default();
+        marks.add("a", 5..8, sign());
+        marks.add_with_bias("b", 5..8, sign(), Bias::After, Bias::After);
+        let ghost = MarkKind::Ghost {
+            text: ": i32".into(),
+            color: "ink_3".into(),
+        };
+        marks.add_with_bias("c", 8..8, ghost, Bias::After, Bias::After);
+        // Typing at the start of both ranges.
+        marks.edited(5..5, 2);
+        assert_eq!(
+            marks.marks[0].range,
+            5..10,
+            "before: the new text is inside"
+        );
+        assert_eq!(marks.marks[1].range, 7..10, "after: the mark moves past it");
+        // Typing at their ends, where the ghost text sits.
+        marks.edited(10..10, 1);
+        assert_eq!(marks.marks[0].range, 5..10, "before: not extended");
+        assert_eq!(marks.marks[1].range, 7..11, "after: extended");
+        assert_eq!(
+            marks.marks[2].range,
+            11..11,
+            "the ghost stays after what's typed"
+        );
+        // A replacement (not an insertion) isn't decided by the bias.
+        marks.edited(4..6, 2);
+        assert_eq!(marks.marks[0].range, 4..10);
     }
 
     #[test]

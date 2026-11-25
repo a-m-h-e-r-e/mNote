@@ -304,7 +304,7 @@ impl Editor {
         self.panes.iter().position(|p| p.id == id)
     }
 
-    fn parked_index(&self, key: &DocKey) -> Option<usize> {
+    pub(super) fn parked_index(&self, key: &DocKey) -> Option<usize> {
         self.parked.iter().position(|d| d.source.doc_key() == *key)
     }
 
@@ -335,7 +335,9 @@ impl Editor {
     /// The focused pane's note goes away (it opens another): keep its doc
     /// if another pane still shows it.
     pub(super) fn park_or_drop(&mut self, mut old: Doc) {
-        if self.shown_elsewhere(&old.source.doc_key()) {
+        let key = old.source.doc_key();
+        // A note in an edit group stays, so `u` elsewhere can reach it.
+        if self.shown_elsewhere(&key) || self.edit_groups.contains(&key) {
             old.autosave_task = None;
             self.parked.push(old);
         }
@@ -416,7 +418,10 @@ impl Editor {
             // Its note's doc goes if no pane shows it any more.
             let still_shown = slot.note == self.source.doc_key()
                 || self.panes.iter().any(|p| p.note == slot.note);
-            if !still_shown && let Some(d) = self.parked_index(&slot.note) {
+            if !still_shown
+                && !self.edit_groups.contains(&slot.note)
+                && let Some(d) = self.parked_index(&slot.note)
+            {
                 self.parked.swap_remove(d);
             }
         }
@@ -429,8 +434,10 @@ impl Editor {
         let focused = self.focused;
         self.panes.retain(|p| p.id == focused);
         self.layout = Layout::Pane(focused);
-        // Parked docs were saved when they were parked.
-        self.parked.clear();
+        // Parked docs were saved when they were parked; those in an edit
+        // group stay for its undo.
+        let groups = &self.edit_groups;
+        self.parked.retain(|d| groups.contains(&d.source.doc_key()));
         cx.notify();
     }
 

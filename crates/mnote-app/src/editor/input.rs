@@ -121,6 +121,8 @@ impl Editor {
         let (top, bottom) = self.lines_on_screen();
         self.vim.set_view(top, bottom);
         let effect = self.vim.handle_key(key, &mut self.buffer);
+        // `u` / `⌃r` on a step that spans other notes undoes it there too.
+        self.carry_undo(cx);
 
         if let Some(text) = self.clipboard.borrow_mut().write.take() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));

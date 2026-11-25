@@ -7,6 +7,7 @@
 
 mod autosave;
 mod changes;
+mod groups;
 mod history;
 mod marks;
 
@@ -16,6 +17,7 @@ use std::ops::Range;
 pub use autosave::Autosave;
 use changes::ChangeLog;
 pub use changes::{Bias, Change, ConsumerId, GroupId, Origin};
+pub use groups::{GroupDocs, undo_across};
 use history::{History, Replace, Step};
 pub use marks::{Mark, MarkKind, Marks};
 use mnote_lang::coords::{ByteOffset, CharOffset, RopeCoords};
@@ -80,8 +82,29 @@ pub struct Buffer {
     log: ChangeLog,
     /// The undo step edits are going into now.
     group: GroupId,
+    /// The group the last undo or redo reversed or re-applied, for the app
+    /// to carry to the other buffers it spans.
+    undone: Option<Undone>,
     /// Its language's name (`markdown`), if it has one.
     language: Option<Arc<str>>,
+}
+
+/// What the last undo or redo did, from [`Buffer::take_undone`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Undone {
+    pub group: GroupId,
+    /// Redo, not undo.
+    pub redo: bool,
+    pub label: Option<Arc<str>>,
+}
+
+/// The undo step `u` (or `⌃r`) would take next, from
+/// [`Buffer::next_undo`] and [`Buffer::next_redo`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepInfo {
+    pub group: GroupId,
+    pub origin: Origin,
+    pub label: Option<Arc<str>>,
 }
 
 /// A buffer's text at one revision: cheap to take (a rope clone is O(1)) and
@@ -131,7 +154,8 @@ impl Buffer {
             changed: None,
             marks: Marks::default(),
             log: ChangeLog::new(0),
-            group: GroupId(0),
+            group: GroupId::fresh(),
+            undone: None,
             language: language.map(Arc::from),
         }
     }
@@ -237,15 +261,40 @@ impl Buffer {
     /// session or a `:%s` substitution. `cursor` is restored on undo. Calls
     /// nest; the outermost [`end_change`](Self::end_change) commits.
     pub fn begin_change(&mut self, cursor: usize) {
+        self.begin_group(cursor, GroupId::fresh(), None);
+    }
+
+    /// Like [`begin_change`](Self::begin_change), with the step joining
+    /// edit group `group` (shared by every buffer one multi-file edit
+    /// touches) and carrying a label. Nested, the outer step's group stands.
+    pub fn begin_group(&mut self, cursor: usize, group: GroupId, label: Option<&str>) {
         if self.depth == 0 {
-            self.group.0 += 1;
+            self.group = group;
             self.pending = Some(Step {
                 cursor_before: cursor,
                 cursor_after: cursor,
+                group,
+                label: label.map(Arc::from),
                 ..Step::default()
             });
         }
         self.depth += 1;
+    }
+
+    /// The step undo would reverse next.
+    pub fn next_undo(&self) -> Option<StepInfo> {
+        self.history.peek_undo().map(Step::info)
+    }
+
+    /// The step redo would re-apply next.
+    pub fn next_redo(&self) -> Option<StepInfo> {
+        self.history.peek_redo().map(Step::info)
+    }
+
+    /// What the last undo or redo did, once; the app undoes the same group
+    /// in the other buffers it spans.
+    pub fn take_undone(&mut self) -> Option<Undone> {
+        self.undone.take()
     }
 
     /// Ends the current undo step. `cursor` is restored on redo.
@@ -297,7 +346,7 @@ impl Buffer {
             return Ok(());
         }
         if self.pending.is_none() {
-            self.group.0 += 1;
+            self.group = GroupId::fresh();
         }
         let forward = Replace {
             start: range.start,
@@ -312,6 +361,9 @@ impl Buffer {
         };
         match &mut self.pending {
             Some(step) => {
+                if step.forward.is_empty() {
+                    step.origin = origin;
+                }
                 step.forward.push(forward);
                 step.inverse.push(inverse);
             }
@@ -320,6 +372,9 @@ impl Buffer {
                 forward: vec![forward],
                 inverse: vec![inverse],
                 cursor_before: cursor,
+                group: self.group,
+                origin,
+                label: None,
             }),
         }
         Ok(())
@@ -336,10 +391,15 @@ impl Buffer {
     pub fn undo(&mut self) -> Option<usize> {
         self.close_change(0);
         let step = self.history.undo()?.clone();
-        self.group.0 += 1;
+        self.group = GroupId::fresh();
         for change in step.inverse.iter().rev() {
             self.apply(change, &Origin::User);
         }
+        self.undone = Some(Undone {
+            group: step.group,
+            redo: false,
+            label: step.label.clone(),
+        });
         Some(step.cursor_before)
     }
 
@@ -347,10 +407,15 @@ impl Buffer {
     pub fn redo(&mut self) -> Option<usize> {
         self.close_change(0);
         let step = self.history.redo()?.clone();
-        self.group.0 += 1;
+        self.group = GroupId::fresh();
         for change in &step.forward {
             self.apply(change, &Origin::User);
         }
+        self.undone = Some(Undone {
+            group: step.group,
+            redo: true,
+            label: step.label.clone(),
+        });
         Some(step.cursor_after)
     }
 
@@ -366,10 +431,17 @@ impl Buffer {
         if let Some(cursor) = self.pending.as_ref().map(|s| s.cursor_after) {
             // Commit what's done so far and keep the group open, at the same
             // nesting depth, for what follows.
+            let (group, label) = self
+                .pending
+                .as_ref()
+                .map(|s| (s.group, s.label.clone()))
+                .unwrap_or_default();
             self.commit_pending(cursor);
             self.pending = Some(Step {
                 cursor_before: cursor,
                 cursor_after: cursor,
+                group,
+                label,
                 ..Step::default()
             });
         }
@@ -595,6 +667,23 @@ mod tests {
         assert_eq!(b.changes_since(2).map(Iterator::count), Some(0));
         let user: Vec<_> = b.recent_user_edits().map(|c| &*c.new_text).collect();
         assert_eq!(user, ["e🙂"]);
+    }
+
+    #[test]
+    fn ghost_text_never_becomes_part_of_the_text() {
+        let mut b = Buffer::new("let x = 1;\n");
+        let ghost = MarkKind::Ghost {
+            text: ": i32".into(),
+            color: "ink_3".into(),
+        };
+        b.marks_mut()
+            .add_with_bias("hints", 5..5, ghost, Bias::After, Bias::After);
+        // Typing at the ghost's place: it moves along, the text stays plain.
+        b.edit(5..5, "yz", 5, Origin::User).expect("edit");
+        assert_eq!(b.to_string(), "let xyz = 1;\n");
+        let mark = b.marks().touching(0..20).next().expect("kept");
+        assert_eq!(mark.range, 7..7);
+        assert_eq!(b.len_chars(), 13, "nothing of the ghost is counted");
     }
 
     #[test]
