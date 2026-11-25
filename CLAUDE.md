@@ -31,7 +31,7 @@ Every dependency is a cost: build time, binary size, attack surface, maintenance
 - Write down why in the PR or commit message for each new dependency: what it does, why std isn't enough, and its size.
 - Use `default-features = false` and enable only the features we use.
 - No async runtime (tokio, async-std). Use gpui's executor and std threads.
-- No `serde_json`-style heavy formats where a simple parser will do. `toml` for config is fine.
+- No `serde_json`-style heavy formats where a simple parser will do. `toml` for config is fine. Accepted exception: `serde_json` and `serde` in `mnote-rpc`, `mnote-lsp` (and later `mnote-ai`), because LSP, ACP and MCP are JSON-RPC; both are already locked through gpui, so match those versions (ADR-0006).
 - `mnote-core` and `mnote-vim` must not depend on gpui or any UI crate.
 - Don't add duplicate crate versions. gpui's own tree already carries about 50. Check the `Cargo.lock` diff: a change may add new crates, but must not add a second version of a crate that's already locked, and when we pick a crate gpui also uses, match gpui's version. (`cargo tree -d` is a rough guide only; its count shifts with feature resolution even when the lockfile gains no new versions.) One accepted exception: mlua's `vendored` feature pulls in `luajit-src` as a build dependency, which brings `which` 8 beside gpui's `which` 6. It only runs at build time and nothing of it ships in the binary (AMI-204).
 - Never run `cargo` with `--offline` to try out dependency changes: it re-resolves `Cargo.lock` against the local cache and silently downgrades unrelated crates. Pin new crates with `cargo update -p <crate> --precise <version>`.
@@ -41,7 +41,8 @@ Every dependency is a cost: build time, binary size, attack surface, maintenance
 ## Code standards
 
 - Stable Rust, edition 2024. `cargo fmt` clean. `cargo clippy --all-targets -- -D warnings` clean.
-- `unsafe` is forbidden in the workspace. If gpui or the macOS integration ever needs it, isolate it in one module with a `// SAFETY:` comment per block, and lift the lint only there.
+- `unsafe` is forbidden in the workspace. If gpui or the macOS integration ever needs it, isolate it in one module with a `// SAFETY:` comment per block, and lift the lint only there. The modules allowed it: `mnote-app/src/summon.rs` (the global hotkey) and `mnote-lang/src/grammar/native.rs` (loading tree-sitter grammar libraries, ADR-0002). Nowhere else.
+- Code support and anything AI follow the accepted design in `docs/architecture/code-support.md` and the ADRs in `docs/adr/`. A change that goes against an accepted ADR needs a new ADR that supersedes it, first.
 - No `unwrap()` outside tests. Use `?`, or `expect("why this can't fail")` for true invariants.
 - Errors: a typed error enum per crate, implementing `std::error::Error`. No panics on bad user data such as malformed Markdown, odd file names or a missing vault.
 - Never lose user data. Write files atomically (write to a temp file, then rename), keep undo for every file operation, and move deleted files to the system Trash.
