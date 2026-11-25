@@ -26,6 +26,26 @@ impl NotePath {
         }
     }
 
+    /// Any file of the vault mNote can open (a code file, a text file): a
+    /// safe vault path that isn't hidden. Notes are files too; this is for
+    /// opening and saving, while [`NotePath::new`] stays the check for notes.
+    pub fn file(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let hidden = path
+            .components()
+            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'));
+        if crate::files::VaultPath::new(path).is_ok() && !hidden && path.file_name().is_some() {
+            Ok(NotePath(path.to_path_buf()))
+        } else {
+            Err(VaultError::InvalidNotePath(path.to_path_buf()))
+        }
+    }
+
+    /// Whether it's a note (indexed and linked), not another file.
+    pub fn is_note(&self) -> bool {
+        is_note(&self.0)
+    }
+
     pub fn as_path(&self) -> &Path {
         &self.0
     }
@@ -91,6 +111,25 @@ mod tests {
                 .segments()
                 .collect::<Vec<_>>(),
             ["inbox"]
+        );
+    }
+
+    #[test]
+    fn files_are_any_visible_vault_path() {
+        let rs = NotePath::file("src/main.rs").expect("a code file");
+        assert!(!rs.is_note());
+        assert_eq!(rs.file_name(), "main.rs");
+        assert!(
+            NotePath::file("notes/a.md")
+                .expect("a note is a file too")
+                .is_note()
+        );
+        for bad in ["../x.rs", "/abs.rs", ".git/config", "src/.env", ""] {
+            assert!(NotePath::file(bad).is_err(), "{bad:?} should be refused");
+        }
+        assert!(
+            NotePath::new("src/main.rs").is_err(),
+            "new stays notes only"
         );
     }
 

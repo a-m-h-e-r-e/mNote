@@ -26,7 +26,13 @@ impl Editor {
             ix.abs_diff(cursor_line)
         };
 
-        let kind = line_kind(self.tree.as_ref(), rope, ix);
+        // A code file's lines are code, never Markdown.
+        let code_file = self.is_code_file();
+        let kind = if code_file {
+            LineKind::Text
+        } else {
+            line_kind(self.tree.as_ref(), rope, ix)
+        };
         // Decorations on this line (see `mnote_core::text::marks`).
         let marks: Vec<mnote_core::Mark> = if self.buffer.marks().is_empty() {
             Vec::new()
@@ -46,7 +52,7 @@ impl Editor {
         // markers, no collapsed frontmatter, tables or images.
         // config.toml shows as typed, its `#` comments not headings.
         let config = matches!(self.source, Source::Config(_));
-        let styled_view = self.view == styled::View::Styled && !config;
+        let styled_view = self.view == styled::View::Styled && !config && !code_file;
         let plain_view = self.view == styled::View::Plain || config;
 
         // Blocks (frontmatter, images, tables, and any registered) draw
@@ -71,7 +77,9 @@ impl Editor {
         }
 
         let text = if substituted { &shown } else { &content };
-        let mut look = if styled_view {
+        let mut look = if code_file {
+            styled::code_file_look(text, p)
+        } else if styled_view {
             styled::look(&kind, text, raw, p)
         } else {
             styled::source_look(&kind, text, plain_view, p)
@@ -79,6 +87,13 @@ impl Editor {
         if substituted {
             look.shown = StyledLine::plain(&shown);
             look.styling.clear();
+        }
+        if code_file
+            && !plain_view
+            && !substituted
+            && let Some(spans) = self.code_file_spans(ix, cx)
+        {
+            look.styling = styled::code_styling(&spans, cx.theme());
         }
         if let LineKind::Code { lang, block } = &kind
             && !plain_view
@@ -796,20 +811,20 @@ impl Editor {
         ix: usize,
         cx: &mut Context<Self>,
     ) -> Option<Vec<(std::ops::Range<usize>, Scope)>> {
-        if !mnote_core::code::supported(lang) {
-            // A grammar may be loadable (Neovim's, say): asked after the frame.
-            self.want_grammar(lang, cx);
+        // No grammar: one may be loadable (Neovim's, say), asked about after
+        // the frame. A query not compiled yet compiles off the UI thread.
+        if !self.colours_ready(lang, cx) {
             return None;
         }
         // Past the highlight limit, a huge note stays plain.
         if self.buffer.text().len_bytes() > mnote_core::lang::syntax::limits().highlight {
             return None;
         }
-        let revision = self.buffer.revision();
+        let stamp = self.buffer.syntax_stamp();
         let cached = self
             .code_cache
             .get(&block.start)
-            .filter(|(rev, lines)| *rev == revision && lines.len() == block.len())
+            .filter(|(at, lines)| *at == stamp && lines.len() == block.len())
             .map(|(_, lines)| lines.clone());
         let lines = match cached {
             Some(lines) => lines,
@@ -830,7 +845,6 @@ impl Editor {
                     .buffer
                     .layer_at(from, &language)
                     .map(|layer| layer.tree.clone())?;
-                let current = self.buffer.syntax_is_current();
                 let rope = self.buffer.text();
                 let spans: Vec<(std::ops::Range<usize>, Scope)> =
                     mnote_core::lang::highlight::highlight_tree(
@@ -858,14 +872,10 @@ impl Editor {
                     );
                 }
                 let lines = Rc::new(per_line);
-                // A tree that's waiting for its re-parse is drawn, not kept.
-                if current {
-                    if self.code_cache.len() > 64 {
-                        self.code_cache.retain(|_, (rev, _)| *rev == revision);
-                    }
-                    self.code_cache
-                        .insert(block.start, (revision, lines.clone()));
+                if self.code_cache.len() > 64 {
+                    self.code_cache.retain(|_, (at, _)| *at == stamp);
                 }
+                self.code_cache.insert(block.start, (stamp, lines.clone()));
                 lines
             }
         };

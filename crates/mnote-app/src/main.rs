@@ -56,7 +56,10 @@ fn target_from_args(vault: Option<&Path>) -> Result<Target, String> {
         (folder.to_path_buf(), file)
     };
     let vault = Vault::open(&folder).map_err(|e| e.to_string())?;
-    let note = NotePath::new(&file).map_err(|e| e.to_string())?;
+    // A note, or any other file of the folder (a code file opens as code).
+    let note = NotePath::new(&file)
+        .or_else(|_| NotePath::file(&file))
+        .map_err(|e| e.to_string())?;
     Ok(Target::Note(vault, note))
 }
 

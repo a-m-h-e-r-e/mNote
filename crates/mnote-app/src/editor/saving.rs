@@ -42,9 +42,12 @@ impl Editor {
             Ok(()) => {
                 self.autosave.saved();
                 self.notice = None;
-                self.index
-                    .borrow_mut()
-                    .note_saved(note.clone(), &self.buffer.to_string());
+                // A code file is listed (when code files show), not read.
+                if note.is_note() || self.config.show_code_files {
+                    self.index
+                        .borrow_mut()
+                        .note_saved(note.clone(), &self.buffer.to_string());
+                }
                 let note = note.clone();
                 self.emit(events::EditorEvent::NoteSaved { note }, cx);
             }

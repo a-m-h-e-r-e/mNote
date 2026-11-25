@@ -149,6 +149,17 @@ pub fn highlight_tree(
     Some(highlight_layers(Some((lang, tree)), &[], rope, range))
 }
 
+/// `code` in `lang`, parsed and highlighted whole, as spans of `code`.
+pub fn highlight_text_spans(lang: &str, code: &str) -> Option<Vec<Span>> {
+    crate::code::grammar_for(lang)?;
+    let language = crate::code::language(lang)?;
+    let mut parser = Parser::new();
+    parser.set_language(&language).ok()?;
+    let tree = parser.parse(code, None)?;
+    let rope = Rope::from_str(code);
+    highlight_tree(lang, &tree, &rope, 0..code.len())
+}
+
 /// `code` in `lang`, parsed and highlighted whole, with scope names: for
 /// tests and one-off text. `None` without a grammar and query.
 pub fn highlight_text(lang: &str, code: &str) -> Option<Vec<(Range<usize>, Arc<str>)>> {

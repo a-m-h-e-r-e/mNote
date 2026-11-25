@@ -40,6 +40,9 @@ pub struct NoteEntry {
     pub links: Vec<OutLink>,
     /// When the file last changed, if the file system says.
     pub modified: Option<SystemTime>,
+    /// A note (indexed and linked), not another file (a code file listed
+    /// by name).
+    pub note: bool,
 }
 
 impl NoteEntry {
@@ -47,6 +50,9 @@ impl NoteEntry {
     /// Markdown notes are outlined (title, aliases, tags, headings,
     /// links); a note file type in another language is listed by name only.
     pub fn new(path: NotePath, text: &str, modified: Option<SystemTime>) -> Self {
+        if !path.is_note() {
+            return Self::file(path, modified);
+        }
         let markdown = crate::filetype::for_path(path.as_path())
             .is_none_or(|f| f.language.as_deref() == Some("markdown"));
         let outline = if markdown {
@@ -62,6 +68,23 @@ impl NoteEntry {
             headings: outline.headings,
             links: outline.links,
             modified,
+            note: true,
+            path,
+        }
+    }
+
+    /// A file that isn't a note (a code file): listed by its file name,
+    /// not read, never a link's target.
+    pub fn file(path: NotePath, modified: Option<SystemTime>) -> Self {
+        NoteEntry {
+            path_text: path.to_string(),
+            title: path.file_name().to_owned(),
+            aliases: Vec::new(),
+            tags: Vec::new(),
+            headings: Vec::new(),
+            links: Vec::new(),
+            modified,
+            note: false,
             path,
         }
     }
@@ -102,6 +125,8 @@ pub struct NoteIndex {
     /// Tag (lowercase) → its spelling as first seen, and how many notes have
     /// it.
     tags: BTreeMap<String, (String, usize)>,
+    /// Whether the vault's code files are listed too.
+    files: bool,
 }
 
 impl NoteIndex {
@@ -109,6 +134,32 @@ impl NoteIndex {
     /// note that can't be read is still listed, with its file name as title.
     /// Takes a while on a big vault, so call it off the UI thread.
     pub fn build(vault: &Vault) -> Result<Self> {
+        Self::build_with(vault, false)
+    }
+
+    /// Like [`NoteIndex::build`], also listing the vault's other files of a
+    /// known type (code files) when `files`, by name, unread.
+    pub fn build_with(vault: &Vault, files: bool) -> Result<Self> {
+        let mut index = Self::build_notes(vault)?;
+        index.files = files;
+        if files {
+            for file in vault.files()? {
+                let Ok(path) = NotePath::file(file.as_path()) else {
+                    continue;
+                };
+                if path.is_note() {
+                    continue;
+                }
+                let modified = fs::metadata(vault.path_of(&path))
+                    .and_then(|m| m.modified())
+                    .ok();
+                index.insert(NoteEntry::file(path, modified));
+            }
+        }
+        Ok(index)
+    }
+
+    fn build_notes(vault: &Vault) -> Result<Self> {
         let paths = vault.notes()?;
         let threads = thread::available_parallelism()
             .map_or(4, |n| n.get())
@@ -140,6 +191,7 @@ impl NoteIndex {
         let mut index = NoteIndex {
             notes: entries,
             tags: BTreeMap::new(),
+            files: false,
         };
         for i in 0..index.notes.len() {
             index.count_tags(i, true);
@@ -171,13 +223,13 @@ impl NoteIndex {
             return self
                 .notes
                 .iter()
-                .position(|n| crate::links::note_key(&n.path) == key);
+                .position(|n| n.note && crate::links::note_key(&n.path) == key);
         }
         let by_name = self
             .notes
             .iter()
             .enumerate()
-            .filter(|(_, n)| n.path.name().to_lowercase() == key)
+            .filter(|(_, n)| n.note && n.path.name().to_lowercase() == key)
             .min_by_key(|(_, n)| (n.path_text.matches('/').count(), n.path_text.len()))
             .map(|(i, _)| i);
         by_name.or_else(|| {
@@ -189,7 +241,7 @@ impl NoteIndex {
 
     /// Every link to note `note` from the other notes, by note then line.
     pub fn backlinks(&self, note: usize) -> Vec<Backlink> {
-        let Some(entry) = self.notes.get(note) else {
+        let Some(entry) = self.notes.get(note).filter(|e| e.note) else {
             return Vec::new();
         };
         // The keys that resolve to this note: its path always, its name and
@@ -277,7 +329,9 @@ impl NoteIndex {
     pub fn apply(&mut self, vault: &Vault, event: &VaultEvent) {
         match event {
             VaultEvent::Changed(path) => {
-                if vault.path_of(path).is_file() {
+                if !path.is_note() && !self.files {
+                    // Code files aren't listed.
+                } else if vault.path_of(path).is_file() {
                     self.insert(read_entry(vault, path.clone()));
                 } else {
                     self.remove(path);
@@ -442,12 +496,67 @@ impl NoteIndex {
 fn read_entry(vault: &Vault, path: NotePath) -> NoteEntry {
     let file = vault.path_of(&path);
     let modified = fs::metadata(&file).and_then(|m| m.modified()).ok();
+    if !path.is_note() {
+        return NoteEntry::file(path, modified);
+    }
     let text = vault.read(&path).unwrap_or_default();
     NoteEntry::new(path, &text, modified)
 }
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn code_files_are_listed_by_name_not_linked() {
+        use crate::vault::tests::TempDir;
+        let dir = TempDir::new();
+        dir.file("main.md", "# Main\n\nSee [[main]] and [[lib]].\n");
+        dir.file("src/main.rs", "fn main() { let s = \"[[main]]\"; }\n");
+        dir.file("src/lib.rs", "pub fn f() {}\n");
+        dir.file("notes.txtx", "unknown kind");
+        let vault = Vault::open(&dir.0).expect("vault");
+
+        let notes_only = NoteIndex::build(&vault).expect("index");
+        assert_eq!(notes_only.len(), 1);
+
+        let index = NoteIndex::build_with(&vault, true).expect("index");
+        let listed: Vec<(&str, bool, &str)> = index
+            .notes()
+            .iter()
+            .map(|n| (n.path_text.as_str(), n.note, n.title.as_str()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("main.md", true, "Main"),
+                ("src/lib.rs", false, "lib.rs"),
+                ("src/main.rs", false, "main.rs"),
+            ],
+            "code files by file name; unknown kinds aren't listed"
+        );
+        // Links resolve to notes only: [[lib]] doesn't find lib.rs.
+        assert_eq!(index.resolve("lib"), None);
+        let main_note = index.resolve("main").expect("the note");
+        assert!(index.notes()[main_note].note);
+        // A code file has no backlinks, and its text isn't read for links.
+        let code = index.notes().iter().position(|n| !n.note).expect("a file");
+        assert!(index.backlinks(code).is_empty());
+        assert!(index.notes()[code].links.is_empty());
+
+        // Saving a code file keeps it a file entry.
+        let mut index = index;
+        let rs = NotePath::file("src/lib.rs").expect("a file");
+        index.note_saved(rs.clone(), "pub fn g() {}");
+        assert!(
+            index
+                .get(&rs)
+                .is_some_and(|e| !e.note && e.title == "lib.rs")
+        );
+        // Without code files listed, a change to one is ignored.
+        let mut notes_only = notes_only;
+        notes_only.apply(&vault, &VaultEvent::Changed(rs));
+        assert_eq!(notes_only.len(), 1);
+    }
 
     #[test]
     fn notes_in_another_language_are_listed_not_outlined() {

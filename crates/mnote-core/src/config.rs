@@ -312,6 +312,8 @@ pub struct Config {
     /// Use Neovim's tree-sitter queries (and later its parsers) when it's
     /// installed.
     pub reuse_neovim: bool,
+    /// List the vault's code files in the finder and explorer, beside notes.
+    pub show_code_files: bool,
     /// Above this many megabytes, code fences and other injections aren't
     /// parsed.
     pub large_file_injections_mb: u32,
@@ -381,6 +383,7 @@ impl Default for Config {
             wrap_motion: false,
             scrolloff: 0,
             reuse_neovim: true,
+            show_code_files: true,
             large_file_injections_mb: 4,
             large_file_highlight_mb: 16,
             wrap: true,
@@ -624,6 +627,10 @@ impl Config {
                         config.large_file_highlight_mb = mb;
                     }
                 }
+                "show_code_files" => {
+                    config.show_code_files =
+                        value.as_bool().ok_or_else(|| wrong("true or false"))?;
+                }
                 "reuse_neovim" => {
                     config.reuse_neovim = value.as_bool().ok_or_else(|| wrong("true or false"))?;
                 }
@@ -858,6 +865,17 @@ impl Config {
                     on_off(d.reuse_neovim)
                 ),
                 on_off(self.reuse_neovim).into(),
+            ),
+            Setting::new(
+                "show_code_files",
+                &format!(
+                    "List the vault's code files (.rs, .py, .lua…) in the finder and\n\
+                     explorer beside notes. They open as code; notes stay the only\n\
+                     files with links and backlinks.\n\
+                     Values: true, false. Default: {}",
+                    on_off(d.show_code_files)
+                ),
+                on_off(self.show_code_files).into(),
             ),
             Setting::new(
                 "large_file_injections_mb",
@@ -1238,6 +1256,7 @@ mod tests {
             wrap_motion: true,
             scrolloff: 5,
             reuse_neovim: false,
+            show_code_files: false,
             large_file_injections_mb: 2,
             large_file_highlight_mb: 8,
             wrap: false,

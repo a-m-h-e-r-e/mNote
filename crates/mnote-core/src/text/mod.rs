@@ -136,6 +136,11 @@ impl Buffer {
         Self::with_syntax(text, Syntax::markdown(), Some("markdown"))
     }
 
+    /// A buffer holding `text` as plain text: no language, nothing parsed.
+    pub fn new_plain(text: &str) -> Self {
+        Self::with_syntax(text, None, None)
+    }
+
     /// A buffer holding `text`, parsed as `language` (a name or alias in
     /// [`crate::code`]'s registry); without that language, as plain text.
     pub fn with_language(text: &str, language: &str) -> Self {
@@ -144,7 +149,9 @@ impl Buffer {
         }
         let syntax = crate::code::language(language)
             .and_then(|l| Syntax::with_injections(&l, Some(language)));
-        let name = syntax.is_some().then_some(language);
+        // Known by name even without a grammar yet (one may load later).
+        let name = (syntax.is_some() || crate::lang::languages::pack(language).is_some())
+            .then_some(language);
         Self::with_syntax(text, syntax, name)
     }
 
@@ -523,6 +530,38 @@ impl Buffer {
         }
     }
 
+    /// Switches to `language` (`:setfiletype`): its parser from now on, or
+    /// plain text without a grammar. A waker set before is dropped; set it
+    /// again with [`Self::on_syntax_ready`].
+    pub fn set_language(&mut self, language: &str) {
+        let syntax = if language == "markdown" {
+            Syntax::markdown()
+        } else {
+            crate::code::language(language)
+                .and_then(|l| Syntax::with_injections(&l, Some(language)))
+        };
+        if let Some(old) = std::mem::replace(&mut self.syntax, syntax) {
+            drop(old);
+        }
+        self.language = (!language.is_empty()).then(|| Arc::from(language));
+    }
+
+    /// Starts parsing if the buffer's language has a grammar now but had
+    /// none when it opened (one just loaded). Whether it started.
+    pub fn refresh_language(&mut self) -> bool {
+        if self.syntax.is_some() {
+            return false;
+        }
+        let Some(language) = self.language.clone() else {
+            return false;
+        };
+        if crate::code::language(&language).is_none() {
+            return false;
+        }
+        self.set_language(&language);
+        self.syntax.is_some()
+    }
+
     /// The deepest layer of `language` covering byte `at`.
     pub fn layer_at(&mut self, at: usize, language: &str) -> Option<&mnote_lang::syntax::Layer> {
         let rope = &self.rope;
@@ -545,6 +584,14 @@ impl Buffer {
         if let Some(syntax) = &mut self.syntax {
             syntax.reparse();
         }
+    }
+
+    /// A stamp for things drawn from the text and its syntax trees: it
+    /// changes when the text does and when a parse result lands.
+    pub fn syntax_stamp(&mut self) -> u64 {
+        let rope = &self.rope;
+        let generation = self.syntax.as_mut().map_or(0, |s| s.generation(rope));
+        (self.revision << 20) | (generation & 0xF_FFFF)
     }
 
     /// Whether the syntax tree's structure reflects the current text.
@@ -754,6 +801,32 @@ mod tests {
         assert_ne!(groups[1], groups[2], "its own step");
         assert_ne!(groups[2], groups[3], "the undo is a step of its own");
         b.unsubscribe_changes(id);
+    }
+
+    #[test]
+    fn languages_switch_and_stay_known_without_a_grammar() {
+        let mut b = Buffer::with_language("package main\n", "go");
+        assert_eq!(
+            b.language(),
+            Some("go"),
+            "known by name before its grammar loads"
+        );
+        assert!(b.syntax_tree_now().is_none(), "plain until then");
+        assert!(!b.refresh_language(), "still no grammar");
+        b.set_language("rust");
+        assert_eq!(b.language(), Some("rust"));
+        assert_eq!(
+            b.syntax_tree_now().map(|t| t.root_node().kind()),
+            Some("source_file")
+        );
+        b.set_language("markdown");
+        assert_eq!(
+            b.syntax_tree_now().map(|t| t.root_node().kind()),
+            Some("document")
+        );
+        let mut plain = Buffer::new_plain("x");
+        assert_eq!(plain.language(), None);
+        assert!(plain.syntax_tree_now().is_none());
     }
 
     #[test]

@@ -288,6 +288,10 @@ impl Render for Editor {
         let view = cx.entity();
 
         let mut status = StatusLine::new(self.vim.mode()).file(file);
+        // A code file says its language (`:setf` changes it).
+        if self.is_code_file() {
+            status = status.item(self.buffer.language().unwrap_or("plain text").to_owned());
+        }
         if let Some(reg) = self.vim.recording() {
             status = status.item(format!("recording @{reg}"));
         }

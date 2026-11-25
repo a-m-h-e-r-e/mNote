@@ -943,6 +943,7 @@ impl Vim {
             return Ok(ExOutcome::message(self.describe_options()));
         }
         let mut messages = Vec::new();
+        let mut app = None;
         for item in args.split_whitespace() {
             let (name, value) = match item.split_once(['=', ':']) {
                 Some((n, v)) => (n, Some(v)),
@@ -957,6 +958,15 @@ impl Vim {
                 Some(rest) if flag(&mut self.options, rest).is_some() => (true, rest),
                 _ => (false, name),
             };
+            // The buffer's language is the app's: it switches it, or says it.
+            if matches!(base, "filetype" | "ft") {
+                app = Some(AppCommand {
+                    name: "setfiletype".into(),
+                    args: value.unwrap_or_default().to_owned(),
+                    bang: false,
+                });
+                continue;
+            }
             if matches!(base, "operatorfunc" | "opfunc") {
                 match value {
                     Some(name) => {
@@ -1002,11 +1012,13 @@ impl Vim {
                 *slot = !negated;
             }
         }
-        Ok(if messages.is_empty() {
+        let mut outcome = if messages.is_empty() {
             ExOutcome::default()
         } else {
             ExOutcome::message(messages.join("  "))
-        })
+        };
+        outcome.app = app;
+        Ok(outcome)
     }
 
     fn describe_options(&self) -> String {
@@ -1356,6 +1368,21 @@ pub(crate) mod tests {
         vim.execute("noh", &mut buf).expect("ok");
         assert_eq!(vim.search_highlight(), None);
 
+        let ft = vim
+            .execute("set ft=rust", &mut buf)
+            .expect("ok")
+            .app
+            .expect("for the app");
+        assert_eq!(
+            (ft.name.as_str(), ft.args.as_str()),
+            ("setfiletype", "rust")
+        );
+        let ft = vim
+            .execute("set filetype", &mut buf)
+            .expect("ok")
+            .app
+            .expect("for the app");
+        assert_eq!(ft.args, "", "with no value: the app says which it is");
         vim.execute("set sw=4 noic", &mut buf).expect("ok");
         assert_eq!(
             (vim.options().shiftwidth, vim.options().ignorecase),

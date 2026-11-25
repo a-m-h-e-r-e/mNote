@@ -155,7 +155,13 @@ impl Editor {
             })
             .flatten()
             .collect();
-        let notes: Vec<NotePath> = index.notes().iter().map(|n| n.path.clone()).collect();
+        // Only notes have links to rewrite; code files are left alone.
+        let notes: Vec<NotePath> = index
+            .notes()
+            .iter()
+            .filter(|n| n.note)
+            .map(|n| n.path.clone())
+            .collect();
         drop(index);
         let vault = vault.clone();
         let task = cx
@@ -237,6 +243,7 @@ impl Editor {
                 .borrow()
                 .notes()
                 .iter()
+                .filter(|n| n.note)
                 .map(|n| n.path.clone())
                 .collect();
             let job: Job = Box::new(move || {

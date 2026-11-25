@@ -27,6 +27,7 @@ pub(crate) struct Grammar {
 }
 
 /// A query text to try, and how its patterns rank.
+#[derive(PartialEq)]
 struct Candidate {
     text: String,
     later_wins: bool,
@@ -126,10 +127,28 @@ pub(crate) struct Entry {
     loaded: bool,
     /// The compiled query, on first use.
     grammar: OnceLock<Option<Grammar>>,
+    /// Set once its query started compiling.
+    started: std::sync::atomic::AtomicBool,
 }
 
 impl Entry {
+    /// Whether `other` would compile to the same thing.
+    fn same_as(&self, other: &Entry) -> bool {
+        self.def.name == other.def.name
+            && self.def.aliases == other.def.aliases
+            && self.def.language == other.def.language
+            && self.def.highlights == other.def.highlights
+            && self.pack == other.pack
+            && self.fallback == other.fallback
+            && self.fallback_injections == other.fallback_injections
+            && self.fallback_later_wins == other.fallback_later_wins
+            && self.loaded == other.loaded
+            && self.candidates() == other.candidates()
+    }
+
     pub(crate) fn grammar(&self) -> Option<&Grammar> {
+        self.started
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self.grammar
             .get_or_init(|| load(&self.def.name, &self.def.language, self.candidates()))
             .as_ref()
@@ -348,6 +367,7 @@ fn entries() -> Vec<Arc<Entry>> {
                 fallback_later_wins,
                 loaded,
                 grammar: OnceLock::new(),
+                started: Default::default(),
             }))
         })
         .collect();
@@ -362,16 +382,35 @@ fn entries() -> Vec<Arc<Entry>> {
                 fallback_later_wins: true,
                 loaded: false,
                 grammar: OnceLock::new(),
+                started: Default::default(),
             }));
         }
     }
     out
 }
 
-/// Rebuilds the registry after the language packs were reloaded.
+/// Rebuilds the registry after the language packs were reloaded. A
+/// language whose grammar and queries didn't change keeps its compiled (or
+/// compiling) query: packs load at start, often just after a file asked
+/// for colours.
 pub(crate) fn rebuild() {
+    let mut fresh = entries();
+    let old: Vec<Arc<Entry>> = registry()
+        .read()
+        .map(|e| {
+            e.iter()
+                .filter(|e| e.started.load(std::sync::atomic::Ordering::Relaxed))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    for entry in &mut fresh {
+        if let Some(same) = old.iter().find(|o| o.same_as(entry)) {
+            *entry = same.clone();
+        }
+    }
     if let Ok(mut entries_now) = registry().write() {
-        *entries_now = entries();
+        *entries_now = fresh;
     }
 }
 
@@ -407,7 +446,20 @@ pub(crate) fn injections(name: &str) -> Option<(Language, String)> {
     (!text.trim().is_empty()).then(|| (entry.def.language.clone(), text))
 }
 
-/// Whether `lang` gets colours.
+/// Whether `lang` has a grammar (it can be parsed), without compiling its
+/// highlight query.
+pub fn has_grammar(lang: &str) -> bool {
+    for_lang(lang).is_some()
+}
+
+/// Whether `lang`'s highlight query is compiled already, so colouring
+/// won't stop to compile it (compiling takes milliseconds: do it off the UI
+/// thread with [`supported`] first).
+pub fn ready(lang: &str) -> bool {
+    for_lang(lang).is_some_and(|e| e.grammar.get().is_some())
+}
+
+/// Whether `lang` gets colours (compiling its query on first use).
 pub fn supported(lang: &str) -> bool {
     for_lang(lang).is_some_and(|e| e.grammar().is_some())
 }
@@ -460,5 +512,19 @@ mod tests {
         }
         assert!(crate::highlight::highlight_text("cobol", "x").is_none());
         assert!(!supported("cobol"));
+    }
+
+    #[test]
+    fn a_rebuild_keeps_compiled_queries_that_didnt_change() {
+        // A language of its own: other tests reload the packs meanwhile.
+        register_language(LanguageDef {
+            name: "rebuild-test".into(),
+            aliases: Vec::new(),
+            language: tree_sitter_json::LANGUAGE.into(),
+            highlights: vec!["(string) @string".into()],
+        });
+        assert!(supported("rebuild-test"));
+        rebuild();
+        assert!(ready("rebuild-test"), "recompiled for nothing");
     }
 }

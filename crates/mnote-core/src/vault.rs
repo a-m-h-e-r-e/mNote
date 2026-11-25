@@ -82,6 +82,16 @@ impl Vault {
         NotePath::new(relative).ok()
     }
 
+    /// The vault-relative path for an absolute one, if it's a file of a
+    /// known type in this vault (a note, or a code file).
+    pub fn file_at(&self, absolute: &Path) -> Option<NotePath> {
+        let relative = absolute.strip_prefix(&self.root).ok()?;
+        if !crate::is_known_file(relative) {
+            return None;
+        }
+        NotePath::file(relative).ok()
+    }
+
     /// Every file of a known type in the vault (notes and the others
     /// registered with [`crate::filetype::register`]), sorted by path.
     /// Hidden files and folders are skipped, and symlinked folders aren't

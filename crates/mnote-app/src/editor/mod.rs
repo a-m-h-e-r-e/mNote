@@ -12,6 +12,7 @@
 
 mod actions;
 pub mod blocks;
+mod code_files;
 pub mod commands;
 mod edit_groups;
 pub mod events;
@@ -246,6 +247,12 @@ pub struct Editor {
     /// Fence languages whose grammar was looked for this session (loaded,
     /// asked about, or not found), and those waiting to be.
     grammars_seen: std::collections::HashSet<String>,
+    /// When the code file shown was opened, until its first colours, and
+    /// when its first frame of text was drawn.
+    code_opened: Option<std::time::Instant>,
+    code_opened_frame: Option<std::time::Instant>,
+    /// The code file's colours per line.
+    line_cache: code_files::LineCache,
     grammars_wanted: Vec<String>,
     /// Block renderers, tried in order (see `blocks`).
     blocks: Rc<Vec<(String, blocks::BlockRenderer)>>,
@@ -272,6 +279,7 @@ impl Editor {
         );
         editor.notice = notice;
         editor.attach_vault(vault, cx);
+        editor.code_file_opened(cx);
         editor
     }
 
@@ -289,6 +297,7 @@ impl Editor {
         doc.notice = notice;
         self.show_doc(doc);
         self.attach_vault(vault, cx);
+        self.code_file_opened(cx);
         cx.notify();
     }
 
@@ -377,6 +386,9 @@ impl Editor {
             language_sources: None,
             messages: std::collections::VecDeque::new(),
             grammars_seen: Default::default(),
+            code_opened: None,
+            code_opened_frame: None,
+            line_cache: Default::default(),
             grammars_wanted: Vec::new(),
             lines: ListState::new(buffer.text().len_lines(), ListAlignment::Top, px(400.)),
             buffer,
@@ -541,6 +553,7 @@ impl Editor {
             },
         };
         self.show_doc(next);
+        self.code_file_opened(cx);
     }
 
     /// `space ,`: mNote's own config.toml in the focused pane (made from the
@@ -626,6 +639,7 @@ impl Editor {
         std::mem::swap(&mut self.notice, &mut next.notice);
         std::mem::swap(&mut self.tree, &mut next.tree);
         std::mem::swap(&mut self.code_cache, &mut next.code_cache);
+        std::mem::swap(&mut self.line_cache, &mut next.line_cache);
         std::mem::swap(&mut self.table_cache, &mut next.table_cache);
         std::mem::swap(&mut self.image_paths, &mut next.image_paths);
         self.set_pane_note();
@@ -735,7 +749,11 @@ impl Editor {
             self.notice =
                 Some(format!("{} isn't installed; using IBM Plex", missing.join(" and ")).into());
         }
+        let relist = config.show_code_files != self.config.show_code_files;
         self.config = config;
+        if relist {
+            self.build_index(cx);
+        }
         self.emit(events::EditorEvent::ConfigApplied, cx);
     }
 
@@ -758,9 +776,10 @@ impl Editor {
         let Some(vault) = self.vault.clone() else {
             return;
         };
+        let files = self.config.show_code_files;
         let task = cx
             .background_executor()
-            .spawn(async move { NoteIndex::build(&vault) });
+            .spawn(async move { NoteIndex::build_with(&vault, files) });
         self._tasks.push(cx.spawn(async move |this, cx| {
             if let Ok(index) = task.await {
                 let _ = this.update(cx, |this, cx| {
@@ -830,7 +849,15 @@ impl Editor {
 fn open_buffer(vault: &Vault, note: &NotePath) -> (Buffer, Option<SharedString>) {
     match Buffer::open(vault, note) {
         Ok(buffer) => (buffer, None),
-        Err(_) if !vault.path_of(note).exists() => (Buffer::new(""), None),
+        // Not made yet: empty, in its language (a note is Markdown).
+        Err(_) if !vault.path_of(note).exists() => {
+            let language = mnote_core::filetype::for_path(note.as_path()).and_then(|f| f.language);
+            let buffer = match language {
+                Some(language) => Buffer::with_language("", &language),
+                None => Buffer::new_plain(""),
+            };
+            (buffer, None)
+        }
         Err(err) => (
             Buffer::new(""),
             Some(SharedString::from(format!("Couldn't open {note}: {err}"))),

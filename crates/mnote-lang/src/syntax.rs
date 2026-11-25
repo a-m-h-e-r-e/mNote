@@ -133,6 +133,9 @@ pub struct Syntax {
     /// Edits made after the in-flight snapshot, to replay on its result.
     edits_since_request: Vec<InputEdit>,
     revision: u64,
+    /// Counts parse results taken in, so a cache of what was drawn from the
+    /// trees can tell it's stale when the text didn't change.
+    generation: u64,
 }
 
 impl std::fmt::Debug for Syntax {
@@ -199,6 +202,7 @@ impl Syntax {
             in_flight: None,
             edits_since_request: Vec::new(),
             revision: 0,
+            generation: 0,
         })
     }
 
@@ -266,6 +270,13 @@ impl Syntax {
         &self.layers
     }
 
+    /// How many parse results have been taken in (after taking any that
+    /// are waiting).
+    pub fn generation(&mut self, rope: &Rope) -> u64 {
+        self.poll(rope);
+        self.generation
+    }
+
     /// Whether the trees' structure reflects the current text.
     pub fn is_current(&self) -> bool {
         self.parsed_revision == Some(self.revision)
@@ -330,6 +341,7 @@ impl Syntax {
         self.parsed_revision = Some(parsed.revision);
         self.in_flight = None;
         self.edits_since_request.clear();
+        self.generation += 1;
     }
 }
 

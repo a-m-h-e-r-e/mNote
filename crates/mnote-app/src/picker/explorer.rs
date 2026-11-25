@@ -365,6 +365,7 @@ impl Explorer {
             .borrow()
             .notes()
             .iter()
+            .filter(|n| n.note)
             .map(|n| n.path.clone())
             .collect();
         self.job = Some(Box::new(move || {

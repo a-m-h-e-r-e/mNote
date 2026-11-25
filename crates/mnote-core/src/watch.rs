@@ -62,7 +62,7 @@ impl Vault {
     /// Turns a changed path into an event, or `None` for files that aren't
     /// notes and for mNote's own writes.
     fn classify(&self, path: &Path) -> Option<VaultEvent> {
-        let note = self.note_at(path)?;
+        let note = self.note_at(path).or_else(|| self.file_at(path))?;
         match Stamp::of(path) {
             Some(stamp) => {
                 if self.own_writes().get(&note) == Some(&stamp) {

@@ -438,8 +438,15 @@ pub fn builtin() -> Vec<Command> {
             "edit",
             1,
             ArgKind::Note,
-            "Opens a note.",
-            act(|e, _, _| e.not_yet(":edit")),
+            "Opens a note or a file of the vault by its path (a note can leave out .md).",
+            act(|e, call, cx| e.edit_path(call.args.as_deref(), cx)),
+        ),
+        Command::ex_only(
+            "setfiletype",
+            4,
+            ArgKind::Any,
+            "Parses and colours the buffer as another language (setf rust); with no name, says which it is.",
+            act(|e, call, cx| e.set_filetype(call.args.as_deref(), cx)),
         ),
         Command::ex_only(
             "find",

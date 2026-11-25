@@ -91,9 +91,24 @@ impl Editor {
                         // re-colour now.
                         this.code_cache.clear();
                         this.buffer.reparse_syntax();
+                        // A code file of this language opened without a
+                        // grammar starts parsing now.
+                        let tx = this.syntax_ready.clone();
+                        if this.buffer.refresh_language() {
+                            let tx = tx.clone();
+                            this.buffer.on_syntax_ready(move || {
+                                let _ = tx.try_send(());
+                            });
+                        }
                         for doc in &mut this.parked {
                             doc.code_cache.clear();
                             doc.buffer.reparse_syntax();
+                            if doc.buffer.refresh_language() {
+                                let tx = tx.clone();
+                                doc.buffer.on_syntax_ready(move || {
+                                    let _ = tx.try_send(());
+                                });
+                            }
                         }
                     }
                     Err(err) => this.show_toast(

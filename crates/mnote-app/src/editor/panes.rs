@@ -64,6 +64,7 @@ pub(super) struct Doc {
     pub notice: Option<SharedString>,
     pub tree: Option<mnote_core::SyntaxTree>,
     pub code_cache: HashMap<usize, (u64, Rc<CodeLines>)>,
+    pub line_cache: super::code_files::LineCache,
     pub table_cache: HashMap<usize, (u64, TableLayout)>,
     pub image_paths: RefCell<HashMap<String, Option<std::path::PathBuf>>>,
 }
@@ -78,6 +79,7 @@ impl Doc {
             notice: None,
             tree: None,
             code_cache: HashMap::new(),
+            line_cache: Default::default(),
             table_cache: HashMap::new(),
             image_paths: RefCell::default(),
         }
@@ -286,6 +288,7 @@ impl Editor {
         std::mem::swap(&mut self.notice, &mut doc.notice);
         std::mem::swap(&mut self.tree, &mut doc.tree);
         std::mem::swap(&mut self.code_cache, &mut doc.code_cache);
+        std::mem::swap(&mut self.line_cache, &mut doc.line_cache);
         std::mem::swap(&mut self.table_cache, &mut doc.table_cache);
         std::mem::swap(&mut self.image_paths, &mut doc.image_paths);
     }
