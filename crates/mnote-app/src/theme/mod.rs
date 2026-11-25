@@ -7,6 +7,7 @@
 //! in a view; read it from [`Theme`] or the token modules.
 
 pub mod fonts;
+pub mod syntax;
 mod tokens;
 
 pub use tokens::{Family, Palette, ShadowLayer, TextStyle, family, radius, size, space, text};
@@ -155,7 +156,22 @@ impl Global for FixedAppearance {}
 pub struct Theme {
     pub appearance: Appearance,
     pub palette: &'static Palette,
+    /// Highlight capture names to colours (`[syntax]` in a theme file).
+    pub syntax: &'static syntax::SyntaxColors,
     modal_shadow: &'static [ShadowLayer],
+}
+
+/// The built-in themes' syntax colours, made once each.
+fn default_syntax(appearance: Appearance) -> &'static syntax::SyntaxColors {
+    static DARK: std::sync::OnceLock<syntax::SyntaxColors> = std::sync::OnceLock::new();
+    static LIGHT: std::sync::OnceLock<syntax::SyntaxColors> = std::sync::OnceLock::new();
+    let (cell, palette) = match appearance {
+        Appearance::Dark => (&DARK, &tokens::DARK),
+        Appearance::Light => (&LIGHT, &tokens::LIGHT),
+    };
+    cell.get_or_init(|| {
+        syntax::SyntaxColors::new(palette, &[]).unwrap_or_else(|_| syntax::SyntaxColors::empty())
+    })
 }
 
 impl Global for Theme {}
@@ -166,11 +182,13 @@ impl Theme {
             Appearance::Dark => Self {
                 appearance,
                 palette: &tokens::DARK,
+                syntax: default_syntax(Appearance::Dark),
                 modal_shadow: tokens::SHADOW_MODAL_DARK,
             },
             Appearance::Light => Self {
                 appearance,
                 palette: &tokens::LIGHT,
+                syntax: default_syntax(Appearance::Light),
                 modal_shadow: tokens::SHADOW_MODAL_LIGHT,
             },
         }
@@ -247,7 +265,14 @@ impl Theme {
             }
         }
         theme.palette = Box::leak(Box::new(palette));
+        let syntax = syntax::SyntaxColors::new(theme.palette, &file.syntax)?;
+        theme.syntax = Box::leak(Box::new(syntax));
         Ok(theme)
+    }
+
+    /// The colour highlight scope `scope` is drawn in; `None` draws plain.
+    pub fn syntax_color(&self, scope: mnote_core::lang::scopes::Scope) -> Option<u32> {
+        self.syntax.color(scope)
     }
 
     /// Reloads the theme in use if `path` is its file (it was just saved).
@@ -447,6 +472,39 @@ impl Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_files_colour_syntax_scopes() {
+        use mnote_core::lang::scopes::intern;
+        let file = mnote_core::config::ThemeFile::parse(
+            "base = \"dark\"\n[syntax]\n\"@keyword.return\" = \"danger\"\nfunction = \"#61afef\"\n",
+        )
+        .expect("parses");
+        let theme = Theme::from_file(&file).expect("valid");
+        assert_eq!(
+            theme.syntax_color(intern("keyword.return")),
+            Some(theme.palette.danger)
+        );
+        assert_eq!(
+            theme.syntax_color(intern("function.call")),
+            Some(0x61afefff)
+        );
+        assert_eq!(
+            theme.syntax_color(intern("keyword")),
+            Some(theme.palette.syn_keyword),
+            "the built-in mapping stays under it"
+        );
+        let bad = mnote_core::config::ThemeFile::parse("[syntax]\nfunction = \"nope\"\n")
+            .expect("parses");
+        assert!(Theme::from_file(&bad).is_err());
+        assert!(mnote_core::config::ThemeFile::parse("[syntax]\nfunction = 3\n").is_err());
+        // Built-in themes colour the standard captures.
+        let dark = Theme::new(Appearance::Dark);
+        assert_eq!(
+            dark.syntax_color(intern("string")),
+            Some(dark.palette.syn_code)
+        );
+    }
 
     #[test]
     fn theme_files_override_tokens_over_their_base() {

@@ -7,7 +7,7 @@
 //! callout labels).
 
 use gpui::{Font, FontWeight, Hsla, Pixels, SharedString, font, px};
-use mnote_core::code::CodeStyle;
+use mnote_core::lang::scopes::Scope;
 use mnote_core::styled::{Inline, LineKind, StyledLine, style_inline};
 
 use super::line::Styling;
@@ -177,20 +177,6 @@ pub fn inline_styling(shown: &StyledLine, p: &Palette) -> Vec<Styling> {
             st
         })
         .collect()
-}
-
-/// The colour of a code style.
-pub fn code_color(style: CodeStyle, p: &Palette) -> u32 {
-    match style {
-        CodeStyle::Keyword => p.syn_keyword,
-        CodeStyle::String => p.syn_code,
-        CodeStyle::Comment => p.ink_3,
-        CodeStyle::Function => p.syn_link,
-        CodeStyle::Type | CodeStyle::Number => p.syn_strong,
-        CodeStyle::Constant => p.syn_url,
-        CodeStyle::Property => p.ink,
-        CodeStyle::Punctuation => p.ink_2,
-    }
 }
 
 /// The colour of a callout kind.
@@ -422,13 +408,17 @@ pub fn source_look(kind: &LineKind, content: &str, plain: bool, p: &Palette) -> 
 }
 
 /// Code colours for one line of a block, from the block's highlights.
-pub fn code_styling(spans: &[(std::ops::Range<usize>, CodeStyle)], p: &Palette) -> Vec<Styling> {
+/// Code's highlight spans as styling, in the theme's syntax colours; a
+/// scope the theme doesn't colour draws plain.
+pub fn code_styling(spans: &[(std::ops::Range<usize>, Scope)], theme: &Theme) -> Vec<Styling> {
     spans
         .iter()
-        .map(|(range, style)| Styling {
-            bytes: range.clone(),
-            color: Some(Theme::color(code_color(*style, p))),
-            ..Styling::default()
+        .filter_map(|(range, scope)| {
+            Some(Styling {
+                bytes: range.clone(),
+                color: Some(Theme::color(theme.syntax_color(*scope)?)),
+                ..Styling::default()
+            })
         })
         .collect()
 }

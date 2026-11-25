@@ -40,10 +40,10 @@ use gpui::{
     ListAlignment, ListState, ParentElement, Render, SharedString, Styled, Subscription, Task,
     Window, div, font, list, prelude::*, px,
 };
-use mnote_core::code::CodeStyle;
 use mnote_core::config::Config;
 use mnote_core::files::FileOp;
 use mnote_core::folder_edit::{Change, FolderEntry};
+use mnote_core::lang::scopes::Scope;
 use mnote_core::links::{LinkMove, count_relinks, relink_vault};
 use mnote_core::styled::{LineKind, StyledLine, line_kind};
 use mnote_core::{Autosave, Buffer, NoteIndex, NotePath, Reload, Vault, VaultEvent, VaultWatcher};
@@ -70,7 +70,7 @@ type TableLayout = Rc<(Vec<usize>, Vec<mnote_core::styled::Align>)>;
 
 /// Each measured key's (total, frame wait) in milliseconds.
 /// A code block's colours, line by line: byte ranges and their style.
-type CodeLines = Vec<Vec<(std::ops::Range<usize>, CodeStyle)>>;
+type CodeLines = Vec<Vec<(std::ops::Range<usize>, Scope)>>;
 
 /// Width left for the macOS traffic-light buttons in the top bar.
 const TRAFFIC_LIGHT_INSET: f32 = 76.;

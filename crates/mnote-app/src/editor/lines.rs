@@ -84,7 +84,7 @@ impl Editor {
             && !plain_view
             && let Some(spans) = self.code_spans(lang, block.clone(), ix, cx)
         {
-            look.styling = styled::code_styling(&spans, p);
+            look.styling = styled::code_styling(&spans, cx.theme());
         }
 
         // Source positions (bytes of `content`) to positions in the shown
@@ -795,7 +795,7 @@ impl Editor {
         block: std::ops::Range<usize>,
         ix: usize,
         cx: &mut Context<Self>,
-    ) -> Option<Vec<(std::ops::Range<usize>, CodeStyle)>> {
+    ) -> Option<Vec<(std::ops::Range<usize>, Scope)>> {
         if !mnote_core::code::supported(lang) {
             // A grammar may be loadable (Neovim's, say): asked after the frame.
             self.want_grammar(lang, cx);
@@ -832,8 +832,17 @@ impl Editor {
                     .map(|layer| layer.tree.clone())?;
                 let current = self.buffer.syntax_is_current();
                 let rope = self.buffer.text();
-                let spans = mnote_core::code::highlight_tree(lang, &tree, rope, from..to.max(from))
-                    .unwrap_or_default();
+                let spans: Vec<(std::ops::Range<usize>, Scope)> =
+                    mnote_core::lang::highlight::highlight_tree(
+                        lang,
+                        &tree,
+                        rope,
+                        from..to.max(from),
+                    )
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|s| (s.range, s.scope))
+                    .collect();
                 // Split the block's spans into lines, as bytes of each line.
                 let mut per_line = Vec::with_capacity(block.len());
                 for row in block.clone() {

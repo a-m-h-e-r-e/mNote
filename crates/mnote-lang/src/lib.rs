@@ -11,9 +11,12 @@ pub mod coords;
 pub mod error;
 pub mod filetype;
 pub mod grammar;
+pub mod highlight;
 pub mod languages;
 pub mod pack;
+pub mod predicates;
 pub mod queries;
+pub mod scopes;
 pub mod syntax;
 
 pub use error::LangError;

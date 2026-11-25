@@ -35,6 +35,18 @@ pub struct ThemeFile {
     pub dark: bool,
     /// Token names and colours (`0xRRGGBBAA`).
     pub colors: Vec<(String, u32)>,
+    /// `[syntax]`: highlight capture names (`keyword.function`, without the
+    /// `@`) and what they're drawn in: a colour token's name or a colour.
+    pub syntax: Vec<(String, SyntaxColor)>,
+}
+
+/// What a highlight capture is drawn in, in a theme file's `[syntax]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyntaxColor {
+    /// A colour token (`syn_keyword`, `ink_3`).
+    Token(String),
+    /// A colour of its own (`0xRRGGBBAA`).
+    Color(u32),
 }
 
 impl ThemeFile {
@@ -47,6 +59,7 @@ impl ThemeFile {
         let mut theme = ThemeFile {
             dark: true,
             colors: Vec::new(),
+            syntax: Vec::new(),
         };
         for (key, value) in &table {
             let line = find_key_line(text, key);
@@ -73,6 +86,30 @@ impl ThemeFile {
                             }
                         })?;
                         theme.colors.push((name.clone(), value));
+                    }
+                }
+                "syntax" => {
+                    let table = value
+                        .as_table()
+                        .ok_or_else(|| wrong("syntax should be a [syntax] table".into()))?;
+                    for (capture, color) in table {
+                        let bad = || ConfigError {
+                            line: find_key_line(text, capture),
+                            message: format!(
+                                "{capture} should be a colour token like \"syn_keyword\" or a colour like \"#c678dd\""
+                            ),
+                        };
+                        let text_value = color.as_str().ok_or_else(bad)?;
+                        let value = if text_value.starts_with('#') {
+                            SyntaxColor::Color(parse_color(text_value).ok_or_else(bad)?)
+                        } else if !text_value.is_empty() {
+                            SyntaxColor::Token(text_value.to_owned())
+                        } else {
+                            return Err(bad());
+                        };
+                        theme
+                            .syntax
+                            .push((capture.trim_start_matches('@').to_owned(), value));
                     }
                 }
                 other => return Err(wrong(format!("there's no theme setting called {other}"))),

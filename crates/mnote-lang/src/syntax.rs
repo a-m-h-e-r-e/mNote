@@ -358,8 +358,9 @@ struct Worker {
     root_name: Option<String>,
     /// A parser per injected language.
     parsers: HashMap<String, Parser>,
-    /// Compiled `injections` queries by language (`None`: it has none).
-    queries: HashMap<String, Option<Query>>,
+    /// Compiled `injections` queries by language, with their predicate
+    /// checks (`None`: it has none).
+    queries: HashMap<String, Option<(Query, crate::predicates::Checks)>>,
 }
 
 impl Worker {
@@ -409,7 +410,7 @@ impl Worker {
             return;
         }
         let found = match self.query(language) {
-            Some(query) => injections(query, tree, rope),
+            Some((query, checks)) => injections(query, Some(checks), tree, rope),
             None => return,
         };
         for (name, ranges) in found {
@@ -448,10 +449,14 @@ impl Worker {
     }
 
     /// `language`'s compiled `injections` query, compiled once.
-    fn query(&mut self, language: &str) -> Option<&Query> {
+    fn query(&mut self, language: &str) -> Option<&(Query, crate::predicates::Checks)> {
         if !self.queries.contains_key(language) {
             let compiled = crate::code::injections(language)
-                .and_then(|(grammar, text)| Query::new(&grammar, &text).ok());
+                .and_then(|(grammar, text)| Query::new(&grammar, &text).ok())
+                .map(|mut query| {
+                    let (checks, _) = crate::predicates::Checks::new(&mut query);
+                    (query, checks)
+                });
             self.queries.insert(language.to_owned(), compiled);
         }
         self.queries.get(language).and_then(Option::as_ref)
@@ -461,7 +466,12 @@ impl Worker {
 /// What an `injections` query finds: each injection's language (a pack's
 /// name where one matches) and byte ranges, in document order. Combined
 /// injections (`injection.combined`) of one language become one.
-pub fn injections(query: &Query, tree: &Tree, rope: &Rope) -> Vec<(String, Vec<Range<usize>>)> {
+pub fn injections(
+    query: &Query,
+    checks: Option<&crate::predicates::Checks>,
+    tree: &Tree,
+    rope: &Rope,
+) -> Vec<(String, Vec<Range<usize>>)> {
     let names = query.capture_names();
     let content = names.iter().position(|n| *n == "injection.content");
     let language_capture = names.iter().position(|n| *n == "injection.language");
@@ -475,6 +485,9 @@ pub fn injections(query: &Query, tree: &Tree, rope: &Rope) -> Vec<(String, Vec<R
     let mut separate: Vec<(String, Vec<Range<usize>>)> = Vec::new();
     let mut combined: Vec<(String, Vec<Range<usize>>)> = Vec::new();
     while let Some(m) = matches.next() {
+        if checks.is_some_and(|c| !c.passes(m, rope)) {
+            continue;
+        }
         let props = query.property_settings(m.pattern_index);
         let mut language = props
             .iter()

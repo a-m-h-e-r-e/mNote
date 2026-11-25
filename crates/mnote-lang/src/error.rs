@@ -36,7 +36,7 @@ pub struct LangError {
 }
 
 impl LangError {
-    pub(crate) fn new(origin: Origin, language: Option<&str>, message: impl Into<String>) -> Self {
+    pub fn new(origin: Origin, language: Option<&str>, message: impl Into<String>) -> Self {
         LangError {
             origin,
             language: language.map(str::to_owned),

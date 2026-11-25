@@ -73,7 +73,7 @@ fn combined_injections_are_one_layer() {
     let mut parser = Parser::new();
     parser.set_language(&markdown_language).expect("language");
     let tree = parser.parse(rope.to_string(), None).expect("parses");
-    let found = injections(&query, &tree, &rope);
+    let found = injections(&query, None, &tree, &rope);
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].0, "rust");
     assert_eq!(found[0].1.len(), 2, "both fences, in one layer");

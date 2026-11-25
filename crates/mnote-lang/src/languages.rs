@@ -113,6 +113,12 @@ fn report(new: impl IntoIterator<Item = LangError>) {
     }
 }
 
+/// Keeps one problem for [`take_problems`] (once, however often it's
+/// found).
+pub(crate) fn report_one(problem: LangError) {
+    report([problem]);
+}
+
 /// The problems found since the last call, once each.
 pub fn take_problems() -> Vec<LangError> {
     problems()
