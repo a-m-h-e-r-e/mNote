@@ -7,5 +7,6 @@
 //! into is `docs/architecture/code-support.md` (ADR-0001).
 
 pub mod code;
+pub mod coords;
 pub mod filetype;
 pub mod syntax;

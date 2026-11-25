@@ -138,6 +138,12 @@ const SCOPED: &[(&str, &str)] = &[
 ];
 
 impl LuaHost {
+    /// The origin its edits are recorded with: `plugin:<name>`, or
+    /// `plugin:init.lua` for the user's own script.
+    fn origin(&self) -> mnote_core::text::Origin {
+        mnote_core::text::Origin::Plugin(self.source.as_str().into())
+    }
+
     /// Runs `path` (`init.lua`) with the `mnote` API.
     pub fn load(path: &Path, config: &Config) -> Result<LuaHost, String> {
         let source = path
@@ -895,7 +901,10 @@ impl Editor {
         let started = Instant::now();
         let revision = self.buffer.revision();
         self.buffer.begin_change(self.vim.cursor());
+        // Edits the script makes are recorded as its own.
+        let user = self.vim.set_origin(host.origin());
         let result = host.call_with(self, cx, ix, args);
+        self.vim.set_origin(user);
         let cursor = clamp_normal(self.buffer.text(), self.vim.cursor());
         self.vim.set_cursor(cursor);
         self.buffer.end_change(cursor);
@@ -980,13 +989,19 @@ impl Editor {
                     on_exit,
                 } => self.start_job(host, cmd, on_stdout, on_exit, cx),
                 Request::Open { note, line } => self.open_from_plugin(note, line, cx),
+                // Keys and Ex lines run as typed, but their edits are the
+                // plugin's.
                 Request::Keys(keys) => {
+                    let user = self.vim.set_origin(host.origin());
                     for key in keys {
                         self.press(key, cx);
                     }
+                    self.vim.set_origin(user);
                 }
                 Request::Ex(line) => {
+                    let user = self.vim.set_origin(host.origin());
                     self.picker_action(crate::picker::PickerAction::RunEx(line), cx);
+                    self.vim.set_origin(user);
                 }
             }
         }
@@ -1186,7 +1201,12 @@ fn event_table(lua: &Lua, event: &EditorEvent, note: Option<&str>) -> mlua::Resu
             t.set("from", from.label())?;
             t.set("to", to.label())?;
         }
-        EditorEvent::TextChanged { revision, .. } => t.set("revision", *revision)?,
+        EditorEvent::TextChanged {
+            revision, origin, ..
+        } => {
+            t.set("revision", *revision)?;
+            t.set("origin", origin.to_string())?;
+        }
         EditorEvent::NoteSaved { note } | EditorEvent::NoteSavePre { note } => {
             t.set("note", note.to_string())?;
         }
@@ -1409,7 +1429,10 @@ pub const EVENTS: &[(&str, &str)] = &[
         "a note is about to be written; runs before it, may edit; `note`",
     ),
     ("NoteSaved", "a note was written; `note`"),
-    ("TextChanged", "the note's text changed; `note`, `revision`"),
+    (
+        "TextChanged",
+        "the note's text changed; `note`, `revision`, `origin` (who made the latest change: `user`, `plugin:<name>`, `lsp:<server>`, `agent:<session>`, `prediction`, `external`)",
+    ),
     ("ModeChanged", "Vim's mode changed; `from`, `to`"),
     ("InsertLeave", "INSERT or REPLACE ended"),
     ("CursorMoved", "the cursor moved; `line`, `column`"),

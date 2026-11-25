@@ -6,6 +6,7 @@
 //! offsets, as Vim motions need; byte offsets are an internal detail.
 
 mod autosave;
+mod changes;
 mod history;
 mod marks;
 
@@ -13,13 +14,16 @@ use std::fmt;
 use std::ops::Range;
 
 pub use autosave::Autosave;
-pub use history::Change;
-use history::{History, Step};
+use changes::ChangeLog;
+pub use changes::{Bias, Change, ConsumerId, GroupId, Origin};
+use history::{History, Replace, Step};
 pub use marks::{Mark, MarkKind, Marks};
+use mnote_lang::coords::{ByteOffset, CharOffset, RopeCoords};
+use mnote_lang::syntax::Syntax;
 pub use mnote_lang::syntax::drop_tree_later;
-use mnote_lang::syntax::{Syntax, point_at};
 use ropey::Rope;
-use tree_sitter::{InputEdit, Tree};
+use std::sync::Arc;
+use tree_sitter::Tree;
 
 use crate::{NotePath, Vault, VaultError};
 
@@ -72,6 +76,21 @@ pub struct Buffer {
     changed: Option<ChangedLines>,
     /// Decorations, moved by every edit.
     marks: Marks,
+    /// Every edit, with who made it, for those following the text.
+    log: ChangeLog,
+    /// The undo step edits are going into now.
+    group: GroupId,
+    /// Its language's name (`markdown`), if it has one.
+    language: Option<Arc<str>>,
+}
+
+/// A buffer's text at one revision: cheap to take (a rope clone is O(1)) and
+/// safe to read on another thread while the buffer moves on.
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    pub rope: Rope,
+    pub revision: u64,
+    pub language: Option<Arc<str>>,
 }
 
 /// Which lines changed since a view last looked, as the number of unchanged
@@ -87,7 +106,7 @@ pub struct ChangedLines {
 impl Buffer {
     /// A buffer holding `text`, parsed as Markdown.
     pub fn new(text: &str) -> Self {
-        Self::with_syntax(text, Syntax::markdown())
+        Self::with_syntax(text, Syntax::markdown(), Some("markdown"))
     }
 
     /// A buffer holding `text`, parsed as `language` (a name or alias in
@@ -97,10 +116,11 @@ impl Buffer {
             return Self::new(text);
         }
         let syntax = crate::code::language(language).and_then(|l| Syntax::new(&l));
-        Self::with_syntax(text, syntax)
+        let name = syntax.is_some().then_some(language);
+        Self::with_syntax(text, syntax, name)
     }
 
-    fn with_syntax(text: &str, syntax: Option<Syntax>) -> Self {
+    fn with_syntax(text: &str, syntax: Option<Syntax>, language: Option<&str>) -> Self {
         Buffer {
             rope: Rope::from_str(text),
             history: History::new(),
@@ -110,6 +130,9 @@ impl Buffer {
             revision: 0,
             changed: None,
             marks: Marks::default(),
+            log: ChangeLog::new(0),
+            group: GroupId(0),
+            language: language.map(Arc::from),
         }
     }
 
@@ -129,8 +152,60 @@ impl Buffer {
         let language = crate::filetype::for_path(note.as_path()).and_then(|f| f.language);
         Ok(match language {
             Some(language) => Self::with_language(&text, &language),
-            None => Self::with_syntax(&text, None),
+            None => Self::with_syntax(&text, None, None),
         })
+    }
+
+    /// The text and its revision, for work on another thread.
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            rope: self.rope.clone(),
+            revision: self.revision,
+            language: self.language.clone(),
+        }
+    }
+
+    /// The language's name (`markdown`, `rust`), if the buffer has one.
+    pub fn language(&self) -> Option<&str> {
+        self.language.as_deref()
+    }
+
+    /// Starts following edits from now on (see [`Self::changes_since`]).
+    pub fn subscribe_changes(&mut self) -> ConsumerId {
+        self.log.subscribe()
+    }
+
+    /// Stops following edits.
+    pub fn unsubscribe_changes(&mut self, id: ConsumerId) {
+        self.log.unsubscribe(id);
+    }
+
+    /// `id` has seen the edits up to `revision`; they can be dropped once
+    /// every follower has.
+    pub fn ack_changes(&mut self, id: ConsumerId, revision: u64) {
+        self.log.ack(id, revision);
+    }
+
+    /// The edits after `revision`, oldest first; `None` if some were
+    /// dropped (a follower that fell that far behind starts again from the
+    /// text).
+    pub fn changes_since(&self, revision: u64) -> Option<impl Iterator<Item = &Change>> {
+        self.log.since(revision)
+    }
+
+    /// Moves a position found at `revision` onto the current text.
+    pub fn rebase(&self, at: CharOffset, revision: u64, bias: Bias) -> Option<CharOffset> {
+        self.log.rebase(at, revision, bias)
+    }
+
+    /// The user's own most recent edits, oldest first.
+    pub fn recent_user_edits(&self) -> impl Iterator<Item = &Change> {
+        self.log.recent_user_edits()
+    }
+
+    /// Who made the latest edit.
+    pub fn last_origin(&self) -> Option<&Origin> {
+        self.log.last_origin()
     }
 
     /// The text. Cheap to clone if a snapshot is needed.
@@ -163,6 +238,7 @@ impl Buffer {
     /// nest; the outermost [`end_change`](Self::end_change) commits.
     pub fn begin_change(&mut self, cursor: usize) {
         if self.depth == 0 {
+            self.group.0 += 1;
             self.pending = Some(Step {
                 cursor_before: cursor,
                 cursor_after: cursor,
@@ -201,11 +277,13 @@ impl Buffer {
     /// Replaces the characters in `range` with `text`. Outside
     /// [`begin_change`](Self::begin_change) / [`end_change`](Self::end_change),
     /// each edit is its own undo step and `cursor` is restored on undo.
+    /// `origin` says who made it (recorded in the change log).
     pub fn edit(
         &mut self,
         range: Range<usize>,
         text: &str,
         cursor: usize,
+        origin: Origin,
     ) -> Result<(), OutOfBounds> {
         let len = self.rope.len_chars();
         if range.start > range.end || range.end > len {
@@ -218,13 +296,16 @@ impl Buffer {
         if range.is_empty() && text.is_empty() {
             return Ok(());
         }
-        let forward = Change {
+        if self.pending.is_none() {
+            self.group.0 += 1;
+        }
+        let forward = Replace {
             start: range.start,
             end: range.end,
             text: text.to_owned(),
         };
-        let removed = self.apply(&forward);
-        let inverse = Change {
+        let removed = self.apply(&forward, &origin);
+        let inverse = Replace {
             start: range.start,
             end: range.start + text.chars().count(),
             text: removed,
@@ -255,8 +336,9 @@ impl Buffer {
     pub fn undo(&mut self) -> Option<usize> {
         self.close_change(0);
         let step = self.history.undo()?.clone();
+        self.group.0 += 1;
         for change in step.inverse.iter().rev() {
-            self.apply(change);
+            self.apply(change, &Origin::User);
         }
         Some(step.cursor_before)
     }
@@ -265,8 +347,9 @@ impl Buffer {
     pub fn redo(&mut self) -> Option<usize> {
         self.close_change(0);
         let step = self.history.redo()?.clone();
+        self.group.0 += 1;
         for change in &step.forward {
-            self.apply(change);
+            self.apply(change, &Origin::User);
         }
         Some(step.cursor_after)
     }
@@ -323,7 +406,12 @@ impl Buffer {
             .nth(disk_chars - suffix)
             .map_or(disk.len(), |(b, _)| b);
         // The range is computed from the buffer itself, so it always fits.
-        let _ = self.edit(prefix..len - suffix, &disk[start_byte..end_byte], prefix);
+        let _ = self.edit(
+            prefix..len - suffix,
+            &disk[start_byte..end_byte],
+            prefix,
+            Origin::External,
+        );
         self.mark_saved();
         Reload::Reloaded
     }
@@ -359,24 +447,39 @@ impl Buffer {
         }
     }
 
-    /// Applies one change to the rope and the syntax tree. Returns the text it
+    /// Applies one replacement to the rope, records it in the change log,
+    /// and passes it on to the marks and the syntax tree. Returns the text it
     /// replaced. The range must already be validated.
-    fn apply(&mut self, change: &Change) -> String {
+    fn apply(&mut self, change: &Replace, origin: &Origin) -> String {
         let rope = &mut self.rope;
-        let start_byte = rope.char_to_byte(change.start);
-        let old_end_byte = rope.char_to_byte(change.end);
-        let start_position = point_at(rope, start_byte);
-        let old_end_position = point_at(rope, old_end_byte);
+        let (start, end) = (CharOffset(change.start), CharOffset(change.end));
+        let start_point = rope.text_point(start);
+        let old_end_point = rope.text_point(end);
+        let old_bytes = rope.char_to_byte_offset(start)..rope.char_to_byte_offset(end);
 
         let removed = rope.slice(change.start..change.end).to_string();
         rope.remove(change.start..change.end);
         rope.insert(change.start, &change.text);
-        self.marks
-            .edited(change.start..change.end, change.text.chars().count());
+        let new_chars = change.text.chars().count();
+        self.marks.edited(change.start..change.end, new_chars);
 
-        let new_end_byte = start_byte + change.text.len();
-        let top = start_position.row;
-        let bottom = rope.len_lines() - 1 - rope.byte_to_line(new_end_byte);
+        self.revision += 1;
+        let record = Change {
+            range: start..end,
+            new_end: rope.text_point(CharOffset(change.start + new_chars)),
+            old_bytes,
+            new_text: Arc::from(change.text.as_str()),
+            new_chars,
+            start: start_point,
+            old_end: old_end_point,
+            revision: self.revision,
+            origin: origin.clone(),
+            group: self.group,
+        };
+
+        let new_end_byte = ByteOffset(record.old_bytes.start.0 + change.text.len());
+        let top = start_point.row;
+        let bottom = rope.len_lines() - 1 - rope.byte_to_line(new_end_byte.0);
         self.changed = Some(match self.changed {
             Some(c) => ChangedLines {
                 unchanged_top: c.unchanged_top.min(top),
@@ -387,17 +490,12 @@ impl Buffer {
                 unchanged_bottom: bottom,
             },
         });
+        // The syntax tree is edited from the recorded change, so it sees
+        // exactly what every other follower sees.
         if let Some(syntax) = &mut self.syntax {
-            syntax.edit(&InputEdit {
-                start_byte,
-                old_end_byte,
-                new_end_byte,
-                start_position,
-                old_end_position,
-                new_end_position: point_at(rope, new_end_byte),
-            });
+            syntax.edit(&record.input_edit());
         }
-        self.revision += 1;
+        self.log.push(record);
         removed
     }
 }
@@ -467,6 +565,118 @@ mod word_tests {
 mod tests {
     use super::*;
 
+    #[test]
+    fn every_edit_is_recorded_with_its_origin() {
+        let mut b = Buffer::new("héllo\n");
+        let id = b.subscribe_changes();
+        b.edit(1..2, "e🙂", 1, Origin::User).expect("edit");
+        b.edit(0..0, "# ", 0, Origin::Plugin("tasks".into()))
+            .expect("edit");
+        let changes: Vec<&Change> = b.changes_since(0).expect("kept").collect();
+        assert_eq!(changes.len(), 2);
+        let first = changes[0];
+        assert_eq!(first.range, CharOffset(1)..CharOffset(2));
+        // "é" is 2 bytes at byte 1; the new text is "e🙂", 5 bytes.
+        assert_eq!(first.old_bytes, ByteOffset(1)..ByteOffset(3));
+        assert_eq!((&*first.new_text, first.new_chars), ("e🙂", 2));
+        assert_eq!(
+            (first.old_end.column_bytes, first.old_end.column_utf16),
+            (3, 2)
+        );
+        assert_eq!(
+            (first.new_end.column_bytes, first.new_end.column_utf16),
+            (6, 4)
+        );
+        assert_eq!(first.input_edit().new_end_byte, 6);
+        assert_eq!(first.revision, 1);
+        assert_eq!(changes[1].origin, Origin::Plugin("tasks".into()));
+        assert_eq!(b.last_origin(), Some(&Origin::Plugin("tasks".into())));
+        b.ack_changes(id, 2);
+        assert_eq!(b.changes_since(2).map(Iterator::count), Some(0));
+        let user: Vec<_> = b.recent_user_edits().map(|c| &*c.new_text).collect();
+        assert_eq!(user, ["e🙂"]);
+    }
+
+    #[test]
+    fn reloads_are_external_and_undo_is_the_users() {
+        let mut b = Buffer::new("one\n");
+        b.mark_saved();
+        assert_eq!(b.reload("two\n"), Reload::Reloaded);
+        assert_eq!(b.last_origin(), Some(&Origin::External));
+        b.undo();
+        assert_eq!(b.last_origin(), Some(&Origin::User));
+        assert_eq!(b.to_string(), "one\n");
+    }
+
+    #[test]
+    fn edits_in_one_undo_step_share_a_group() {
+        let mut b = Buffer::new("");
+        let id = b.subscribe_changes();
+        b.begin_change(0);
+        b.edit(0..0, "a", 0, Origin::User).expect("edit");
+        b.edit(1..1, "b", 1, Origin::User).expect("edit");
+        b.end_change(2);
+        b.edit(2..2, "c", 2, Origin::User).expect("edit");
+        b.undo();
+        let groups: Vec<GroupId> = b.changes_since(0).expect("kept").map(|c| c.group).collect();
+        assert_eq!(groups.len(), 4);
+        assert_eq!(groups[0], groups[1], "one step");
+        assert_ne!(groups[1], groups[2], "its own step");
+        assert_ne!(groups[2], groups[3], "the undo is a step of its own");
+        b.unsubscribe_changes(id);
+    }
+
+    #[test]
+    fn a_snapshot_is_the_text_at_its_revision() {
+        let mut b = Buffer::with_language("fn main() {}\n", "rust");
+        let snap = b.snapshot();
+        b.edit(0..0, "// x\n", 0, Origin::User).expect("edit");
+        assert_eq!(snap.rope.to_string(), "fn main() {}\n");
+        assert_eq!((snap.revision, b.revision()), (0, 1));
+        assert_eq!(snap.language.as_deref(), Some("rust"));
+        assert_eq!(Buffer::new("").language(), Some("markdown"));
+        assert_eq!(Buffer::with_language("", "nope").language(), None);
+    }
+
+    #[test]
+    fn a_rebased_position_still_points_at_its_character() {
+        // Random edits that never touch the '#': the position found before
+        // them, rebased through the log, still finds it.
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n.max(1) as u64) as usize
+        };
+        let pieces = ["a", "é", "🙂", "\n", "日本", ""];
+        for _ in 0..200 {
+            let mut b = Buffer::new("abc\ndef#ghi\njkl");
+            let id = b.subscribe_changes();
+            let found = CharOffset(7);
+            for _ in 0..20 {
+                let text = b.to_string();
+                let mark = text.chars().position(|c| c == '#').expect("kept");
+                let len = text.chars().count();
+                // A range wholly before or wholly after the mark.
+                let (from, to) = if next(2) == 0 {
+                    let a = next(mark + 1);
+                    (a, a + next(mark - a + 1))
+                } else {
+                    let a = mark + 1 + next(len - mark);
+                    (a, a + next(len - a + 1))
+                };
+                let new = pieces[next(pieces.len())];
+                b.edit(from..to, new, from, Origin::User).expect("edit");
+            }
+            // Following a character: text inserted right at it goes before
+            // it, so the position moves past that text (`After`).
+            let now = b.rebase(found, 0, Bias::After).expect("kept");
+            assert_eq!(b.text().char(now.0), '#', "in {:?}", b.to_string());
+            b.unsubscribe_changes(id);
+        }
+    }
+
     fn fresh_sexp(text: &str) -> String {
         Buffer::new(text)
             .syntax_tree_now()
@@ -478,9 +688,9 @@ mod tests {
     #[test]
     fn edits_replace_by_character_offset() {
         let mut b = Buffer::new("héllo wörld");
-        b.edit(6..11, "there", 0).expect("in range");
+        b.edit(6..11, "there", 0, Origin::User).expect("in range");
         assert_eq!(b.to_string(), "héllo there");
-        b.edit(0..0, "🙂 ", 0).expect("in range");
+        b.edit(0..0, "🙂 ", 0, Origin::User).expect("in range");
         assert_eq!(b.to_string(), "🙂 héllo there");
         assert_eq!(b.len_chars(), 13);
     }
@@ -489,7 +699,7 @@ mod tests {
     fn out_of_range_edits_are_errors_not_panics() {
         let mut b = Buffer::new("abc");
         assert_eq!(
-            b.edit(2..9, "x", 0),
+            b.edit(2..9, "x", 0, Origin::User),
             Err(OutOfBounds {
                 start: 2,
                 end: 9,
@@ -497,7 +707,7 @@ mod tests {
             })
         );
         let reversed = Range { start: 2, end: 1 };
-        assert!(b.edit(reversed, "x", 0).is_err());
+        assert!(b.edit(reversed, "x", 0, Origin::User).is_err());
         assert_eq!(b.to_string(), "abc");
         assert!(!b.is_dirty());
     }
@@ -505,8 +715,8 @@ mod tests {
     #[test]
     fn undo_and_redo_restore_text_and_cursor() {
         let mut b = Buffer::new("one");
-        b.edit(3..3, " two", 3).expect("edit");
-        b.edit(0..3, "ONE", 0).expect("edit");
+        b.edit(3..3, " two", 3, Origin::User).expect("edit");
+        b.edit(0..3, "ONE", 0, Origin::User).expect("edit");
         assert_eq!(b.undo(), Some(0));
         assert_eq!(b.to_string(), "one two");
         assert_eq!(b.undo(), Some(3));
@@ -521,7 +731,8 @@ mod tests {
         let mut b = Buffer::new("note");
         b.begin_change(4);
         for (i, c) in " text".chars().enumerate() {
-            b.edit(4 + i..4 + i, &c.to_string(), 4 + i).expect("edit");
+            b.edit(4 + i..4 + i, &c.to_string(), 4 + i, Origin::User)
+                .expect("edit");
         }
         b.end_change(9);
         assert_eq!(b.to_string(), "note text");
@@ -535,9 +746,9 @@ mod tests {
     #[test]
     fn editing_after_undo_starts_a_branch_and_keeps_the_old_one() {
         let mut b = Buffer::new("a");
-        b.edit(1..1, "b", 1).expect("edit");
+        b.edit(1..1, "b", 1, Origin::User).expect("edit");
         b.undo();
-        b.edit(1..1, "c", 1).expect("edit");
+        b.edit(1..1, "c", 1, Origin::User).expect("edit");
         assert_eq!(b.to_string(), "ac");
         assert_eq!(b.undo_steps(), 2, "the undone branch is kept in the tree");
         b.undo();
@@ -549,7 +760,7 @@ mod tests {
     fn dirty_tracks_the_saved_state_through_undo() {
         let mut b = Buffer::new("x");
         assert!(!b.is_dirty());
-        b.edit(1..1, "y", 1).expect("edit");
+        b.edit(1..1, "y", 1, Origin::User).expect("edit");
         assert!(b.is_dirty());
         b.undo();
         assert!(!b.is_dirty(), "undoing back to the saved text is clean");
@@ -557,7 +768,7 @@ mod tests {
         b.mark_saved();
         assert!(!b.is_dirty());
         b.begin_change(2);
-        b.edit(2..2, "z", 2).expect("edit");
+        b.edit(2..2, "z", 2, Origin::User).expect("edit");
         assert!(b.is_dirty(), "a change in progress is dirty");
         b.mark_saved();
         assert!(!b.is_dirty());
@@ -588,7 +799,7 @@ mod tests {
                 background: Some("match".into()),
             },
         );
-        b.edit(0..0, ">> ", 0).expect("edit");
+        b.edit(0..0, ">> ", 0, Origin::User).expect("edit");
         let range = |b: &Buffer| b.marks().touching(0..100).next().map(|m| m.range.clone());
         assert_eq!(range(&b), Some(7..10));
         b.undo();
@@ -602,8 +813,9 @@ mod tests {
         let mut b = Buffer::new("# Title\n\nSome text.\n");
         let before = b.syntax_tree_now().expect("tree").root_node().to_sexp();
         assert!(before.contains("atx_heading"));
-        b.edit(9..9, "- item\n- 🙂 two\n\n", 9).expect("edit");
-        b.edit(0..1, "##", 0).expect("edit");
+        b.edit(9..9, "- item\n- 🙂 two\n\n", 9, Origin::User)
+            .expect("edit");
+        b.edit(0..1, "##", 0, Origin::User).expect("edit");
         let after = b.syntax_tree_now().expect("tree").root_node().to_sexp();
         assert!(after.contains("list"));
         assert_eq!(after, fresh_sexp(&b.to_string()));
@@ -620,7 +832,7 @@ mod tests {
         let mut b = Buffer::new("# Title\n\nSome text.\n");
         let held = b.syntax_tree_now().expect("tree").clone();
         // The buffer's next tree replaces (and hands off) the one it had.
-        b.edit(0..0, "Intro\n\n", 0).expect("edit");
+        b.edit(0..0, "Intro\n\n", 0, Origin::User).expect("edit");
         let fresh = b.syntax_tree_now().expect("tree").clone();
         // A copy handed off while others still share its nodes.
         drop_tree_later(Some(held.clone()));
@@ -633,7 +845,8 @@ mod tests {
     fn the_non_blocking_tree_always_lines_up_with_the_text() {
         let mut b = Buffer::new("# Title\n\nSome text.\n");
         b.syntax_tree_now().expect("tree");
-        b.edit(0..0, "Intro line\n\n", 0).expect("edit");
+        b.edit(0..0, "Intro line\n\n", 0, Origin::User)
+            .expect("edit");
         // Without waiting, the structure may be old, but positions are shifted
         // so the heading is still found where it now is.
         let tree = b.syntax_tree().expect("tree");
@@ -664,7 +877,7 @@ mod tests {
         assert_eq!(b.to_string(), "# Note\n\nfirst line\nlast line\n");
 
         let mut dirty = Buffer::new("mine");
-        dirty.edit(4..4, "!", 4).expect("edit");
+        dirty.edit(4..4, "!", 4, Origin::User).expect("edit");
         assert_eq!(dirty.reload("theirs"), Reload::KeptLocalEdits);
         assert_eq!(dirty.to_string(), "mine!");
     }
@@ -673,17 +886,17 @@ mod tests {
     fn nested_changes_are_one_undo_step() {
         let mut b = Buffer::new("");
         b.begin_change(0);
-        b.edit(0..0, "a", 0).expect("edit");
+        b.edit(0..0, "a", 0, Origin::User).expect("edit");
         b.begin_change(1);
-        b.edit(1..1, "b", 1).expect("edit");
+        b.edit(1..1, "b", 1, Origin::User).expect("edit");
         b.end_change(2);
-        b.edit(2..2, "c", 2).expect("edit");
+        b.edit(2..2, "c", 2, Origin::User).expect("edit");
         b.end_change(3);
         assert_eq!(b.undo_steps(), 1);
         b.undo();
         assert_eq!(b.to_string(), "");
         b.end_change(0); // unbalanced extra end is harmless
-        b.edit(0..0, "x", 0).expect("edit");
+        b.edit(0..0, "x", 0, Origin::User).expect("edit");
         assert_eq!(
             b.undo_steps(),
             2,
@@ -695,11 +908,11 @@ mod tests {
     fn saving_mid_change_keeps_grouping_the_rest() {
         let mut b = Buffer::new("");
         b.begin_change(0);
-        b.edit(0..0, "ab", 0).expect("edit");
+        b.edit(0..0, "ab", 0, Origin::User).expect("edit");
         b.mark_saved();
         assert!(!b.is_dirty());
-        b.edit(2..2, "c", 2).expect("edit");
-        b.edit(3..3, "d", 3).expect("edit");
+        b.edit(2..2, "c", 2, Origin::User).expect("edit");
+        b.edit(3..3, "d", 3, Origin::User).expect("edit");
         assert!(b.is_dirty());
         b.end_change(4);
         assert_eq!(
@@ -716,8 +929,8 @@ mod tests {
     fn reports_the_lines_that_changed() {
         let mut b = Buffer::new("a\nb\nc\nd\ne\n");
         assert_eq!(b.take_changed_lines(), None);
-        b.edit(2..3, "B\nB2", 0).expect("edit"); // line 1 becomes two lines
-        b.edit(9..9, "!", 0).expect("edit"); // line 4: "d" becomes "!d"
+        b.edit(2..3, "B\nB2", 0, Origin::User).expect("edit"); // line 1 becomes two lines
+        b.edit(9..9, "!", 0, Origin::User).expect("edit"); // line 4: "d" becomes "!d"
         assert_eq!(
             b.take_changed_lines(),
             Some(ChangedLines {
@@ -743,7 +956,7 @@ mod tests {
         let vault = Vault::open(&dir.0).expect("open");
         let note = NotePath::new("inbox.md").expect("valid");
         let mut b = Buffer::new("");
-        b.edit(0..0, "# Inbox\n", 0).expect("edit");
+        b.edit(0..0, "# Inbox\n", 0, Origin::User).expect("edit");
         b.save(&vault, &note).expect("save");
         assert!(!b.is_dirty());
         assert_eq!(
@@ -780,7 +993,7 @@ mod budget {
         let middle = b.len_chars() / 2;
         for i in 0..200 {
             let t = Instant::now();
-            b.edit(middle + i..middle + i, "x", middle + i)
+            b.edit(middle + i..middle + i, "x", middle + i, Origin::User)
                 .expect("edit");
             let _ = b.syntax_tree();
             worst = worst.max(t.elapsed());

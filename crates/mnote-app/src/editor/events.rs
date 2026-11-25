@@ -16,6 +16,7 @@ use std::rc::Rc;
 
 use gpui::Context;
 use mnote_core::NotePath;
+use mnote_core::text::Origin;
 use mnote_vim::Mode;
 
 use super::Editor;
@@ -32,8 +33,13 @@ pub enum EditorEvent {
     NoteSavePre { note: NotePath },
     /// `note` was written to disk.
     NoteSaved { note: NotePath },
-    /// The focused document's text changed; `revision` is its buffer's.
-    TextChanged { doc: DocKey, revision: u64 },
+    /// The focused document's text changed; `revision` is its buffer's, and
+    /// `origin` says who made the latest change (the user, a plugin…).
+    TextChanged {
+        doc: DocKey,
+        revision: u64,
+        origin: Origin,
+    },
     /// Vim's mode changed.
     ModeChanged { from: Mode, to: Mode },
     /// INSERT (or REPLACE) ended; also sent as [`EditorEvent::ModeChanged`].
@@ -90,6 +96,8 @@ pub struct Snapshot {
     pub mode: Mode,
     /// Line and column.
     pub cursor: (usize, usize),
+    /// Who made the latest edit.
+    pub origin: Origin,
 }
 
 /// The events between two snapshots (`None`: the first one).
@@ -111,6 +119,7 @@ pub fn diff(old: Option<&Snapshot>, new: &Snapshot) -> Vec<EditorEvent> {
         events.push(EditorEvent::TextChanged {
             doc: new.doc.clone(),
             revision: new.revision,
+            origin: new.origin.clone(),
         });
     }
     if new.mode != old.mode {
@@ -227,6 +236,7 @@ impl Editor {
             revision: self.buffer.revision(),
             mode: self.vim.mode(),
             cursor: (line, cursor - text.line_to_char(line)),
+            origin: self.buffer.last_origin().cloned().unwrap_or_default(),
         }
     }
 
@@ -288,6 +298,7 @@ mod tests {
             revision,
             mode,
             cursor,
+            origin: Origin::User,
         }
     }
 
@@ -310,7 +321,8 @@ mod tests {
             [
                 EditorEvent::TextChanged {
                     doc: b.doc.clone(),
-                    revision: 2
+                    revision: 2,
+                    origin: Origin::User,
                 },
                 EditorEvent::ModeChanged {
                     from: Mode::Normal,

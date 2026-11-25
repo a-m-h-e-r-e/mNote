@@ -157,6 +157,21 @@ mod motion_tests {
     use mnote_core::Buffer;
 
     #[test]
+    fn edits_record_the_origin_vim_was_given() {
+        use mnote_core::text::Origin;
+        let mut buf = Buffer::new("abc\n");
+        let mut vim = Vim::new();
+        vim.handle_key(Key::Char('x'), &mut buf);
+        assert_eq!(buf.last_origin(), Some(&Origin::User));
+        let user = vim.set_origin(Origin::Plugin("tasks".into()));
+        vim.edit_text(&mut buf, 0..0, "!");
+        assert_eq!(buf.last_origin(), Some(&Origin::Plugin("tasks".into())));
+        assert_eq!(vim.set_origin(user), Origin::Plugin("tasks".into()));
+        vim.handle_key(Key::Char('x'), &mut buf);
+        assert_eq!(buf.last_origin(), Some(&Origin::User));
+    }
+
+    #[test]
     fn h_and_l_stay_on_the_line() {
         check("ab|c\ndef", "l", "ab|c\ndef");
         check("abc\n|def", "h", "abc\n|def");

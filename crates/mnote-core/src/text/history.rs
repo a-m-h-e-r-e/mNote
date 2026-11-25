@@ -7,7 +7,7 @@
 /// One replacement, in character offsets on the text as it was when the
 /// replacement was applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Change {
+pub(crate) struct Replace {
     pub start: usize,
     pub end: usize,
     pub text: String,
@@ -16,8 +16,8 @@ pub struct Change {
 /// A group of replacements applied in order, and the ones that reverse them.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Step {
-    pub forward: Vec<Change>,
-    pub inverse: Vec<Change>,
+    pub forward: Vec<Replace>,
+    pub inverse: Vec<Replace>,
     pub cursor_before: usize,
     pub cursor_after: usize,
 }

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use mnote_core::Buffer;
+use mnote_core::text::Origin;
 use ropey::Rope;
 
 use crate::Mode;
@@ -290,6 +291,9 @@ pub struct Vim {
     pub(crate) paused: Option<crate::insert_keys::Paused>,
     pub(crate) macros: crate::macros::Macros,
     pub(crate) block: crate::block::BlockState,
+    /// Who the edits made now come from (the user, unless a plugin is
+    /// running), recorded in the buffer's change log.
+    origin: Origin,
     /// Keys of the command being typed, and of the last change, for `.`.
     keys: Vec<Key>,
     last_change: Option<LastChange>,
@@ -339,6 +343,7 @@ impl Default for Vim {
             paused: None,
             macros: crate::macros::Macros::default(),
             block: crate::block::BlockState::default(),
+            origin: Origin::User,
             keys: Vec::new(),
             last_change: None,
             visual_in_command: false,
@@ -419,6 +424,12 @@ impl Vim {
             }
             _ => None,
         }
+    }
+
+    /// Sets who the edits made from now on come from; returns who it was,
+    /// so a caller can put it back (a plugin's call, then the user again).
+    pub fn set_origin(&mut self, origin: Origin) -> Origin {
+        std::mem::replace(&mut self.origin, origin)
     }
 
     /// Moves the cursor, for example after a mouse click.
@@ -2221,7 +2232,10 @@ impl Vim {
         let added = text.chars().count();
         // A rope clone is O(1); anchors need the text as it was.
         let before = (!self.anchors.is_empty()).then(|| buf.text().clone());
-        if buf.edit(range.clone(), text, self.cursor).is_err() {
+        if buf
+            .edit(range.clone(), text, self.cursor, self.origin.clone())
+            .is_err()
+        {
             return;
         }
         for pos in self.marks.values_mut() {

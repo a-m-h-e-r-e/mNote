@@ -65,7 +65,7 @@ Each handler gets a table with `event` and `note`, and:
 - `NoteOpened`: the focused pane shows another note (and at start); `note`
 - `NoteSavePre`: a note is about to be written; runs before it, may edit; `note`
 - `NoteSaved`: a note was written; `note`
-- `TextChanged`: the note's text changed; `note`, `revision`
+- `TextChanged`: the note's text changed; `note`, `revision`, `origin` (who made the latest change: `user`, `plugin:<name>`, `lsp:<server>`, `agent:<session>`, `prediction`, `external`)
 - `ModeChanged`: Vim's mode changed; `from`, `to`
 - `InsertLeave`: INSERT or REPLACE ended
 - `CursorMoved`: the cursor moved; `line`, `column`
