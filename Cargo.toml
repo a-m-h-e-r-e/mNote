@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/mnote-core", "crates/mnote-vim", "crates/mnote-app"]
+members = ["crates/mnote-lang", "crates/mnote-core", "crates/mnote-vim", "crates/mnote-app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,6 +14,7 @@ publish = false
 # so they add no crates and no size.
 objc = "0.2.7"
 raw-window-handle = "0.6.2"
+mnote-lang = { path = "crates/mnote-lang" }
 mnote-core = { path = "crates/mnote-core" }
 mnote-vim = { path = "crates/mnote-vim" }
 # notify: the file watcher behind live reload of notes changed outside mNote (FSEvents on macOS).

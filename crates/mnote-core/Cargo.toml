@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+mnote-lang.workspace = true
 notify.workspace = true
 nucleo-matcher.workspace = true
 regex.workspace = true
@@ -14,12 +15,6 @@ ropey.workspace = true
 toml.workspace = true
 tree-sitter.workspace = true
 tree-sitter-md.workspace = true
-tree-sitter-rust.workspace = true
-tree-sitter-python.workspace = true
-tree-sitter-javascript.workspace = true
-tree-sitter-typescript.workspace = true
-tree-sitter-bash.workspace = true
-tree-sitter-json.workspace = true
 
 [lints]
 workspace = true

@@ -8,7 +8,6 @@
 mod autosave;
 mod history;
 mod marks;
-mod syntax;
 
 use std::fmt;
 use std::ops::Range;
@@ -17,9 +16,9 @@ pub use autosave::Autosave;
 pub use history::Change;
 use history::{History, Step};
 pub use marks::{Mark, MarkKind, Marks};
+pub use mnote_lang::syntax::drop_tree_later;
+use mnote_lang::syntax::{Syntax, point_at};
 use ropey::Rope;
-pub use syntax::drop_tree_later;
-use syntax::{Syntax, point_at};
 use tree_sitter::{InputEdit, Tree};
 
 use crate::{NotePath, Vault, VaultError};

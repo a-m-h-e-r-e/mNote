@@ -2854,11 +2854,21 @@ dependencies = [
 name = "mnote-core"
 version = "0.1.0"
 dependencies = [
+ "mnote-lang",
  "notify",
  "nucleo-matcher",
  "regex",
  "ropey",
  "toml 1.2.2+spec-1.1.0",
+ "tree-sitter",
+ "tree-sitter-md",
+]
+
+[[package]]
+name = "mnote-lang"
+version = "0.1.0"
+dependencies = [
+ "ropey",
  "tree-sitter",
  "tree-sitter-bash",
  "tree-sitter-javascript",

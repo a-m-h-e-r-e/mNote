@@ -37,7 +37,9 @@ struct Parsed {
     revision: u64,
 }
 
-pub(crate) struct Syntax {
+/// A document's syntax tree, kept current by a background parser: edits
+/// shift the tree at once, and a worker re-parses snapshots of the text.
+pub struct Syntax {
     requests: Sender<Request>,
     results: Receiver<Parsed>,
     waker: std::sync::Arc<std::sync::Mutex<Option<Waker>>>,
@@ -236,7 +238,7 @@ fn parse(parser: &mut Parser, rope: &Rope, old_tree: Option<&Tree>) -> Option<Tr
 }
 
 /// The tree-sitter position (row, byte column) of a byte offset in `rope`.
-pub(crate) fn point_at(rope: &Rope, byte: usize) -> Point {
+pub fn point_at(rope: &Rope, byte: usize) -> Point {
     let row = rope.byte_to_line(byte);
     Point {
         row,

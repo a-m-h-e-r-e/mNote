@@ -6,12 +6,10 @@
 
 pub mod blame;
 pub mod capture;
-pub mod code;
 pub mod config;
 pub mod content;
 mod error;
 pub mod files;
-pub mod filetype;
 pub mod folder_edit;
 pub mod frontmatter;
 pub mod index;
@@ -24,6 +22,10 @@ mod vault;
 mod watch;
 
 use std::path::Path;
+
+// The language layer moved to `mnote-lang`; these keep the old paths
+// (`mnote_core::code`, `mnote_core::filetype`) working.
+pub use mnote_lang::{code, filetype};
 
 pub use error::{Result, VaultError};
 pub use frontmatter::Frontmatter;
