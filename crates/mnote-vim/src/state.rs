@@ -96,10 +96,12 @@ enum Pending {
     },
     /// `r`, waiting for the character.
     Replace,
+    /// `z`, waiting for `t` `z` `b` (and `⏎` `.` `-`).
+    Z,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct OpPending {
+pub(crate) struct OpPending {
     op: Operator,
     count: Option<usize>,
 }
@@ -260,7 +262,7 @@ pub struct Vim {
     want_col: Option<usize>,
     count: Option<usize>,
     pending: Pending,
-    op: Option<OpPending>,
+    pub(crate) op: Option<OpPending>,
     pub(crate) register: Option<char>,
     last_find: Option<Find>,
     pub(crate) registers: Registers,
@@ -269,9 +271,9 @@ pub struct Vim {
     /// Line anchors `:g` and `:normal` walk; edits keep them on their lines,
     /// and a deleted line's anchor becomes `None`.
     pub(crate) anchors: crate::anchors::Anchors,
-    /// Lines in a page, for Page Up/Down and `⌃f` `⌃b` `⌃d` `⌃u` (the app
-    /// sets it from the window).
-    page: usize,
+    /// The lines on screen and the page size (the app sets them).
+    pub(crate) view: crate::view::View,
+    pub(crate) jumps: crate::view::Jumps,
     /// Where long lines wrap on screen, for `gj` / `gk` (the app supplies it).
     screen_rows: Option<Box<dyn ScreenRows>>,
     /// Plain `j` / `k` move by screen row (config.toml's `wrap_motion`).
@@ -317,7 +319,8 @@ impl Default for Vim {
             marks: HashMap::new(),
             options: crate::ex::Options::default(),
             anchors: crate::anchors::Anchors::default(),
-            page: 20,
+            view: crate::view::View::default(),
+            jumps: crate::view::Jumps::default(),
             screen_rows: None,
             wrap_motion: false,
             insert: None,
@@ -716,8 +719,8 @@ impl Vim {
             Key::Right => (self.cursor + 1).min(start + line_len(text, line)),
             Key::Up => to_line(line.saturating_sub(1)),
             Key::Down => to_line((line + 1).min(last)),
-            Key::PageUp => to_line(line.saturating_sub(self.page.max(1))),
-            Key::PageDown => to_line((line + self.page.max(1)).min(last)),
+            Key::PageUp => to_line(line.saturating_sub(self.page().max(1))),
+            Key::PageDown => to_line((line + self.page().max(1)).min(last)),
             Key::Home => start,
             Key::End => start + line_len(text, line),
             _ => self.cursor,
@@ -1169,12 +1172,6 @@ impl Vim {
         self.cursor
     }
 
-    /// Sets how many lines Page Up/Down and `⌃f` `⌃b` move (`⌃d` `⌃u` move
-    /// half).
-    pub fn set_page_lines(&mut self, lines: usize) {
-        self.page = lines.max(1);
-    }
-
     fn typed(&mut self, buf: &mut Buffer, s: &str) {
         self.insert_text(buf, s);
         if let Some(session) = &mut self.insert {
@@ -1281,6 +1278,13 @@ impl Vim {
                 }
             }
             (Pending::G, Key::Char('g')) => Motion::FirstLine,
+            (Pending::G, Key::Char(c @ ('e' | 'E'))) => Motion::WordEndBackward { big: c == 'E' },
+            (Pending::G, Key::Char('_')) => Motion::LastNonBlank,
+            // `g*` / `g#`: the word under the cursor, also inside longer words.
+            (Pending::G, Key::Char(c @ ('*' | '#'))) => {
+                self.pending = Pending::None;
+                return self.search_word(c == '*', false, buf);
+            }
             // `gJ` joins lines as they are, with no spaces added or removed.
             (Pending::G, Key::Char('J')) if self.op.is_none() => {
                 self.pending = Pending::None;
@@ -1332,6 +1336,14 @@ impl Vim {
             (Pending::G, Key::Char('&')) if self.op.is_none() && !self.mode.is_visual() => {
                 return self.repeat_substitute(true, buf);
             }
+            (Pending::Z, Key::Char(c @ ('t' | 'z' | 'b' | '.' | '-'))) if self.op.is_none() => {
+                self.pending = Pending::None;
+                return self.scroll_cursor(c, buf);
+            }
+            (Pending::Z, Key::Enter) if self.op.is_none() => {
+                self.pending = Pending::None;
+                return self.scroll_cursor('\n', buf);
+            }
             (Pending::Bracket { forward }, Key::Char(c))
                 if c == if forward { ']' } else { '[' } =>
             {
@@ -1361,6 +1373,18 @@ impl Vim {
         {
             return self.add_to_number(if c == 'a' { 1 } else { -1 }, buf);
         }
+        // `⌃o` / `⌃i` (Tab): back and forward through the jump list; `⌃e` /
+        // `⌃y`: scroll a line.
+        if self.op.is_none() {
+            match key {
+                Key::Ctrl('o') if self.mode == Mode::Normal => return self.jump_list(true, buf),
+                Key::Ctrl('i') | Key::Tab if self.mode == Mode::Normal => {
+                    return self.jump_list(false, buf);
+                }
+                Key::Ctrl(c @ ('e' | 'y')) => return self.scroll_lines(c == 'e', buf),
+                _ => {}
+            }
+        }
         // `⌥j` / `⌥k`: the line (or the selected lines) down or up.
         if let Key::Alt(c @ ('j' | 'k')) = key
             && self.op.is_none()
@@ -1381,7 +1405,7 @@ impl Vim {
                 if self.count.is_none() =>
             {
                 let half = matches!(key, Key::Ctrl('d' | 'u'));
-                let lines = if half { self.page / 2 } else { self.page };
+                let lines = if half { self.page() / 2 } else { self.page() };
                 self.count = Some(lines.max(1));
                 if matches!(key, Key::PageDown | Key::Ctrl('f' | 'd')) {
                     'j'
@@ -1436,6 +1460,11 @@ impl Vim {
         if let Some(motion) = motion_for(c) {
             return self.run_motion(motion, buf);
         }
+        match c {
+            'H' | 'M' | 'L' => return self.window_line(c, buf),
+            '*' | '#' => return self.search_word(c == '*', true, buf),
+            _ => {}
+        }
 
         let waits = match c {
             'g' => Some(Pending::G),
@@ -1462,6 +1491,7 @@ impl Vim {
             '"' if self.op.is_none() => Some(Pending::Register),
             'm' if self.op.is_none() && !self.mode.is_visual() => Some(Pending::SetMark),
             'r' if self.op.is_none() => Some(Pending::Replace),
+            'z' if self.op.is_none() => Some(Pending::Z),
             // Macros aren't recorded yet; `q:` opens the command-line window.
             'q' if self.op.is_none() && !self.mode.is_visual() => Some(Pending::Q),
             'i' | 'a' if self.op.is_some() || self.mode.is_visual() => {
@@ -1755,7 +1785,7 @@ impl Vim {
             return Effect::Handled;
         }
         if jump {
-            self.marks.insert('\'', self.cursor);
+            self.record_jump(text);
         }
         if target.keep_column {
             if self.want_col.is_none() {
@@ -2064,6 +2094,7 @@ impl Vim {
                 *pos = range.start;
             }
         }
+        self.jumps.edited(range.clone(), added);
         if let Some(before) = before {
             self.anchors.apply_edit(&before, range, added);
         }
@@ -2087,7 +2118,7 @@ impl Vim {
         self.last_change = Some(LastChange::Ex(line.to_owned()));
     }
 
-    fn cancel(&mut self) {
+    pub(crate) fn cancel(&mut self) {
         self.pending = Pending::None;
         self.op = None;
         self.count = None;
@@ -2096,7 +2127,7 @@ impl Vim {
         self.visual_in_command = false;
     }
 
-    fn take_count(&mut self) -> Option<usize> {
+    pub(crate) fn take_count(&mut self) -> Option<usize> {
         let op_count = self.op.and_then(|p| p.count);
         combine(op_count, self.count.take())
     }
@@ -2159,6 +2190,8 @@ fn motion_for(c: char) -> Option<Motion> {
         '%' => Motion::MatchingBracket,
         '}' => Motion::ParagraphForward,
         '{' => Motion::ParagraphBackward,
+        ')' => Motion::SentenceForward,
+        '(' => Motion::SentenceBackward,
         _ => return None,
     })
 }
@@ -2175,6 +2208,8 @@ fn is_jump(motion: Motion) -> bool {
             | Motion::MatchingBracket
             | Motion::ParagraphForward
             | Motion::ParagraphBackward
+            | Motion::SentenceForward
+            | Motion::SentenceBackward
             | Motion::NextHeading
             | Motion::PrevHeading
     )

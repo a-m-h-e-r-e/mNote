@@ -1,5 +1,5 @@
 //! Text objects: `iw aw iW aW ip ap i" a" i' a' i` a` i( a( ib i[ a[ i{ a{ iB
-//! i< a<`. Each returns a range and whether it covers whole lines.
+//! i< a< it at`. Each returns a range and whether it covers whole lines.
 
 use std::ops::Range;
 
@@ -29,8 +29,94 @@ pub fn select(text: &Rope, pos: usize, obj: char, around: bool, count: usize) ->
         '[' | ']' => brackets(text, pos, '[', ']', around, count).map(charwise),
         '{' | '}' | 'B' => brackets(text, pos, '{', '}', around, count).map(charwise),
         '<' | '>' => brackets(text, pos, '<', '>', around, count).map(charwise),
+        't' => tag(text, pos, around, count).map(charwise),
         _ => None,
     }
+}
+
+/// `it` / `at`: the text between (or including) the `count`th pair of
+/// matching HTML tags around `pos`. Self-closing tags, comments and
+/// declarations don't count.
+fn tag(text: &Rope, pos: usize, around: bool, count: usize) -> Option<Range<usize>> {
+    let pairs = tag_pairs(text);
+    let mut around_pos: Vec<&(Range<usize>, Range<usize>)> = pairs
+        .iter()
+        .filter(|(open, close)| open.start <= pos && pos < close.end)
+        .collect();
+    // Innermost first: the latest opening tag.
+    around_pos.sort_by_key(|(open, _)| std::cmp::Reverse(open.start));
+    let (open, close) = around_pos.get(count - 1)?;
+    Some(if around {
+        open.start..close.end
+    } else {
+        open.end..close.start
+    })
+}
+
+/// Every matched `<name …>` … `</name>` pair in the text, as the opening and
+/// closing tags' spans.
+fn tag_pairs(text: &Rope) -> Vec<(Range<usize>, Range<usize>)> {
+    let mut stack: Vec<(String, Range<usize>)> = Vec::new();
+    let mut pairs = Vec::new();
+    let len = text.len_chars();
+    let mut i = 0;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '<' {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        i += 1;
+        let closing = chars.peek() == Some(&'/');
+        if closing {
+            chars.next();
+            i += 1;
+        }
+        let mut name = String::new();
+        while let Some(&c) = chars.peek() {
+            if c.is_alphanumeric() || matches!(c, '-' | '_' | ':' | '.') {
+                name.push(c);
+                chars.next();
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        if name.is_empty() {
+            continue;
+        }
+        // The rest of the tag, up to `>` on the same line.
+        let mut last = '\0';
+        let mut end = None;
+        while let Some(&c) = chars.peek() {
+            if c == '<' || c == '\n' {
+                break;
+            }
+            chars.next();
+            i += 1;
+            if c == '>' {
+                end = Some(i);
+                break;
+            }
+            last = c;
+        }
+        let Some(end) = end.filter(|&e| e <= len) else {
+            continue;
+        };
+        if closing {
+            // Tags left open inside this pair are dropped.
+            if let Some(at) = stack.iter().rposition(|(n, _)| *n == name) {
+                stack.truncate(at + 1);
+                if let Some((_, open)) = stack.pop() {
+                    pairs.push((open, start..end));
+                }
+            }
+        } else if last != '/' {
+            stack.push((name, start..end));
+        }
+    }
+    pairs
 }
 
 fn class(c: char, big: bool) -> u8 {

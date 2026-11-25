@@ -20,6 +20,7 @@ mod registers;
 mod state;
 pub mod text;
 mod textobj;
+mod view;
 
 use std::fmt;
 
@@ -29,6 +30,7 @@ pub use motion::{Find, Motion, MotionKind, Target};
 pub use registers::{Clipboard, MemoryClipboard, Register};
 pub use state::{Effect, LastChange, MapRhs, Operator, ScreenRows, Vim};
 pub use textobj::Selection;
+pub use view::Scroll;
 
 /// The Vim mode an editor or text input is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -169,6 +171,42 @@ mod motion_tests {
         );
         check("a\nb\n|c\nd", "5k", "|a\nb\nc\nd");
         check("|a\nb\nc\n", "9j", "a\nb\n|c\n");
+    }
+
+    #[test]
+    fn ge_g_underscore_and_sentences() {
+        check("abc de|f\n", "ge", "ab|c def\n");
+        check("abc de|f\n", "2ge", "|abc def\n");
+        check("a.b c|d\n", "ge", "a.|b cd\n");
+        check("a.b c|d\n", "gE", "a.|b cd\n");
+        check("one\n\n|two\n", "ge", "one\n|\ntwo\n");
+        // Inclusive at both ends, as in Vim.
+        check("abc d|ef\n", "dge", "ab|f\n");
+        check("|  ab  \n", "g_", "  a|b  \n");
+        check("|ab  \ncd \n", "2g_", "ab  \nc|d \n");
+        check("|ab  \n", "dg_", "|  \n");
+        check("|a. B c\n", ")", "a. |B c\n");
+        check("a. B |c\n", "(", "a. |B c\n");
+        check("a. |B c\n", "(", "|a. B c\n");
+        check("|Hi! Yes? (Ok.) Next\n", "3)", "Hi! Yes? (Ok.) |Next\n");
+        check("|a\n\nb\n", ")", "a\n|\nb\n");
+        check("|a.b c\n", ")", "a.b |c\n");
+        check("|Done. Next one\n", "d)", "|Next one\n");
+    }
+
+    #[test]
+    fn tag_objects() {
+        check("<a>x|y</a>\n", "dit", "<a>|</a>\n");
+        check("<a>x|y</a>!\n", "dat", "|!\n");
+        check("<p>a <b>|c</b> d</p>\n", "dit", "<p>a <b>|</b> d</p>\n");
+        check("<p>a <b>|c</b> d</p>\n", "d2it", "<p>|</p>\n");
+        check("<p>a <br/> |c</p>\n", "dit", "<p>|</p>\n");
+        check(
+            "<div class=\"x\">\n  |hi\n</div>\n",
+            "dit",
+            "<div class=\"x\">|</div>\n",
+        );
+        check("<a>|x\n", "dit", "<a>|x\n");
     }
 
     #[test]

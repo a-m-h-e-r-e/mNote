@@ -29,12 +29,18 @@ pub enum Motion {
     WordEnd {
         big: bool,
     },
+    /// `ge` / `gE`: back to the end of the previous word.
+    WordEndBackward {
+        big: bool,
+    },
     /// `0`
     LineStart,
     /// `^`
     FirstNonBlank,
     /// `$`
     LineEnd,
+    /// `g_`: the last non-blank character of the line.
+    LastNonBlank,
     /// `gg`: first line, or line `count`.
     FirstLine,
     /// `G`: last line, or line `count`.
@@ -47,6 +53,10 @@ pub enum Motion {
     ParagraphForward,
     /// `{`
     ParagraphBackward,
+    /// `)`: the start of the next sentence.
+    SentenceForward,
+    /// `(`: the start of this sentence, or the one before.
+    SentenceBackward,
     /// `]]`: next Markdown heading.
     NextHeading,
     /// `[[`: previous Markdown heading.
@@ -99,7 +109,9 @@ impl Motion {
         use Motion::*;
         match self {
             Up | Down | FirstLine | LastLine => MotionKind::Linewise,
-            WordEnd { .. } | LineEnd | MatchingBracket => MotionKind::Inclusive,
+            WordEnd { .. } | WordEndBackward { .. } | LineEnd | LastNonBlank | MatchingBracket => {
+                MotionKind::Inclusive
+            }
             Find(f) if f.forward => MotionKind::Inclusive,
             _ => MotionKind::Exclusive,
         }
@@ -158,6 +170,7 @@ impl Motion {
             Motion::WordForward { big } => repeat(n, pos, |p| word_forward(text, p, big)),
             Motion::WordBackward { big } => repeat(n, pos, |p| word_backward(text, p, big)),
             Motion::WordEnd { big } => repeat(n, pos, |p| word_end(text, p, big)),
+            Motion::WordEndBackward { big } => repeat(n, pos, |p| word_end_backward(text, p, big)),
             Motion::LineStart => line_start(text, line),
             Motion::FirstNonBlank => first_non_blank(text, line),
             Motion::LineEnd => {
@@ -168,6 +181,15 @@ impl Motion {
                 } else {
                     end - 1
                 }
+            }
+            Motion::LastNonBlank => {
+                let to = (line + n - 1).min(last_line(text));
+                let start = line_start(text, to);
+                let mut end = line_end(text, to);
+                while end > start && text.char(end - 1).is_whitespace() {
+                    end -= 1;
+                }
+                end.saturating_sub(1).max(start)
             }
             Motion::FirstLine => first_non_blank(text, count.unwrap_or(1).max(1) - 1),
             Motion::LastLine => {
@@ -188,6 +210,8 @@ impl Motion {
             },
             Motion::ParagraphForward => repeat(n, pos, |p| paragraph_forward(text, p)),
             Motion::ParagraphBackward => repeat(n, pos, |p| paragraph_backward(text, p)),
+            Motion::SentenceForward => repeat(n, pos, |p| sentence_forward(text, p)),
+            Motion::SentenceBackward => repeat(n, pos, |p| sentence_backward(text, p)),
             Motion::NextHeading => {
                 // The nth heading after the cursor's line, or the last line.
                 let mut seen = 0;
@@ -319,6 +343,80 @@ fn word_backward(text: &Rope, pos: usize, big: bool) -> usize {
         i -= 1;
     }
     i
+}
+
+/// `ge`: the end of the word before the one at `pos` (an empty line counts
+/// as a word).
+fn word_end_backward(text: &Rope, pos: usize, big: bool) -> usize {
+    let cls = char_at(text, pos).map_or(0, |c| class(c, big));
+    let mut i = pos.min(text.len_chars());
+    if cls != 0 {
+        while i > 0 && class(text.char(i - 1), big) == cls {
+            i -= 1;
+        }
+    }
+    while i > 0 {
+        i -= 1;
+        if class(text.char(i), big) != 0 || is_empty_line_at(text, i) {
+            return i;
+        }
+    }
+    0
+}
+
+/// Whether a sentence starts at `i`: the first non-blank after a `.`, `!` or
+/// `?` (and any closing `)` `]` `"` `'`) followed by a blank, after an empty
+/// line, or at the start of the note. An empty line is a sentence of its own.
+fn sentence_start(text: &Rope, i: usize) -> bool {
+    let c = text.char(i);
+    if c == '\n' {
+        return is_empty_line_at(text, i);
+    }
+    if c.is_whitespace() {
+        return false;
+    }
+    let mut j = i;
+    let mut newlines = 0;
+    while j > 0 && text.char(j - 1).is_whitespace() {
+        if text.char(j - 1) == '\n' {
+            newlines += 1;
+        }
+        j -= 1;
+    }
+    if j == 0 || newlines >= 2 {
+        return true;
+    }
+    if j == i {
+        return false;
+    }
+    let mut k = j;
+    while k > 0 && matches!(text.char(k - 1), ')' | ']' | '"' | '\'') {
+        k -= 1;
+    }
+    k > 0 && matches!(text.char(k - 1), '.' | '!' | '?')
+}
+
+fn sentence_forward(text: &Rope, pos: usize) -> usize {
+    let len = text.len_chars();
+    let mut i = pos + 1;
+    while i < len {
+        if sentence_start(text, i) {
+            return i;
+        }
+        i += 1;
+    }
+    len.saturating_sub(1).max(pos.min(len))
+}
+
+fn sentence_backward(text: &Rope, pos: usize) -> usize {
+    let mut i = pos.min(text.len_chars());
+    while i > 0 {
+        i -= 1;
+        if sentence_start(text, i) {
+            return i;
+        }
+    }
+    0
 }
 
 /// The `n`th match of `find` on the cursor's line.

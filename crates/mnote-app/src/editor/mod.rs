@@ -611,6 +611,7 @@ impl Editor {
         self.wraps.borrow_mut().clear();
         self.scroll_x.set(px(0.));
         self.vim.set_cursor(0);
+        self.vim.clear_jumps();
         self.lines.reset(self.buffer.text().len_lines());
     }
 

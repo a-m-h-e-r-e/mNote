@@ -345,7 +345,7 @@ impl Vim {
         match cmd.name {
             "goto" => {
                 let (_, last) = self.lines(&cmd, buf.text(), DefaultRange::Current)?;
-                self.marks.insert('\'', self.cursor);
+                self.record_jump(buf.text());
                 self.cursor = first_non_blank(buf.text(), last);
                 Ok(ExOutcome::default())
             }

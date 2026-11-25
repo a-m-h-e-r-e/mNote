@@ -112,6 +112,8 @@ impl Editor {
         let revision_before = self.buffer.revision();
         self.reply = None;
 
+        let (top, bottom) = self.lines_on_screen();
+        self.vim.set_view(top, bottom);
         let effect = self.vim.handle_key(key, &mut self.buffer);
 
         if let Some(text) = self.clipboard.borrow_mut().write.take() {
@@ -129,8 +131,12 @@ impl Editor {
             .preview()
             .and_then(|p| p.current.as_ref())
             .map_or(self.vim.cursor(), |m| m.start);
-        self.lines
-            .scroll_to_reveal_item(line_of(self.buffer.text(), reveal));
+        match self.vim.take_scroll() {
+            Some(scroll) => self.scroll_lines_to(scroll),
+            None => self
+                .lines
+                .scroll_to_reveal_item(line_of(self.buffer.text(), reveal)),
+        }
         if self.buffer.revision() != revision_before {
             self.notice = None;
             self.schedule_autosave(cx);
@@ -458,5 +464,49 @@ impl Editor {
             self.press(key, cx);
         }
         true
+    }
+}
+
+impl Editor {
+    /// The first line on screen and the last one fully on screen, for `H`
+    /// `M` `L` and Vim's scrolling. Lines below the last one drawn count as
+    /// a page of lines.
+    fn lines_on_screen(&self) -> (usize, usize) {
+        let scroll = self.lines.logical_scroll_top();
+        let top = scroll.item_ix + usize::from(scroll.offset_in_item > px(0.));
+        let view = self.lines.viewport_bounds();
+        let count = self.lines.item_count();
+        let mut bottom = top;
+        // A page is a few dozen lines: this walks just those.
+        for ix in top..count {
+            match self.lines.bounds_for_item(ix) {
+                Some(b) if b.bottom() <= view.bottom() + px(0.5) => bottom = ix,
+                _ => break,
+            }
+        }
+        (top.min(count.saturating_sub(1)), bottom)
+    }
+
+    /// Scrolls the note as `zt`, `zz`, `zb`, `⌃e` or `⌃y` asked.
+    fn scroll_lines_to(&mut self, scroll: mnote_vim::Scroll) {
+        use mnote_vim::Scroll;
+        let line = match scroll {
+            Scroll::Top(l) | Scroll::Center(l) | Scroll::Bottom(l) => l,
+        };
+        self.lines.scroll_to(gpui::ListOffset {
+            item_ix: line,
+            offset_in_item: px(0.),
+        });
+        let room = self.lines.viewport_bounds().size.height;
+        let height = self
+            .lines
+            .bounds_for_item(line)
+            .map_or(px(0.), |b| b.size.height);
+        let up = match scroll {
+            Scroll::Top(_) => px(0.),
+            Scroll::Center(_) => (room - height) / 2.,
+            Scroll::Bottom(_) => room - height,
+        };
+        self.lines.scroll_by(-up.max(px(0.)));
     }
 }
