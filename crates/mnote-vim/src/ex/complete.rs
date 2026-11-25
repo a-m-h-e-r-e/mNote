@@ -146,6 +146,10 @@ fn option_candidates(word: &str, options: &Options) -> Vec<Candidate> {
             "shiftwidth",
             format!("indent step, now {}", options.shiftwidth),
         ),
+        (
+            "scrolloff",
+            format!("lines kept around the cursor, now {}", options.scrolloff),
+        ),
         ("ignorecase", on_off(options.ignorecase)),
         ("smartcase", on_off(options.smartcase)),
         ("relativenumber", on_off(options.relativenumber)),

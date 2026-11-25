@@ -270,6 +270,8 @@ pub struct Config {
     pub system_clipboard: bool,
     /// `j` / `k` move by screen row through wrapped lines, as `gj` / `gk`.
     pub wrap_motion: bool,
+    /// Lines kept on screen above and below the cursor (`:set scrolloff`).
+    pub scrolloff: u32,
     /// Long lines wrap (`:set wrap`); off, the note scrolls sideways.
     pub wrap: bool,
     /// Vim mappings (`"nnoremap j gj"`), run at start and on save; they
@@ -332,6 +334,7 @@ impl Default for Config {
             leader: ' ',
             system_clipboard: true,
             wrap_motion: false,
+            scrolloff: 0,
             wrap: true,
             mappings: None,
             keys: Vec::new(),
@@ -561,6 +564,13 @@ impl Config {
                 "wrap_motion" => {
                     config.wrap_motion = value.as_bool().ok_or_else(|| wrong("true or false"))?;
                 }
+                "scrolloff" => {
+                    config.scrolloff = value
+                        .as_integer()
+                        .and_then(|n| u32::try_from(n).ok())
+                        .filter(|n| *n <= 99)
+                        .ok_or_else(|| wrong("a whole number from 0 to 99"))?;
+                }
                 "git_blame" => {
                     config.git_blame = value.as_bool().ok_or_else(|| wrong("true or false"))?;
                 }
@@ -774,6 +784,16 @@ impl Config {
                     on_off(d.wrap_motion)
                 ),
                 on_off(self.wrap_motion).into(),
+            ),
+            Setting::new(
+                "scrolloff",
+                &format!(
+                    "Lines kept on screen above and below the cursor as it moves, as\n\
+                     Vim's scrolloff (:set so=N changes it until the next start).\n\
+                     Values: a whole number from 0 to 99. Default: {}",
+                    d.scrolloff
+                ),
+                self.scrolloff.to_string(),
             ),
             Setting::new(
                 "autosave",
@@ -1118,6 +1138,7 @@ mod tests {
             leader: ',',
             system_clipboard: false,
             wrap_motion: true,
+            scrolloff: 5,
             wrap: false,
             panel_radius: Some(0),
             panel_shadow: false,

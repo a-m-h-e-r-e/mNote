@@ -52,6 +52,11 @@ Settings for a plugin go in its table and reach it through `mnote.config("tasks"
 - `mnote.mode() -> mode`: Vim's mode: `NORMAL`, `INSERT`, `VISUAL`…
 - `mnote.decorate(namespace, opts) -> id`: Draws over the note, moving with edits: `{ line, col, end_col, fg, bg }` colours text; `{ line, line_bg }` a line; `{ line, text, color, right }` adds text after it; `{ line, sign, color }` a gutter sign. Colours are theme token names (`match`, `danger`, `ink_3`).
 - `mnote.undecorate(namespace)`: Removes every decoration in the namespace.
+- `mnote.open(path, { line })`: Opens a note of the vault (`journal/today`, `.md` optional), at `line` (0-based) if given, once the function returns. A note that doesn't exist is reported.
+- `mnote.feedkeys(keys)`: Runs keys in Vim notation (`ggdd`, `<C-w>v`, `<leader>f`) as if typed, through the keymap, mappings and Vim, once the function returns.
+- `mnote.cmd(line)`: Runs an Ex line (`set so=5`, `w`, `daily`; a leading `:` is fine) once the function returns.
+- `mnote.clipboard.get() -> text | nil`: The system clipboard's text.
+- `mnote.clipboard.set(text)`: Puts text on the system clipboard.
 
 ## Events
 
@@ -70,4 +75,4 @@ Each handler gets a table with `event` and `note`, and:
 
 ## Examples
 
-`examples/plugins/` holds `tasks` (signs, a count, a picker and a ```progress block) and `wordgoal` (a daily word goal from its settings). Copy a folder into `~/.config/mnote/plugins/` and turn it on.
+`examples/plugins/` holds `tasks` (signs, a count, a picker and a ```progress block), `wordgoal` (a daily word goal from its settings) and `pins` (harpoon-style pinned notes, with `mnote.open` and the clipboard). Copy a folder into `~/.config/mnote/plugins/` and turn it on.

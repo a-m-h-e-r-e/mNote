@@ -1,0 +1,4 @@
+name = "pins"
+version = "1.0.0"
+api = 1
+description = "A few pinned notes to jump between, like harpoon"

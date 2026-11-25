@@ -36,6 +36,7 @@ use std::time::{Duration, Instant};
 use gpui::prelude::FluentBuilder;
 use gpui::{Context, IntoElement, Styled};
 use mlua::{Function, Lua, RegistryKey, Table, Value};
+use mnote_core::NotePath;
 use mnote_core::config::Config;
 use mnote_vim::ex::ArgKind;
 use mnote_vim::text::{clamp_normal, line_count, line_of, line_start};
@@ -67,6 +68,12 @@ enum Request {
         on_stdout: Option<usize>,
         on_exit: Option<usize>,
     },
+    /// `mnote.open`: a note, and the line to put the cursor on.
+    Open { note: NotePath, line: Option<usize> },
+    /// `mnote.feedkeys`: keys to run as typed.
+    Keys(Vec<mnote_vim::Key>),
+    /// `mnote.cmd`: an Ex line.
+    Ex(String),
 }
 
 /// A row a block renderer returned: text, in a theme colour.
@@ -126,6 +133,8 @@ const SCOPED: &[(&str, &str)] = &[
     ("", "mode"),
     ("", "decorate"),
     ("", "undecorate"),
+    ("clipboard", "get"),
+    ("clipboard", "set"),
 ];
 
 impl LuaHost {
@@ -403,6 +412,52 @@ impl LuaHost {
         )?;
         mnote.set("job", job)?;
 
+        let state = self.state.clone();
+        mnote.set(
+            "open",
+            lua.create_function(move |_, (path, opts): (String, Option<Table>)| {
+                let line = opts
+                    .map(|o| o.get::<Option<usize>>("line"))
+                    .transpose()?
+                    .flatten();
+                let note = NotePath::new(&path)
+                    .or_else(|_| NotePath::new(format!("{path}.md")))
+                    .map_err(|_| {
+                        mlua::Error::runtime(format!("{path} isn't a note path in the vault"))
+                    })?;
+                state
+                    .borrow_mut()
+                    .requests
+                    .push(Request::Open { note, line });
+                Ok(())
+            })?,
+        )?;
+
+        let state = self.state.clone();
+        mnote.set(
+            "feedkeys",
+            lua.create_function(move |_, keys: String| {
+                let keys = mnote_vim::parse_keys(&keys);
+                state.borrow_mut().requests.push(Request::Keys(keys));
+                Ok(())
+            })?,
+        )?;
+
+        let state = self.state.clone();
+        mnote.set(
+            "cmd",
+            lua.create_function(move |_, line: String| {
+                let line = line.trim().trim_start_matches(':').to_owned();
+                if !line.is_empty() {
+                    state.borrow_mut().requests.push(Request::Ex(line));
+                }
+                Ok(())
+            })?,
+        )?;
+
+        // Filled in for each call (they need the window); stubs meanwhile.
+        mnote.set("clipboard", lua.create_table()?)?;
+
         let blocks = lua.create_table()?;
         let state = self.state.clone();
         blocks.set(
@@ -456,6 +511,7 @@ impl LuaHost {
     fn call_with(
         &self,
         editor: &mut Editor,
+        cx: &mut Context<Editor>,
         ix: usize,
         args: impl FnOnce(&Lua) -> mlua::Result<mlua::MultiValue>,
     ) -> mlua::Result<Value> {
@@ -472,10 +528,29 @@ impl LuaHost {
         };
         let args = args(&self.lua)?;
         let editor = RefCell::new(editor);
+        let window = RefCell::new(cx);
         let result = self.lua.scope(|scope| {
             let mnote: Table = self.lua.globals().get("mnote")?;
             let buf: Table = mnote.get("buf")?;
+            let clipboard: Table = mnote.get("clipboard")?;
             let e = &editor;
+            let w = &window;
+            clipboard.set(
+                "get",
+                scope.create_function(move |_, ()| {
+                    Ok(w.borrow_mut()
+                        .read_from_clipboard()
+                        .and_then(|item| item.text()))
+                })?,
+            )?;
+            clipboard.set(
+                "set",
+                scope.create_function(move |_, text: String| {
+                    w.borrow_mut()
+                        .write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                    Ok(())
+                })?,
+            )?;
             buf.set(
                 "get_lines",
                 scope.create_function(move |_, (first, last): (i64, i64)| {
@@ -820,7 +895,7 @@ impl Editor {
         let started = Instant::now();
         let revision = self.buffer.revision();
         self.buffer.begin_change(self.vim.cursor());
-        let result = host.call_with(self, ix, args);
+        let result = host.call_with(self, cx, ix, args);
         let cursor = clamp_normal(self.buffer.text(), self.vim.cursor());
         self.vim.set_cursor(cursor);
         self.buffer.end_change(cursor);
@@ -904,7 +979,32 @@ impl Editor {
                     on_stdout,
                     on_exit,
                 } => self.start_job(host, cmd, on_stdout, on_exit, cx),
+                Request::Open { note, line } => self.open_from_plugin(note, line, cx),
+                Request::Keys(keys) => {
+                    for key in keys {
+                        self.press(key, cx);
+                    }
+                }
+                Request::Ex(line) => {
+                    self.picker_action(crate::picker::PickerAction::RunEx(line), cx);
+                }
             }
+        }
+    }
+
+    /// `mnote.open`: the note (it must exist), at `line` if given.
+    fn open_from_plugin(&mut self, note: NotePath, line: Option<usize>, cx: &mut Context<Self>) {
+        let exists = self
+            .vault
+            .as_ref()
+            .is_some_and(|v| v.path_of(&note).exists());
+        if !exists {
+            self.show_toast(format!("mnote.open: there's no note {note}"), false, cx);
+            return;
+        }
+        match line {
+            Some(line) => self.go_to(note, line, cx),
+            None => self.switch_to(note, cx),
         }
     }
 
@@ -1271,6 +1371,31 @@ pub const API: &[(&str, &str, &str)] = &[
         "(namespace)",
         "Removes every decoration in the namespace.",
     ),
+    (
+        "mnote.open",
+        "(path, { line })",
+        "Opens a note of the vault (`journal/today`, `.md` optional), at `line` (0-based) if given, once the function returns. A note that doesn't exist is reported.",
+    ),
+    (
+        "mnote.feedkeys",
+        "(keys)",
+        "Runs keys in Vim notation (`ggdd`, `<C-w>v`, `<leader>f`) as if typed, through the keymap, mappings and Vim, once the function returns.",
+    ),
+    (
+        "mnote.cmd",
+        "(line)",
+        "Runs an Ex line (`set so=5`, `w`, `daily`; a leading `:` is fine) once the function returns.",
+    ),
+    (
+        "mnote.clipboard.get",
+        "() -> text | nil",
+        "The system clipboard's text.",
+    ),
+    (
+        "mnote.clipboard.set",
+        "(text)",
+        "Puts text on the system clipboard.",
+    ),
 ];
 
 /// The events `mnote.on` takes.
@@ -1324,7 +1449,7 @@ Settings for a plugin go in its table and reach it through `mnote.config(\"tasks
     for (name, about) in EVENTS {
         out.push_str(&format!("- `{name}`: {about}\n"));
     }
-    out.push_str("\n## Examples\n\n`examples/plugins/` holds `tasks` (signs, a count, a picker and a ```progress block) and `wordgoal` (a daily word goal from its settings). Copy a folder into `~/.config/mnote/plugins/` and turn it on.\n");
+    out.push_str("\n## Examples\n\n`examples/plugins/` holds `tasks` (signs, a count, a picker and a ```progress block), `wordgoal` (a daily word goal from its settings) and `pins` (harpoon-style pinned notes, with `mnote.open` and the clipboard). Copy a folder into `~/.config/mnote/plugins/` and turn it on.\n");
     out
 }
 
@@ -1412,6 +1537,76 @@ mod tests {
             assert!(event_kind(event).is_some(), "{event}");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Loads `code` as an init.lua.
+    fn host(code: &str) -> Result<LuaHost, String> {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("mnote-req-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("init.lua");
+        std::fs::write(&path, code).expect("write");
+        let host = LuaHost::load(&path, &Config::default());
+        let _ = std::fs::remove_dir_all(&dir);
+        host
+    }
+
+    #[test]
+    fn open_feedkeys_and_cmd_wait_for_the_editor() {
+        let h = host(
+            r#"
+            mnote.open("journal/today", { line = 4 })
+            mnote.open("ideas.md")
+            mnote.feedkeys("gg<C-w>v")
+            mnote.cmd(":set so=3")
+            mnote.cmd("   ")
+            "#,
+        )
+        .expect("loads");
+        let requests = std::mem::take(&mut h.state.borrow_mut().requests);
+        let shown: Vec<String> = requests
+            .iter()
+            .map(|r| match r {
+                Request::Open { note, line } => format!("open {note} {line:?}"),
+                Request::Keys(keys) => format!("keys {}", mnote_vim::key_notation(keys)),
+                Request::Ex(line) => format!("ex {line}"),
+                Request::Picker { .. } | Request::Job { .. } => "other".into(),
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                "open journal/today.md Some(4)",
+                "open ideas.md None",
+                "keys gg<C-w>v",
+                "ex set so=3",
+            ]
+        );
+        let err = host(r#"mnote.open("../outside")"#)
+            .err()
+            .unwrap_or_default();
+        assert!(err.contains("isn't a note path"), "{err}");
+        // The clipboard needs the window: outside a call it says so.
+        let err = host("mnote.clipboard.get()").err().unwrap_or_default();
+        assert!(err.contains("inside a command or a key"), "{err}");
+    }
+
+    #[test]
+    fn the_example_plugins_load() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&dir).expect("examples") {
+            let path = entry.expect("entry").path().join("init.lua");
+            if !path.exists() {
+                continue;
+            }
+            seen += 1;
+            if let Err(err) = LuaHost::load(&path, &Config::default()) {
+                panic!("{}: {err}", path.display());
+            }
+        }
+        assert!(seen >= 3);
     }
 
     #[test]

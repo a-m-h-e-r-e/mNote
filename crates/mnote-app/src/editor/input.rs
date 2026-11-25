@@ -139,9 +139,7 @@ impl Editor {
             .map_or(self.vim.cursor(), |m| m.start);
         match self.vim.take_scroll() {
             Some(scroll) => self.scroll_lines_to(scroll),
-            None => self
-                .lines
-                .scroll_to_reveal_item(line_of(self.buffer.text(), reveal)),
+            None => self.reveal_line(line_of(self.buffer.text(), reveal)),
         }
         if self.buffer.revision() != revision_before {
             self.notice = None;
@@ -491,6 +489,17 @@ impl Editor {
             }
         }
         (top.min(count.saturating_sub(1)), bottom)
+    }
+
+    /// Scrolls just enough to show `line` and `scrolloff` lines around it.
+    pub(super) fn reveal_line(&mut self, line: usize) {
+        let so = self.vim.options().scrolloff;
+        let last = self.lines.item_count().saturating_sub(1);
+        if so > 0 {
+            self.lines.scroll_to_reveal_item((line + so).min(last));
+            self.lines.scroll_to_reveal_item(line.saturating_sub(so));
+        }
+        self.lines.scroll_to_reveal_item(line);
     }
 
     /// Scrolls the note as `zt`, `zz`, `zb`, `⌃e` or `⌃y` asked.

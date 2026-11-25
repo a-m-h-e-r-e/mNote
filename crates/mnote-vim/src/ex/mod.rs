@@ -177,6 +177,8 @@ pub struct Options {
     /// `wrap`: long lines wrap onto more rows; off, each line is one row
     /// and the note scrolls sideways.
     pub wrap: bool,
+    /// `scrolloff`/`so`: lines kept on screen above and below the cursor.
+    pub scrolloff: usize,
 }
 
 impl Default for Options {
@@ -188,6 +190,7 @@ impl Default for Options {
             relativenumber: true,
             operatorfunc: String::new(),
             wrap: true,
+            scrolloff: 0,
         }
     }
 }
@@ -966,14 +969,19 @@ impl Vim {
                 }
                 continue;
             }
-            if matches!(base, "shiftwidth" | "sw") {
+            if matches!(base, "shiftwidth" | "sw" | "scrolloff" | "so") {
+                let (full, slot) = if base.starts_with("sh") || base == "sw" {
+                    ("shiftwidth", &mut self.options.shiftwidth)
+                } else {
+                    ("scrolloff", &mut self.options.scrolloff)
+                };
                 match value {
                     Some(v) => {
-                        self.options.shiftwidth = v.parse().map_err(|_| {
+                        *slot = v.parse().map_err(|_| {
                             ExError::new(521, format!("Number required after =: {item}"))
                         })?;
                     }
-                    None => messages.push(format!("shiftwidth={}", self.options.shiftwidth)),
+                    None => messages.push(format!("{full}={slot}")),
                 }
                 continue;
             }
@@ -1005,8 +1013,9 @@ impl Vim {
         let o = &self.options;
         let on = |b: bool, name: &str| format!("{}{name}", if b { "" } else { "no" });
         format!(
-            "shiftwidth={}  {}  {}  {}  {}",
+            "shiftwidth={}  scrolloff={}  {}  {}  {}  {}",
             o.shiftwidth,
+            o.scrolloff,
             on(o.ignorecase, "ignorecase"),
             on(o.smartcase, "smartcase"),
             on(o.relativenumber, "relativenumber"),
@@ -1354,6 +1363,12 @@ pub(crate) mod tests {
         );
         let msg = vim.execute("set rnu? sw", &mut buf).expect("ok").message;
         assert_eq!(msg.as_deref(), Some("relativenumber  shiftwidth=4"));
+        vim.execute("set so=5", &mut buf).expect("ok");
+        assert_eq!(vim.options().scrolloff, 5);
+        let msg = vim.execute("set scrolloff?", &mut buf).expect("ok").message;
+        assert_eq!(msg.as_deref(), Some("scrolloff=5"));
+        assert!(vim.execute("set so=x", &mut buf).is_err());
+        vim.execute("set scrolloff=0", &mut buf).expect("ok");
         vim.execute("set rnu!", &mut buf).expect("ok");
         assert!(!vim.options().relativenumber);
         assert!(vim.options().wrap);
