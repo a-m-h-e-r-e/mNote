@@ -41,6 +41,12 @@ pub enum Motion {
     LineEnd,
     /// `g_`: the last non-blank character of the line.
     LastNonBlank,
+    /// `+` / Enter: the first non-blank `count` lines down.
+    NextLineStart,
+    /// `-`: the first non-blank `count` lines up.
+    PrevLineStart,
+    /// `_`: the first non-blank `count - 1` lines down.
+    LineStartBelow,
     /// `gg`: first line, or line `count`.
     FirstLine,
     /// `G`: last line, or line `count`.
@@ -108,7 +114,9 @@ impl Motion {
     pub fn kind(self) -> MotionKind {
         use Motion::*;
         match self {
-            Up | Down | FirstLine | LastLine => MotionKind::Linewise,
+            Up | Down | FirstLine | LastLine | NextLineStart | PrevLineStart | LineStartBelow => {
+                MotionKind::Linewise
+            }
             WordEnd { .. } | WordEndBackward { .. } | LineEnd | LastNonBlank | MatchingBracket => {
                 MotionKind::Inclusive
             }
@@ -191,6 +199,9 @@ impl Motion {
                 }
                 end.saturating_sub(1).max(start)
             }
+            Motion::NextLineStart => first_non_blank(text, (line + n).min(last_line(text))),
+            Motion::PrevLineStart => first_non_blank(text, line.saturating_sub(n)),
+            Motion::LineStartBelow => first_non_blank(text, (line + n - 1).min(last_line(text))),
             Motion::FirstLine => first_non_blank(text, count.unwrap_or(1).max(1) - 1),
             Motion::LastLine => {
                 let to = count.map_or(last_line(text), |c| c.max(1) - 1);

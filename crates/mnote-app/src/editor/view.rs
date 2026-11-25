@@ -288,6 +288,9 @@ impl Render for Editor {
         let view = cx.entity();
 
         let mut status = StatusLine::new(self.vim.mode()).file(file);
+        if let Some(reg) = self.vim.recording() {
+            status = status.item(format!("recording @{reg}"));
+        }
         if self.view != styled::View::Styled {
             status = status.item(format!("{} view", self.view.name()));
         }

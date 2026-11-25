@@ -96,6 +96,8 @@ enum Pending {
     },
     /// `r`, waiting for the character.
     Replace,
+    /// `@`, waiting for the register.
+    At,
     /// `z`, waiting for `t` `z` `b` (and `⏎` `.` `-`).
     Z,
 }
@@ -286,6 +288,7 @@ pub struct Vim {
     pub(crate) insert_register: bool,
     /// INSERT set aside by `⌃o` while one NORMAL command runs.
     pub(crate) paused: Option<crate::insert_keys::Paused>,
+    pub(crate) macros: crate::macros::Macros,
     /// Keys of the command being typed, and of the last change, for `.`.
     keys: Vec<Key>,
     last_change: Option<LastChange>,
@@ -333,6 +336,7 @@ impl Default for Vim {
             replace: None,
             insert_register: false,
             paused: None,
+            macros: crate::macros::Macros::default(),
             keys: Vec::new(),
             last_change: None,
             visual_in_command: false,
@@ -462,6 +466,14 @@ impl Vim {
 
     /// Handles one key, editing `buf` as needed.
     pub fn handle_key(&mut self, key: Key, buf: &mut Buffer) -> Effect {
+        self.macros.depth += 1;
+        self.record_key(key);
+        let effect = self.dispatch_key(key, buf);
+        self.macros.depth -= 1;
+        effect
+    }
+
+    fn dispatch_key(&mut self, key: Key, buf: &mut Buffer) -> Effect {
         if !matches!(self.mode, Mode::Insert | Mode::Replace) && self.is_idle() {
             self.keys.clear();
             self.visual_in_command = self.mode.is_visual();
@@ -573,7 +585,7 @@ impl Vim {
     /// A mapping's command line: runs as `:` would (its message shows, an
     /// app command goes to the app) without going into the history. Like
     /// any command line it ends in NORMAL.
-    fn run_mapped_command(&mut self, line: &str, buf: &mut Buffer) {
+    pub(crate) fn run_mapped_command(&mut self, line: &str, buf: &mut Buffer) {
         self.cancel();
         let revision = buf.revision();
         let result = self.execute(line, buf).map(|outcome| {
@@ -1245,6 +1257,10 @@ impl Vim {
                 self.open_cmd_window(kind, "", buf);
                 return Effect::Handled;
             }
+            (Pending::Q, Key::Char(c)) => return self.start_recording(c),
+            (Pending::At, Key::Char(c)) if is_register_name(c) || matches!(c, '@' | ':') => {
+                return self.run_macro(c, buf);
+            }
             (Pending::Replace, Key::Char(c)) => return self.replace_chars(c, buf),
             (Pending::Replace, Key::Enter) => return self.replace_chars('\n', buf),
             (Pending::Replace, Key::Tab) => return self.replace_chars('\t', buf),
@@ -1432,6 +1448,8 @@ impl Vim {
             Key::Right => 'l',
             Key::Home => '0',
             Key::End => '$',
+            // Enter is `+`, as in Vim.
+            Key::Enter => '+',
             // A page (or half) down or up: `j` / `k` that many times.
             Key::PageDown | Key::PageUp | Key::Ctrl('f' | 'b' | 'd' | 'u')
                 if self.count.is_none() =>
@@ -1524,8 +1542,12 @@ impl Vim {
             'm' if self.op.is_none() && !self.mode.is_visual() => Some(Pending::SetMark),
             'r' if self.op.is_none() => Some(Pending::Replace),
             'z' if self.op.is_none() => Some(Pending::Z),
-            // Macros aren't recorded yet; `q:` opens the command-line window.
+            // `q{reg}` records a macro; `q:` opens the command-line window.
+            'q' if self.op.is_none() && self.recording().is_some() => {
+                return self.stop_recording();
+            }
             'q' if self.op.is_none() && !self.mode.is_visual() => Some(Pending::Q),
+            '@' if self.op.is_none() && !self.mode.is_visual() => Some(Pending::At),
             'i' | 'a' if self.op.is_some() || self.mode.is_visual() => {
                 Some(Pending::Object { around: c == 'a' })
             }
@@ -1792,10 +1814,12 @@ impl Vim {
             }
             let past_end = matches!(motion, Motion::Right);
             let target = motion.apply(text, self.cursor, count, None, past_end);
+            self.macros.failed |= stuck(text, motion, self.cursor, target);
             return self.arrive(target, is_jump(motion), buf);
         }
         let past_end = self.mode != Mode::Normal;
         let target = motion.apply(text, self.cursor, count, self.want_col, past_end);
+        self.macros.failed |= stuck(text, motion, self.cursor, target);
         self.arrive(target, is_jump(motion), buf)
     }
 
@@ -1807,6 +1831,7 @@ impl Vim {
         buf: &mut Buffer,
     ) -> Effect {
         let Some(target) = target else {
+            self.macros.failed = true;
             self.cancel();
             return Effect::Handled;
         };
@@ -1843,6 +1868,7 @@ impl Vim {
             None => textobj::select(text, self.cursor, obj, around, count),
         };
         let Some(sel) = sel else {
+            self.macros.failed = true;
             self.cancel();
             return Effect::Handled;
         };
@@ -2224,8 +2250,23 @@ fn motion_for(c: char) -> Option<Motion> {
         '{' => Motion::ParagraphBackward,
         ')' => Motion::SentenceForward,
         '(' => Motion::SentenceBackward,
+        '+' => Motion::NextLineStart,
+        '-' => Motion::PrevLineStart,
+        '_' => Motion::LineStartBelow,
         _ => return None,
     })
+}
+
+/// `h` `j` `k` `l` that can't move (at an edge of the line or the note):
+/// a failure, which stops a macro.
+fn stuck(text: &Rope, motion: Motion, from: usize, target: Option<Target>) -> bool {
+    match motion {
+        Motion::Up | Motion::Down | Motion::NextLineStart | Motion::PrevLineStart => {
+            target.is_none_or(|t| line_of(text, t.pos) == line_of(text, from))
+        }
+        Motion::Left | Motion::Right => target.is_none_or(|t| t.pos == from),
+        _ => false,
+    }
 }
 
 /// Motions that count as jumps: `''` returns to where they started.

@@ -16,6 +16,7 @@ pub mod ext;
 mod input;
 mod insert_keys;
 mod keys;
+mod macros;
 mod motion;
 mod registers;
 mod state;
@@ -193,6 +194,17 @@ mod motion_tests {
         check("|a\n\nb\n", ")", "a\n|\nb\n");
         check("|a.b c\n", ")", "a.b |c\n");
         check("|Done. Next one\n", "d)", "|Next one\n");
+    }
+
+    #[test]
+    fn plus_minus_underscore_and_enter() {
+        check("|a\n  b\nc\n", "+", "a\n  |b\nc\n");
+        check("|a\n  b\nc\n", "<CR>", "a\n  |b\nc\n");
+        check("|a\n  b\nc\n", "2+", "a\n  b\n|c\n");
+        check("a\n  b\nc|c\n", "-", "a\n  |b\ncc\n");
+        check("  |a\nb\n", "_", "  |a\nb\n");
+        check("|a\nb\nc\n", "2_", "a\n|b\nc\n");
+        check("|a\nb\nc\n", "d+", "|c\n");
     }
 
     #[test]

@@ -120,6 +120,25 @@ impl Registers {
         }
     }
 
+    /// Stores a recorded macro in `name` (appending for an uppercase name),
+    /// leaving the unnamed register alone, as Vim does.
+    pub(crate) fn record(&mut self, name: char, text: &str) {
+        let reg = Register {
+            text: text.to_owned(),
+            linewise: false,
+        };
+        match name {
+            '"' => self.unnamed = reg,
+            c if c.is_ascii_uppercase() => {
+                let entry = self.stored.entry(c.to_ascii_lowercase()).or_default();
+                entry.text.push_str(text);
+            }
+            c => {
+                self.stored.insert(c, reg);
+            }
+        }
+    }
+
     fn store_named(&mut self, name: Option<char>, reg: Register) {
         match name {
             Some('_') => {}
