@@ -275,6 +275,11 @@ pub struct Config {
     /// Use Neovim's tree-sitter queries (and later its parsers) when it's
     /// installed.
     pub reuse_neovim: bool,
+    /// Above this many megabytes, code fences and other injections aren't
+    /// parsed.
+    pub large_file_injections_mb: u32,
+    /// Above this many megabytes, nothing is highlighted.
+    pub large_file_highlight_mb: u32,
     /// Long lines wrap (`:set wrap`); off, the note scrolls sideways.
     pub wrap: bool,
     /// Vim mappings (`"nnoremap j gj"`), run at start and on save; they
@@ -339,6 +344,8 @@ impl Default for Config {
             wrap_motion: false,
             scrolloff: 0,
             reuse_neovim: true,
+            large_file_injections_mb: 4,
+            large_file_highlight_mb: 16,
             wrap: true,
             mappings: None,
             keys: Vec::new(),
@@ -567,6 +574,18 @@ impl Config {
                 }
                 "wrap_motion" => {
                     config.wrap_motion = value.as_bool().ok_or_else(|| wrong("true or false"))?;
+                }
+                "large_file_injections_mb" | "large_file_highlight_mb" => {
+                    let mb = value
+                        .as_integer()
+                        .and_then(|n| u32::try_from(n).ok())
+                        .filter(|n| (1..=1024).contains(n))
+                        .ok_or_else(|| wrong("a whole number of megabytes from 1 to 1024"))?;
+                    if key == "large_file_injections_mb" {
+                        config.large_file_injections_mb = mb;
+                    } else {
+                        config.large_file_highlight_mb = mb;
+                    }
                 }
                 "reuse_neovim" => {
                     config.reuse_neovim = value.as_bool().ok_or_else(|| wrong("true or false"))?;
@@ -802,6 +821,25 @@ impl Config {
                     on_off(d.reuse_neovim)
                 ),
                 on_off(self.reuse_neovim).into(),
+            ),
+            Setting::new(
+                "large_file_injections_mb",
+                &format!(
+                    "Notes and files larger than this many megabytes don't parse their\n\
+                     code fences and other embedded languages, so they stay quick to edit.\n\
+                     Values: a whole number from 1 to 1024. Default: {}",
+                    d.large_file_injections_mb
+                ),
+                self.large_file_injections_mb.to_string(),
+            ),
+            Setting::new(
+                "large_file_highlight_mb",
+                &format!(
+                    "Files larger than this many megabytes aren't coloured at all.\n\
+                     Values: a whole number from 1 to 1024. Default: {}",
+                    d.large_file_highlight_mb
+                ),
+                self.large_file_highlight_mb.to_string(),
             ),
             Setting::new(
                 "scrolloff",
@@ -1163,6 +1201,8 @@ mod tests {
             wrap_motion: true,
             scrolloff: 5,
             reuse_neovim: false,
+            large_file_injections_mb: 2,
+            large_file_highlight_mb: 8,
             wrap: false,
             panel_radius: Some(0),
             panel_shadow: false,

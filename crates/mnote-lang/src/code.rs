@@ -81,6 +81,8 @@ struct Entry {
     /// until Neovim's queries (with their own predicates and capture
     /// names) are supported for highlighting (AMI-216).
     fallback: Vec<String>,
+    /// The same, for its injections query.
+    fallback_injections: Vec<String>,
     /// A grammar loaded at run time (from Neovim, say): its pack's queries
     /// from any layer fit it, Neovim's included.
     loaded: bool,
@@ -98,12 +100,28 @@ impl Entry {
     /// The highlight query: a pack's own (from the user or a plugin), or the
     /// grammar's.
     fn highlights(&self) -> Vec<String> {
-        let Some(pack) = &self.pack else {
-            return self.def.highlights.clone();
+        self.query_text("highlights")
+    }
+
+    /// A query of `kind` for this language: for a grammar loaded at run
+    /// time, its pack's (from any layer, Neovim's included); for a built-in
+    /// one, the user's or a plugin's, else the grammar's own.
+    fn query_text(&self, kind: &str) -> Vec<String> {
+        let fallback = if kind == "highlights" {
+            &self.fallback
+        } else {
+            &self.fallback_injections
         };
-        match crate::languages::query(pack, "highlights") {
+        let Some(pack) = &self.pack else {
+            return if kind == "highlights" {
+                self.def.highlights.clone()
+            } else {
+                Vec::new()
+            };
+        };
+        match crate::languages::query(pack, kind) {
             Some(q) if self.loaded || q.layer == crate::queries::Layer::User => vec![q.text],
-            _ => self.fallback.clone(),
+            _ => fallback.clone(),
         }
     }
 
@@ -123,6 +141,7 @@ struct Builtin {
     grammar: &'static str,
     language: Language,
     highlights: Vec<&'static str>,
+    injections: Vec<&'static str>,
 }
 
 /// The grammars built in: Markdown (parsed, for notes) and the code-block
@@ -133,9 +152,15 @@ fn builtin_grammars() -> Vec<Builtin> {
         grammar,
         language,
         highlights: highlights.to_vec(),
+        injections: Vec::new(),
     };
     vec![
-        b("markdown", tree_sitter_md::LANGUAGE.into(), &[]),
+        // Its code fences, HTML blocks and frontmatter become injection
+        // layers (see `syntax`).
+        Builtin {
+            injections: vec![tree_sitter_md::INJECTION_QUERY_BLOCK],
+            ..b("markdown", tree_sitter_md::LANGUAGE.into(), &[])
+        },
         b(
             "rust",
             tree_sitter_rust::LANGUAGE.into(),
@@ -187,11 +212,16 @@ fn builtin_grammars() -> Vec<Builtin> {
 /// The built-in grammars' highlight queries, as query files for the
 /// registry (language, kind, text).
 pub(crate) fn builtin_queries() -> Vec<(String, &'static str, String)> {
-    builtin_grammars()
-        .into_iter()
-        .filter(|b| !b.highlights.is_empty())
-        .map(|b| (b.grammar.to_owned(), "highlights", b.highlights.join("\n")))
-        .collect()
+    let mut out = Vec::new();
+    for b in builtin_grammars() {
+        if !b.highlights.is_empty() {
+            out.push((b.grammar.to_owned(), "highlights", b.highlights.join("\n")));
+        }
+        if !b.injections.is_empty() {
+            out.push((b.grammar.to_owned(), "injections", b.injections.join("\n")));
+        }
+    }
+    out
 }
 
 /// Languages added with [`register_language`], kept across rebuilds.
@@ -213,14 +243,17 @@ fn entries() -> Vec<Arc<Entry>> {
         .into_iter()
         .filter_map(|pack| {
             let builtin = grammars.iter().find(|b| b.grammar == pack.grammar);
-            let (language, fallback, loaded) = match builtin {
+            let owned = |qs: &[&str]| qs.iter().map(|q| (*q).to_owned()).collect::<Vec<_>>();
+            let (language, fallback, fallback_injections, loaded) = match builtin {
                 Some(b) => (
                     b.language.clone(),
-                    b.highlights.iter().map(|q| (*q).to_owned()).collect(),
+                    owned(&b.highlights),
+                    owned(&b.injections),
                     false,
                 ),
                 None => (
                     crate::grammar::loaded_language(&pack.grammar)?,
+                    Vec::new(),
                     Vec::new(),
                     true,
                 ),
@@ -234,6 +267,7 @@ fn entries() -> Vec<Arc<Entry>> {
                 },
                 pack: Some(pack.name),
                 fallback,
+                fallback_injections,
                 loaded,
                 grammar: OnceLock::new(),
             }))
@@ -246,6 +280,7 @@ fn entries() -> Vec<Arc<Entry>> {
                 def: def.clone(),
                 pack: None,
                 fallback: Vec::new(),
+                fallback_injections: Vec::new(),
                 loaded: false,
                 grammar: OnceLock::new(),
             }));
@@ -286,9 +321,68 @@ fn for_lang(lang: &str) -> Option<Arc<Entry>> {
         .cloned()
 }
 
+/// `name`'s grammar and its `injections` query, for the syntax map.
+pub(crate) fn injections(name: &str) -> Option<(Language, String)> {
+    let entry = for_lang(name)?;
+    let text = entry.query_text("injections").join("\n");
+    (!text.trim().is_empty()).then(|| (entry.def.language.clone(), text))
+}
+
 /// Whether `lang` gets colours.
 pub fn supported(lang: &str) -> bool {
     for_lang(lang).is_some_and(|e| e.grammar().is_some())
+}
+
+/// The coloured byte ranges in `range` of a tree of `lang` already parsed
+/// over `rope` (a syntax map's layer), in order and not overlapping, as
+/// [`highlight`] colours them. Nothing is parsed: only `range` is queried.
+pub fn highlight_tree(
+    lang: &str,
+    tree: &tree_sitter::Tree,
+    rope: &ropey::Rope,
+    range: Range<usize>,
+) -> Option<Vec<(Range<usize>, CodeStyle)>> {
+    let entry = for_lang(lang)?;
+    let grammar = entry.grammar()?;
+    let names = grammar.query.capture_names();
+    let mut paint: Vec<Option<(usize, CodeStyle)>> = vec![None; range.len()];
+    let mut cursor = QueryCursor::new();
+    cursor.set_byte_range(range.clone());
+    let mut matches = cursor.matches(
+        &grammar.query,
+        tree.root_node(),
+        |node: tree_sitter::Node| crate::syntax::text_chunks(rope, node.byte_range()),
+    );
+    while let Some(m) = matches.next() {
+        for capture in m.captures() {
+            let Some(style) = CodeStyle::from_capture(names[capture.index as usize]) else {
+                continue;
+            };
+            let node = capture.node.byte_range();
+            let from = node.start.max(range.start) - range.start;
+            let to = node.end.min(range.end).saturating_sub(range.start);
+            for slot in paint.get_mut(from..to.max(from)).into_iter().flatten() {
+                if slot.is_none_or(|(pattern, _)| m.pattern_index < pattern) {
+                    *slot = Some((m.pattern_index, style));
+                }
+            }
+        }
+    }
+    let mut out: Vec<(Range<usize>, CodeStyle)> = Vec::new();
+    for (i, slot) in paint.iter().enumerate() {
+        let Some((_, style)) = slot else { continue };
+        let at = range.start + i;
+        match out.last_mut() {
+            Some((r, last)) if r.end == at && last == style => r.end = at + 1,
+            _ => out.push((at..at + 1, *style)),
+        }
+    }
+    let on_boundary = |b: usize| {
+        rope.try_byte_to_char(b)
+            .is_ok_and(|c| rope.char_to_byte(c) == b)
+    };
+    out.retain(|(r, _)| on_boundary(r.start) && on_boundary(r.end));
+    Some(out)
 }
 
 /// The coloured byte ranges of `code` in `lang`, in order and not

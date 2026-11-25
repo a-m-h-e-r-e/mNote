@@ -644,6 +644,11 @@ impl Editor {
         // Language packs, then plugins (which may add languages), so their
         // commands and keys join the keymap below.
         self.load_languages(&config);
+        let mb = |n: u32| n as usize * 1024 * 1024;
+        mnote_core::lang::syntax::set_limits(mnote_core::lang::syntax::Limits {
+            injections: mb(config.large_file_injections_mb),
+            highlight: mb(config.large_file_highlight_mb),
+        });
         self.load_plugins(&config, cx);
         self.report_language_problems(cx);
         // Only a changed setting moves the view, so `space m` choices stay.

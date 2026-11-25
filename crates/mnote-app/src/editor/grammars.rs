@@ -87,10 +87,13 @@ impl Editor {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(_) => {
-                        // Fences coloured plain before re-colour now.
+                        // Fences coloured plain before get their layer and
+                        // re-colour now.
                         this.code_cache.clear();
+                        this.buffer.reparse_syntax();
                         for doc in &mut this.parked {
                             doc.code_cache.clear();
+                            doc.buffer.reparse_syntax();
                         }
                     }
                     Err(err) => this.show_toast(

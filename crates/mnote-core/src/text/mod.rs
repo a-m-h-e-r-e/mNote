@@ -142,7 +142,8 @@ impl Buffer {
         if language == "markdown" {
             return Self::new(text);
         }
-        let syntax = crate::code::language(language).and_then(|l| Syntax::new(&l));
+        let syntax = crate::code::language(language)
+            .and_then(|l| Syntax::with_injections(&l, Some(language)));
         let name = syntax.is_some().then_some(language);
         Self::with_syntax(text, syntax, name)
     }
@@ -510,6 +511,40 @@ impl Buffer {
     pub fn syntax_tree_now(&mut self) -> Option<&Tree> {
         let rope = &self.rope;
         self.syntax.as_mut()?.tree_now(rope)
+    }
+
+    /// The syntax map's injection layers (code fences, frontmatter, and
+    /// whatever a language's `injections` query finds), without waiting.
+    pub fn syntax_layers(&mut self) -> &[mnote_lang::syntax::Layer] {
+        let rope = &self.rope;
+        match self.syntax.as_mut() {
+            Some(syntax) => syntax.layers(rope),
+            None => &[],
+        }
+    }
+
+    /// The deepest layer of `language` covering byte `at`.
+    pub fn layer_at(&mut self, at: usize, language: &str) -> Option<&mnote_lang::syntax::Layer> {
+        let rope = &self.rope;
+        self.syntax.as_mut()?.layer_at(rope, at, language)
+    }
+
+    /// The layers for the current text, waiting for the parse (tests and
+    /// tools; never on the keystroke path).
+    pub fn syntax_layers_now(&mut self) -> &[mnote_lang::syntax::Layer] {
+        let rope = &self.rope;
+        match self.syntax.as_mut() {
+            Some(syntax) => syntax.layers_now(rope),
+            None => &[],
+        }
+    }
+
+    /// Parses again though the text didn't change (a grammar an injection
+    /// needs has just loaded).
+    pub fn reparse_syntax(&mut self) {
+        if let Some(syntax) = &mut self.syntax {
+            syntax.reparse();
+        }
     }
 
     /// Whether the syntax tree's structure reflects the current text.

@@ -801,6 +801,10 @@ impl Editor {
             self.want_grammar(lang, cx);
             return None;
         }
+        // Past the highlight limit, a huge note stays plain.
+        if self.buffer.text().len_bytes() > mnote_core::lang::syntax::limits().highlight {
+            return None;
+        }
         let revision = self.buffer.revision();
         let cached = self
             .code_cache
@@ -810,38 +814,49 @@ impl Editor {
         let lines = match cached {
             Some(lines) => lines,
             None => {
+                // The fence's layer in the syntax map: its tree is already
+                // parsed (incrementally, in the background), so this only
+                // queries the block's bytes.
+                let language = mnote_core::lang::languages::pack(lang)
+                    .map_or_else(|| lang.to_owned(), |p| p.name);
+                let (first, last) = (block.start, block.end.saturating_sub(1).max(block.start));
+                let (from, to) = {
+                    let rope = self.buffer.text();
+                    let from = rope.char_to_byte(line_start(rope, first));
+                    let to = rope.char_to_byte(line_start(rope, last) + line_len(rope, last));
+                    (from, to)
+                };
+                let tree = self
+                    .buffer
+                    .layer_at(from, &language)
+                    .map(|layer| layer.tree.clone())?;
+                let current = self.buffer.syntax_is_current();
                 let rope = self.buffer.text();
-                let rows: Vec<String> = block
-                    .clone()
-                    .map(|row| {
-                        let start = line_start(rope, row);
-                        rope.slice(start..start + line_len(rope, row)).to_string()
-                    })
-                    .collect();
-                let code = rows.join("\n");
-                let spans = mnote_core::code::highlight(lang, &code).unwrap_or_default();
-                // Split the block's spans into lines.
-                let mut per_line = Vec::with_capacity(rows.len());
-                let mut offset = 0;
-                for row in &rows {
-                    let end = offset + row.len();
+                let spans = mnote_core::code::highlight_tree(lang, &tree, rope, from..to.max(from))
+                    .unwrap_or_default();
+                // Split the block's spans into lines, as bytes of each line.
+                let mut per_line = Vec::with_capacity(block.len());
+                for row in block.clone() {
+                    let first_char = line_start(rope, row);
+                    let start = rope.char_to_byte(first_char);
+                    let end = rope.char_to_byte(first_char + line_len(rope, row));
                     per_line.push(
                         spans
                             .iter()
-                            .filter(|(r, _)| r.start < end && r.end > offset)
-                            .map(|(r, s)| {
-                                (r.start.max(offset) - offset..r.end.min(end) - offset, *s)
-                            })
+                            .filter(|(r, _)| r.start < end && r.end > start)
+                            .map(|(r, s)| (r.start.max(start) - start..r.end.min(end) - start, *s))
                             .collect(),
                     );
-                    offset = end + 1;
                 }
                 let lines = Rc::new(per_line);
-                if self.code_cache.len() > 64 {
-                    self.code_cache.retain(|_, (rev, _)| *rev == revision);
+                // A tree that's waiting for its re-parse is drawn, not kept.
+                if current {
+                    if self.code_cache.len() > 64 {
+                        self.code_cache.retain(|_, (rev, _)| *rev == revision);
+                    }
+                    self.code_cache
+                        .insert(block.start, (revision, lines.clone()));
                 }
-                self.code_cache
-                    .insert(block.start, (revision, lines.clone()));
                 lines
             }
         };
