@@ -18,6 +18,8 @@ use std::collections::HashMap;
 pub struct Register {
     pub text: String,
     pub linewise: bool,
+    /// A VISUAL BLOCK yank: its lines paste as a column.
+    pub block: bool,
 }
 
 /// The system clipboard, supplied by the app. Tests use [`MemoryClipboard`].
@@ -126,6 +128,7 @@ impl Registers {
         let reg = Register {
             text: text.to_owned(),
             linewise: false,
+            block: false,
         };
         match name {
             '"' => self.unnamed = reg,
@@ -173,6 +176,7 @@ impl Registers {
                 Some(text) if !text.is_empty() && text != self.unnamed.text => Some(Register {
                     linewise: text.ends_with('\n'),
                     text,
+                    block: false,
                 }),
                 _ => (!self.unnamed.text.is_empty()).then(|| self.unnamed.clone()),
             },
@@ -180,6 +184,7 @@ impl Registers {
             Some('+' | '*') => self.clipboard.read().map(|text| Register {
                 linewise: text.ends_with('\n'),
                 text,
+                block: false,
             }),
             Some('_') => None,
             Some(c) => self.stored.get(&c.to_ascii_lowercase()).cloned(),
@@ -200,6 +205,7 @@ mod tests {
         Register {
             text: text.into(),
             linewise,
+            block: false,
         }
     }
 

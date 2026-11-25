@@ -910,6 +910,9 @@ impl Editor {
             Mode::VisualLine => (line_of(rope, a)..=line_of(rope, b))
                 .contains(&ix)
                 .then_some(0..len + 1),
+            // One rectangle per line; lines shorter than its left edge have
+            // none.
+            Mode::VisualBlock => self.vim.block(rope)?.columns(rope, ix),
             Mode::Visual => {
                 let end = start + len;
                 if b < start || a > end {

@@ -1022,11 +1022,22 @@ impl Vim {
         .into_iter()
         .chain('a'..='z');
         for name in names {
-            if let Some(Register { text, linewise }) = self.registers.get(Some(name)) {
+            if let Some(Register {
+                text,
+                linewise,
+                block,
+            }) = self.registers.get(Some(name))
+            {
                 let shown: String = text.replace('\n', "^J").chars().take(60).collect();
                 out.push_str(&format!(
                     "\n  {}  \"{name}   {shown}",
-                    if linewise { 'l' } else { 'c' }
+                    if block {
+                        'b'
+                    } else if linewise {
+                        'l'
+                    } else {
+                        'c'
+                    }
                 ));
             }
         }

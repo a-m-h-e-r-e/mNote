@@ -19,7 +19,7 @@ pub fn mode_colors(mode: Mode, p: &Palette) -> (u32, u32) {
     match mode {
         Mode::Normal => (p.select, p.select_ink),
         Mode::Insert => (p.insert_wash, p.insert),
-        Mode::Visual | Mode::VisualLine => (p.visual_wash, p.visual),
+        Mode::Visual | Mode::VisualLine | Mode::VisualBlock => (p.visual_wash, p.visual),
         Mode::Command => (p.well, p.ink),
         // Typing overwrites text: the warning colours, as Vim does.
         Mode::Replace => (p.danger_wash, p.danger),

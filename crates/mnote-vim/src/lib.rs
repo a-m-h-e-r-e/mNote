@@ -11,6 +11,7 @@
 //! - [`Motion`] computes where a motion lands and how operators treat it.
 
 mod anchors;
+mod block;
 pub mod ex;
 pub mod ext;
 mod input;
@@ -26,6 +27,7 @@ mod view;
 
 use std::fmt;
 
+pub use block::Block;
 pub use input::{InputAction, VimInput};
 pub use keys::{Key, key_notation, parse_keys};
 pub use motion::{Find, Motion, MotionKind, Target};
@@ -42,6 +44,8 @@ pub enum Mode {
     Insert,
     Visual,
     VisualLine,
+    /// `⌃v`: a rectangle of columns.
+    VisualBlock,
     Command,
     /// `R`: typing overwrites the text.
     Replace,
@@ -65,20 +69,21 @@ impl Mode {
             Mode::Insert => "INSERT",
             Mode::Visual => "VISUAL",
             Mode::VisualLine => "V-LINE",
+            Mode::VisualBlock => "V-BLOCK",
             Mode::Command => "COMMAND",
             Mode::Replace => "REPLACE",
         }
     }
 
-    /// Visual or visual-line mode.
+    /// Visual, visual-line or visual-block mode.
     pub fn is_visual(self) -> bool {
-        matches!(self, Mode::Visual | Mode::VisualLine)
+        matches!(self, Mode::Visual | Mode::VisualLine | Mode::VisualBlock)
     }
 
     pub fn caret(self) -> CaretShape {
         match self {
             Mode::Insert | Mode::Command => CaretShape::Bar,
-            Mode::Normal | Mode::Visual | Mode::VisualLine => CaretShape::Block,
+            Mode::Normal | Mode::Visual | Mode::VisualLine | Mode::VisualBlock => CaretShape::Block,
             Mode::Replace => CaretShape::Underline,
         }
     }

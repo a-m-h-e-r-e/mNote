@@ -262,8 +262,8 @@ pub(crate) struct CmdlineState {
 pub struct Vim {
     pub(crate) mode: Mode,
     pub(crate) cursor: usize,
-    anchor: usize,
-    want_col: Option<usize>,
+    pub(crate) anchor: usize,
+    pub(crate) want_col: Option<usize>,
     count: Option<usize>,
     pending: Pending,
     pub(crate) op: Option<OpPending>,
@@ -289,6 +289,7 @@ pub struct Vim {
     /// INSERT set aside by `⌃o` while one NORMAL command runs.
     pub(crate) paused: Option<crate::insert_keys::Paused>,
     pub(crate) macros: crate::macros::Macros,
+    pub(crate) block: crate::block::BlockState,
     /// Keys of the command being typed, and of the last change, for `.`.
     keys: Vec<Key>,
     last_change: Option<LastChange>,
@@ -337,6 +338,7 @@ impl Default for Vim {
             insert_register: false,
             paused: None,
             macros: crate::macros::Macros::default(),
+            block: crate::block::BlockState::default(),
             keys: Vec::new(),
             last_change: None,
             visual_in_command: false,
@@ -493,7 +495,9 @@ impl Vim {
                 self.command_key(key, buf);
                 Effect::Handled
             }
-            Mode::Normal | Mode::Visual | Mode::VisualLine => self.normal_mapped(key, buf),
+            Mode::Normal | Mode::Visual | Mode::VisualLine | Mode::VisualBlock => {
+                self.normal_mapped(key, buf)
+            }
         };
         if self.paused.is_some() && !was_insert {
             self.resume_insert(buf);
@@ -685,7 +689,8 @@ impl Vim {
         }
         match key {
             Key::Esc => {
-                if let Some(session) = self.insert.take()
+                let session = self.insert.take();
+                if let Some(session) = &session
                     && session.count > 1
                     && !session.broken
                 {
@@ -693,6 +698,9 @@ impl Vim {
                     let repeat = unit.repeat(session.count - 1);
                     self.insert_text(buf, &repeat);
                 }
+                // `I` / `A` / `c` on a block: the same typing on its other lines.
+                let typed = session.filter(|s| !s.broken).map(|s| s.typed);
+                self.finish_block_insert(typed.as_deref(), buf);
                 // Where INSERT ended, for `gi`.
                 self.marks.insert('^', self.cursor);
                 let start = line_start(buf.text(), line_of(buf.text(), self.cursor));
@@ -859,6 +867,10 @@ impl Vim {
     /// past the end of the line; a line break replaces them with one), or
     /// every selected character in VISUAL.
     fn replace_chars(&mut self, c: char, buf: &mut Buffer) -> Effect {
+        if self.mode == Mode::VisualBlock {
+            self.block_replace(c, buf);
+            return Effect::Handled;
+        }
         let text = buf.text();
         if self.mode.is_visual() {
             let (range, _) = self.visual_range(text);
@@ -1227,6 +1239,11 @@ impl Vim {
         self.cursor += s.chars().count();
     }
 
+    /// INSERT at the cursor with no count, in the undo step already begun.
+    pub(crate) fn begin_insert(&mut self, buf: &mut Buffer) {
+        self.start_insert(buf, 1, "");
+    }
+
     /// Starts insert mode at the cursor as part of the current undo step.
     fn start_insert(&mut self, buf: &mut Buffer, count: usize, prefix: &str) {
         self.insert = Some(InsertSession {
@@ -1430,6 +1447,16 @@ impl Vim {
                     return self.jump_list(false, buf);
                 }
                 Key::Ctrl(c @ ('e' | 'y')) => return self.scroll_lines(c == 'e', buf),
+                // `⌃v`: VISUAL BLOCK, or back to NORMAL from it.
+                Key::Ctrl('v') => {
+                    let text = buf.text();
+                    if self.mode == Mode::VisualBlock {
+                        self.leave_visual(text);
+                    } else {
+                        self.enter(Mode::VisualBlock, text);
+                    }
+                    return Effect::Handled;
+                }
                 _ => {}
             }
         }
@@ -1706,6 +1733,36 @@ impl Vim {
             '~' => Some(Operator::Toggle),
             _ => None,
         };
+        if let Some(op) = op
+            && self.mode == Mode::VisualBlock
+        {
+            self.block_operator(op, buf);
+            return Effect::Handled;
+        }
+        if self.mode == Mode::VisualBlock {
+            match c {
+                'I' | 'A' => {
+                    self.block_insert(c == 'A', buf);
+                    return Effect::Handled;
+                }
+                'O' => {
+                    self.block_other_corner(text);
+                    return Effect::Handled;
+                }
+                'p' | 'P' => return self.block_put_over(buf),
+                'v' | 'V' => {
+                    self.block.to_end = false;
+                    let mode = if c == 'v' {
+                        Mode::Visual
+                    } else {
+                        Mode::VisualLine
+                    };
+                    self.enter(mode, text);
+                    return Effect::Handled;
+                }
+                _ => {}
+            }
+        }
         if let Some(op) = op {
             let (range, linewise) = self.visual_range(text);
             self.leave_visual(text);
@@ -1737,6 +1794,7 @@ impl Vim {
                         Register {
                             text: removed,
                             linewise,
+                            block: false,
                         },
                     );
                     buf.end_change(self.cursor);
@@ -1747,6 +1805,10 @@ impl Vim {
             }
             (Mode::Visual, 'V') => {
                 self.enter(Mode::VisualLine, text);
+            }
+            (_, 'O') => {
+                std::mem::swap(&mut self.anchor, &mut self.cursor);
+                self.want_col = None;
             }
             (Mode::Visual, 'v') | (Mode::VisualLine, 'V') => self.leave_visual(text),
             (_, 'o') => {
@@ -1766,6 +1828,10 @@ impl Vim {
     }
 
     fn operator_key(&mut self, op: Operator, buf: &mut Buffer) -> Effect {
+        if self.mode == Mode::VisualBlock {
+            self.block_operator(op, buf);
+            return Effect::Handled;
+        }
         if self.mode.is_visual() {
             let text = buf.text();
             let (range, linewise) = self.visual_range(text);
@@ -1816,6 +1882,14 @@ impl Vim {
             let target = motion.apply(text, self.cursor, count, None, past_end);
             self.macros.failed |= stuck(text, motion, self.cursor, target);
             return self.arrive(target, is_jump(motion), buf);
+        }
+        if self.mode == Mode::VisualBlock {
+            // `$` widens every line to its end until a sideways motion.
+            match motion {
+                Motion::LineEnd => self.block.to_end = true,
+                Motion::Up | Motion::Down => {}
+                _ => self.block.to_end = false,
+            }
         }
         let past_end = self.mode != Mode::Normal;
         let target = motion.apply(text, self.cursor, count, self.want_col, past_end);
@@ -1919,6 +1993,7 @@ impl Vim {
         let reg = Register {
             text: taken,
             linewise,
+            block: false,
         };
         let name = self.register.take();
         // Everything read from the text happens before the first edit.
@@ -2073,6 +2148,10 @@ impl Vim {
         buf: &mut Buffer,
         count: usize,
     ) -> usize {
+        if reg.block {
+            self.put_block(reg, after, buf, count);
+            return self.cursor;
+        }
         let text = buf.text();
         let len = text.len_chars();
         let line = line_of(text, self.cursor);

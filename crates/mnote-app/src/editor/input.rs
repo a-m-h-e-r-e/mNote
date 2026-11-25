@@ -92,7 +92,7 @@ impl Editor {
         let plain_paste = matches!(key, mnote_vim::Key::Char('p' | 'P'))
             && matches!(
                 self.vim.mode(),
-                Mode::Normal | Mode::Visual | Mode::VisualLine
+                Mode::Normal | Mode::Visual | Mode::VisualLine | Mode::VisualBlock
             )
             && matches!(self.vim.pending_register(), None | Some('"'))
             && !self.vim.awaits_register()
@@ -364,7 +364,7 @@ impl Editor {
         let start = line_start(rope, ix);
         let len = line_len(rope, ix);
         let pos = start + ch.min(len);
-        let visual = matches!(self.vim.mode(), Mode::Visual | Mode::VisualLine);
+        let visual = self.vim.mode().is_visual();
         match hit {
             MouseHit::Down { command: true, .. } => {
                 self.vim.click(pos, &mut self.buffer);
@@ -441,7 +441,7 @@ impl Editor {
             return true;
         }
         let mode = self.vim.mode();
-        let visual = matches!(mode, Mode::Visual | Mode::VisualLine);
+        let visual = mode.is_visual();
         let keys = match (key, mode) {
             ("c", _) if visual => "\"+y",
             ("c", Mode::Normal) => "\"+yy",
