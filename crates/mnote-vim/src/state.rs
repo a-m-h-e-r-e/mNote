@@ -108,13 +108,15 @@ pub(crate) struct OpPending {
 
 /// An insert-mode session, for `3ix<esc>` style repeats.
 #[derive(Debug, Clone, Default)]
-struct InsertSession {
+pub(crate) struct InsertSession {
     count: usize,
     /// What each repeat inserts before the typed text (`\n` after `o`).
     prefix: String,
-    typed: String,
+    pub(crate) typed: String,
     /// The typed text can't be repeated reliably (backspaced past it).
-    broken: bool,
+    pub(crate) broken: bool,
+    /// Where typing started, for `⌃u`.
+    pub(crate) start: usize,
 }
 
 /// A REPLACE-mode session (`R`): what each typed character overwrote, for
@@ -278,8 +280,12 @@ pub struct Vim {
     screen_rows: Option<Box<dyn ScreenRows>>,
     /// Plain `j` / `k` move by screen row (config.toml's `wrap_motion`).
     wrap_motion: bool,
-    insert: Option<InsertSession>,
+    pub(crate) insert: Option<InsertSession>,
     replace: Option<ReplaceSession>,
+    /// `⌃r` typed in INSERT: the next key names a register.
+    pub(crate) insert_register: bool,
+    /// INSERT set aside by `⌃o` while one NORMAL command runs.
+    pub(crate) paused: Option<crate::insert_keys::Paused>,
     /// Keys of the command being typed, and of the last change, for `.`.
     keys: Vec<Key>,
     last_change: Option<LastChange>,
@@ -325,6 +331,8 @@ impl Default for Vim {
             wrap_motion: false,
             insert: None,
             replace: None,
+            insert_register: false,
+            paused: None,
             keys: Vec::new(),
             last_change: None,
             visual_in_command: false,
@@ -465,7 +473,8 @@ impl Vim {
             self.cmd_window_key(key, buf);
             return Effect::Handled;
         }
-        match self.mode {
+        let was_insert = self.mode == Mode::Insert;
+        let effect = match self.mode {
             Mode::Insert => self.insert_mapped(key, buf),
             Mode::Replace => self.replace_key(key, buf),
             Mode::Command => {
@@ -473,10 +482,20 @@ impl Vim {
                 Effect::Handled
             }
             Mode::Normal | Mode::Visual | Mode::VisualLine => self.normal_mapped(key, buf),
+        };
+        if self.paused.is_some() && !was_insert {
+            self.resume_insert(buf);
         }
+        effect
     }
 
-    fn is_idle(&self) -> bool {
+    /// Starts the keys `.` repeats afresh, as if `keys` had just been typed.
+    pub(crate) fn restart_keys(&mut self, keys: Vec<Key>, revision: u64) {
+        self.keys = keys;
+        self.command_revision = revision;
+    }
+
+    pub(crate) fn is_idle(&self) -> bool {
         !self.is_pending()
     }
 
@@ -646,6 +665,12 @@ impl Vim {
     }
 
     fn insert_key(&mut self, key: Key, buf: &mut Buffer) -> Effect {
+        if std::mem::take(&mut self.insert_register) {
+            if let Key::Char(c) = key {
+                self.insert_register(c, buf);
+            }
+            return Effect::Handled;
+        }
         match key {
             Key::Esc => {
                 if let Some(session) = self.insert.take()
@@ -675,17 +700,23 @@ impl Vim {
                     s.typed.push('\n');
                 }
             }
-            Key::Backspace => {
+            Key::Backspace | Key::Ctrl('h') => {
                 if self.cursor > 0 {
                     self.cursor -= 1;
                     self.edit(buf, self.cursor..self.cursor + 1, "");
-                    if let Some(s) = &mut self.insert
-                        && s.typed.pop().is_none()
-                    {
-                        s.broken = true;
+                    if let Some(s) = &mut self.insert {
+                        if s.typed.pop().is_none() {
+                            s.broken = true;
+                        }
+                        s.start = s.start.min(self.cursor);
                     }
                 }
             }
+            Key::Ctrl('w') => self.delete_word_before(buf),
+            Key::Ctrl('u') => self.delete_line_before(buf),
+            Key::Ctrl('r') => self.insert_register = true,
+            Key::Ctrl(c @ ('t' | 'd')) => self.shift_insert_line(c == 't', buf),
+            Key::Ctrl('o') => self.pause_insert(buf),
             Key::Left
             | Key::Right
             | Key::Up
@@ -1172,7 +1203,7 @@ impl Vim {
         self.cursor
     }
 
-    fn typed(&mut self, buf: &mut Buffer, s: &str) {
+    pub(crate) fn typed(&mut self, buf: &mut Buffer, s: &str) {
         self.insert_text(buf, s);
         if let Some(session) = &mut self.insert {
             session.typed.push_str(s);
@@ -1189,6 +1220,7 @@ impl Vim {
         self.insert = Some(InsertSession {
             count: count.max(1),
             prefix: prefix.to_owned(),
+            start: self.cursor,
             ..InsertSession::default()
         });
         self.enter(Mode::Insert, buf.text());

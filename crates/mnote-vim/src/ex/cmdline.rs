@@ -361,10 +361,12 @@ impl Vim {
     /// Whether `⌃r` is waiting for a register name, so the app can read the
     /// system clipboard first if it's `+` or `*`.
     pub fn awaits_register(&self) -> bool {
-        self.cmd
-            .cmdline
-            .as_ref()
-            .is_some_and(|l| l.register_pending)
+        self.insert_register
+            || self
+                .cmd
+                .cmdline
+                .as_ref()
+                .is_some_and(|l| l.register_pending)
     }
 
     /// What `⌃r {key}` pastes: a register, `:` the last command, `/` the

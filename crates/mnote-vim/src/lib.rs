@@ -14,6 +14,7 @@ mod anchors;
 pub mod ex;
 pub mod ext;
 mod input;
+mod insert_keys;
 mod keys;
 mod motion;
 mod registers;

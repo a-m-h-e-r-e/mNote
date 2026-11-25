@@ -87,7 +87,8 @@ impl Editor {
     /// key it doesn't use, which goes on to the app.
     fn vim_key(&mut self, key: mnote_vim::Key, cx: &mut Context<Self>) -> bool {
         // The system clipboard is read just before a paste that may use it:
-        // `"+p`, and plain `p` / `P` when y, d and p share it.
+        // `"+p` and `⌃r +`, and plain `p` / `P` (and `⌃r "`) when y, d and p
+        // share it.
         let plain_paste = matches!(key, mnote_vim::Key::Char('p' | 'P'))
             && matches!(
                 self.vim.mode(),
@@ -98,7 +99,12 @@ impl Editor {
             && self.config.system_clipboard;
         let clipboard_paste = plain_paste
             || matches!(self.vim.pending_register(), Some('+' | '*'))
-            || (self.vim.awaits_register() && matches!(key, mnote_vim::Key::Char('+' | '*')));
+            || (self.vim.awaits_register() && matches!(key, mnote_vim::Key::Char('+' | '*')))
+            // `⌃r "` in INSERT, when the unnamed register is the clipboard.
+            || (self.vim.awaits_register()
+                && self.vim.mode() == Mode::Insert
+                && key == mnote_vim::Key::Char('"')
+                && self.config.system_clipboard);
         if clipboard_paste {
             self.clipboard.borrow_mut().read =
                 cx.read_from_clipboard().and_then(|item| item.text());
