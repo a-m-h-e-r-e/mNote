@@ -75,6 +75,12 @@ pub struct LanguageDef {
 
 struct Entry {
     def: LanguageDef,
+    /// The language pack it comes from, whose highlight query it uses.
+    pack: Option<String>,
+    /// The grammar crate's own highlight query, used until Neovim's
+    /// queries (with their own predicates and capture names) are supported
+    /// for highlighting (AMI-216).
+    fallback: Vec<String>,
     /// The compiled query, on first use.
     grammar: OnceLock<Option<Grammar>>,
 }
@@ -82,62 +88,79 @@ struct Entry {
 impl Entry {
     fn grammar(&self) -> Option<&Grammar> {
         self.grammar
-            .get_or_init(|| load(self.def.language.clone(), &self.def.highlights))
+            .get_or_init(|| load(self.def.language.clone(), &self.highlights()))
             .as_ref()
     }
 
+    /// The highlight query: a pack's own (from the user or a plugin), or the
+    /// grammar's.
+    fn highlights(&self) -> Vec<String> {
+        let Some(pack) = &self.pack else {
+            return self.def.highlights.clone();
+        };
+        match crate::languages::query(pack, "highlights") {
+            Some(q) if q.layer == crate::queries::Layer::User => vec![q.text],
+            _ => self.fallback.clone(),
+        }
+    }
+
     fn named(&self, name: &str) -> bool {
-        self.def.name == name || self.def.aliases.iter().any(|a| a == name)
+        self.def.name.eq_ignore_ascii_case(name)
+            || self
+                .def
+                .aliases
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case(name))
     }
 }
 
-fn def(name: &str, aliases: &[&str], language: Language, highlights: &[&str]) -> LanguageDef {
-    LanguageDef {
-        name: name.into(),
-        aliases: aliases.iter().map(|a| (*a).to_owned()).collect(),
+/// A language with a grammar built into mNote: its grammar and its
+/// highlight query (the grammar crate's own).
+struct Builtin {
+    grammar: &'static str,
+    language: Language,
+    highlights: Vec<&'static str>,
+}
+
+/// The grammars built in: Markdown (parsed, for notes) and the code-block
+/// languages. Which file names, fences and aliases use them is in the
+/// language packs (`languages.toml`).
+fn builtin_grammars() -> Vec<Builtin> {
+    let b = |grammar, language: Language, highlights: &[&'static str]| Builtin {
+        grammar,
         language,
-        highlights: highlights.iter().map(|q| (*q).to_owned()).collect(),
-    }
-}
-
-/// The languages built in: Markdown (parsed, for notes) and the code-block
-/// languages.
-fn builtin() -> Vec<LanguageDef> {
+        highlights: highlights.to_vec(),
+    };
     vec![
-        def("markdown", &["md"], tree_sitter_md::LANGUAGE.into(), &[]),
-        def(
+        b("markdown", tree_sitter_md::LANGUAGE.into(), &[]),
+        b(
             "rust",
-            &["rs"],
             tree_sitter_rust::LANGUAGE.into(),
             &[tree_sitter_rust::HIGHLIGHTS_QUERY],
         ),
-        def(
+        b(
             "python",
-            &["py"],
             tree_sitter_python::LANGUAGE.into(),
             &[tree_sitter_python::HIGHLIGHTS_QUERY],
         ),
-        def(
+        b(
             "javascript",
-            &["js", "jsx", "mjs"],
             tree_sitter_javascript::LANGUAGE.into(),
             &[
                 tree_sitter_javascript::HIGHLIGHT_QUERY,
                 tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
             ],
         ),
-        def(
+        b(
             "typescript",
-            &["ts"],
             tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             &[
                 tree_sitter_javascript::HIGHLIGHT_QUERY,
                 tree_sitter_typescript::HIGHLIGHTS_QUERY,
             ],
         ),
-        def(
+        b(
             "tsx",
-            &[],
             tree_sitter_typescript::LANGUAGE_TSX.into(),
             &[
                 tree_sitter_javascript::HIGHLIGHT_QUERY,
@@ -145,50 +168,90 @@ fn builtin() -> Vec<LanguageDef> {
                 tree_sitter_typescript::HIGHLIGHTS_QUERY,
             ],
         ),
-        def(
+        b(
             "bash",
-            &["sh", "shell", "zsh", "console"],
             tree_sitter_bash::LANGUAGE.into(),
             &[tree_sitter_bash::HIGHLIGHT_QUERY],
         ),
-        def(
+        b(
             "json",
-            &["jsonc"],
             tree_sitter_json::LANGUAGE.into(),
             &[tree_sitter_json::HIGHLIGHTS_QUERY],
         ),
     ]
 }
 
-/// The language registry, shared by every thread.
-fn registry() -> &'static RwLock<Vec<Arc<Entry>>> {
-    static REGISTRY: OnceLock<RwLock<Vec<Arc<Entry>>>> = OnceLock::new();
-    REGISTRY.get_or_init(|| {
-        RwLock::new(
-            builtin()
-                .into_iter()
-                .map(|def| {
-                    Arc::new(Entry {
-                        def,
-                        grammar: OnceLock::new(),
-                    })
-                })
-                .collect(),
-        )
-    })
+/// The built-in grammars' highlight queries, as query files for the
+/// registry (language, kind, text).
+pub(crate) fn builtin_queries() -> Vec<(String, &'static str, String)> {
+    builtin_grammars()
+        .into_iter()
+        .filter(|b| !b.highlights.is_empty())
+        .map(|b| (b.grammar.to_owned(), "highlights", b.highlights.join("\n")))
+        .collect()
 }
 
-/// Adds a language, or replaces the one with its name. A language is one
-/// call: a grammar (a Cargo dependency, or later one loaded at run time)
-/// and its highlight queries.
-pub fn register_language(def: LanguageDef) {
-    if let Ok(mut languages) = registry().write() {
-        languages.retain(|e| e.def.name != def.name);
-        languages.push(Arc::new(Entry {
-            def,
-            grammar: OnceLock::new(),
-        }));
+/// Languages added with [`register_language`], kept across rebuilds.
+fn registered() -> &'static RwLock<Vec<LanguageDef>> {
+    static REGISTERED: OnceLock<RwLock<Vec<LanguageDef>>> = OnceLock::new();
+    REGISTERED.get_or_init(RwLock::default)
+}
+
+/// The languages that can be parsed, shared by every thread: the language
+/// packs whose grammar is built in, then those registered in code.
+fn registry() -> &'static RwLock<Vec<Arc<Entry>>> {
+    static REGISTRY: OnceLock<RwLock<Vec<Arc<Entry>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| RwLock::new(entries()))
+}
+
+fn entries() -> Vec<Arc<Entry>> {
+    let grammars = builtin_grammars();
+    let mut out: Vec<Arc<Entry>> = crate::languages::packs()
+        .into_iter()
+        .filter_map(|pack| {
+            let builtin = grammars.iter().find(|b| b.grammar == pack.grammar)?;
+            Some(Arc::new(Entry {
+                def: LanguageDef {
+                    name: pack.name.clone(),
+                    aliases: pack.aliases.clone(),
+                    language: builtin.language.clone(),
+                    highlights: Vec::new(),
+                },
+                pack: Some(pack.name),
+                fallback: builtin.highlights.iter().map(|q| (*q).to_owned()).collect(),
+                grammar: OnceLock::new(),
+            }))
+        })
+        .collect();
+    if let Ok(defs) = registered().read() {
+        for def in defs.iter() {
+            out.retain(|e| e.def.name != def.name);
+            out.push(Arc::new(Entry {
+                def: def.clone(),
+                pack: None,
+                fallback: Vec::new(),
+                grammar: OnceLock::new(),
+            }));
+        }
     }
+    out
+}
+
+/// Rebuilds the registry after the language packs were reloaded.
+pub(crate) fn rebuild() {
+    if let Ok(mut entries_now) = registry().write() {
+        *entries_now = entries();
+    }
+}
+
+/// Adds a language, or replaces the one with its name: a grammar (a Cargo
+/// dependency, or one loaded at run time) and its highlight queries.
+pub fn register_language(def: LanguageDef) {
+    if let Ok(mut defs) = registered().write() {
+        defs.retain(|d| d.name != def.name);
+        defs.push(def);
+    }
+    rebuild();
 }
 
 /// The tree-sitter language called `name` (or one of its aliases), for

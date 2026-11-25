@@ -178,7 +178,8 @@ impl Buffer {
     /// Opens a note from the vault.
     pub fn open(vault: &Vault, note: &NotePath) -> Result<Self, VaultError> {
         let text = vault.read(note)?;
-        let language = crate::filetype::for_path(note.as_path()).and_then(|f| f.language);
+        let first_line = text.lines().next();
+        let language = crate::filetype::detect(note.as_path(), first_line).and_then(|f| f.language);
         Ok(match language {
             Some(language) => Self::with_language(&text, &language),
             None => Self::with_syntax(&text, None, None),

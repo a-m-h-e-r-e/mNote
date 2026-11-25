@@ -513,6 +513,47 @@ impl LuaHost {
             })?,
         )?;
 
+        let source = self.source.clone();
+        let lang = lua.create_table()?;
+        lang.set(
+            "register",
+            lua.create_function(move |_, spec: Table| {
+                use mnote_core::lang::{error::Origin, languages, pack::PackSpec};
+                let origin = Origin::Plugin(source.clone());
+                let mut queries = Vec::new();
+                if let Some(q) = spec.get::<Option<Table>>("queries")? {
+                    for pair in q.pairs::<String, String>() {
+                        let (kind, text) = pair?;
+                        if !mnote_core::lang::queries::KINDS.contains(&kind.as_str()) {
+                            return Err(mlua::Error::runtime(format!(
+                                "queries.{kind}: the kinds are {}",
+                                mnote_core::lang::queries::KINDS.join(", ")
+                            )));
+                        }
+                        queries.push((kind, text));
+                    }
+                }
+                let mut table = toml::Table::new();
+                for pair in spec.pairs::<String, Value>() {
+                    let (key, value) = pair?;
+                    if key == "queries" {
+                        continue;
+                    }
+                    let value = lua_to_toml(value).ok_or_else(|| {
+                        mlua::Error::runtime(format!(
+                            "{key}: strings, numbers, lists and tables only"
+                        ))
+                    })?;
+                    table.insert(key, value);
+                }
+                let spec = PackSpec::from_table(&table, &origin)
+                    .map_err(|e| mlua::Error::runtime(e.to_string()))?;
+                languages::register(spec, queries);
+                Ok(())
+            })?,
+        )?;
+        mnote.set("lang", lang)?;
+
         // Filled in for each call (they need the window); stubs meanwhile.
         mnote.set("clipboard", lua.create_table()?)?;
 
@@ -747,6 +788,36 @@ fn line_edit(
         }
     }
     (from..to, new)
+}
+
+/// A Lua value as a TOML one (for a language pack from Lua): strings,
+/// numbers, booleans, lists and tables; `None` for anything else.
+fn lua_to_toml(value: Value) -> Option<toml::Value> {
+    Some(match value {
+        Value::String(s) => toml::Value::String(s.to_string_lossy()),
+        Value::Integer(n) => toml::Value::Integer(n),
+        Value::Number(f) => toml::Value::Float(f),
+        Value::Boolean(b) => toml::Value::Boolean(b),
+        Value::Table(t) => {
+            // A sequence (1..n) is a list; anything else a table.
+            let len = t.raw_len();
+            if len > 0 && t.clone().pairs::<Value, Value>().count() == len {
+                let items = t
+                    .sequence_values::<Value>()
+                    .map(|v| v.ok().and_then(lua_to_toml))
+                    .collect::<Option<Vec<_>>>()?;
+                toml::Value::Array(items)
+            } else {
+                let mut out = toml::Table::new();
+                for pair in t.pairs::<String, Value>() {
+                    let (k, v) = pair.ok()?;
+                    out.insert(k, lua_to_toml(v)?);
+                }
+                toml::Value::Table(out)
+            }
+        }
+        _ => return None,
+    })
 }
 
 /// A config.toml value as Lua sees it.
@@ -1520,6 +1591,11 @@ pub const API: &[(&str, &str, &str)] = &[
         "Replaces lines `first..last` (as `mnote.buf.set_lines` counts them) in several notes as one undo step, once the function returns. Notes that aren't open are opened in the background, edited and saved. `u` in any of them undoes the whole edit in all of them that haven't changed since. Edits to one note mustn't overlap.",
     ),
     (
+        "mnote.lang.register",
+        "({ name, extensions, comment, indent, …, queries = { highlights = \"…\" } })",
+        "Adds a language, or overrides fields of one: the fields of a `language.toml` (see `docs/architecture/code-support.md`), and its queries by kind (`highlights`, `injections`, `indents`, `textobjects`, `folds`, `locals`; `; inherits:` and `; extends` work).",
+    ),
+    (
         "mnote.feedkeys",
         "(keys)",
         "Runs keys in Vim notation (`ggdd`, `<C-w>v`, `<leader>f`) as if typed, through the keymap, mappings and Vim, once the function returns.",
@@ -1751,6 +1827,33 @@ mod tests {
         // The clipboard needs the window: outside a call it says so.
         let err = host("mnote.clipboard.get()").err().unwrap_or_default();
         assert!(err.contains("inside a command or a key"), "{err}");
+        // A language from Lua, checked like a language.toml.
+        let err = host(r#"mnote.lang.register({ name = "x", extensions = "x" })"#)
+            .err()
+            .unwrap_or_default();
+        assert!(err.contains("extensions should be a list"), "{err}");
+        let err = host(r#"mnote.lang.register({ name = "x", queries = { colours = "" } })"#)
+            .err()
+            .unwrap_or_default();
+        assert!(err.contains("the kinds are"), "{err}");
+        host(
+            r#"mnote.lang.register({
+              name = "plugin-test-lang",
+              extensions = { "ptl" },
+              comment = { line = "%%" },
+              brackets = { { "<", ">" } },
+              queries = { folds = "(x) @fold" },
+            })"#,
+        )
+        .expect("registers");
+        let pack = mnote_core::lang::languages::pack("plugin-test-lang").expect("added");
+        assert_eq!(pack.comment.line.as_deref(), Some("%%"));
+        assert_eq!(pack.brackets, [("<".to_owned(), ">".to_owned())]);
+        assert!(mnote_core::lang::languages::query("plugin-test-lang", "folds").is_some());
+        assert_eq!(
+            mnote_core::filetype::for_path(std::path::Path::new("a.ptl")).map(|f| f.name),
+            Some("plugin-test-lang".into())
+        );
     }
 
     #[test]

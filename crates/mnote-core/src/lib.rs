@@ -26,6 +26,8 @@ use std::path::Path;
 
 // The language layer moved to `mnote-lang`; these keep the old paths
 // (`mnote_core::code`, `mnote_core::filetype`) working.
+/// The language layer: packs, the registry, queries.
+pub use mnote_lang as lang;
 pub use mnote_lang::{code, filetype};
 
 pub use error::{Result, VaultError};

@@ -388,6 +388,14 @@ pub fn builtin() -> Vec<Command> {
         .shown_as("plugins")
         .ex("plugins", 4, ArgKind::None),
         Command::new(
+            "messages",
+            "Show messages",
+            "The messages shown so far (toasts, problems with plugins or language packs), oldest first.",
+            act(|e, _, _| e.list_messages()),
+        )
+        .shown_as("messages")
+        .ex("messages", 3, ArgKind::None),
+        Command::new(
             "permissions",
             "Show permissions",
             "What mNote was allowed to run (plugins, later grammars and servers); pick one to take it back.",

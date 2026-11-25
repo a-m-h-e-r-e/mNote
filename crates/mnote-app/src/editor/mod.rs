@@ -237,6 +237,11 @@ pub struct Editor {
     plugins_tried: bool,
     /// What the user allowed to run (plugins; later grammars and servers).
     pub(super) permissions: mnote_core::permissions::Permissions,
+    /// Where language packs were last loaded from (reloaded when that
+    /// changes).
+    language_sources: Option<mnote_core::lang::languages::Sources>,
+    /// Toasts and problems so far, for `:messages`.
+    pub(super) messages: std::collections::VecDeque<String>,
     /// Block renderers, tried in order (see `blocks`).
     blocks: Rc<Vec<(String, blocks::BlockRenderer)>>,
 }
@@ -364,6 +369,8 @@ impl Editor {
             plugins: Vec::new(),
             plugins_tried: false,
             permissions: plugin_list::load_permissions(),
+            language_sources: None,
+            messages: std::collections::VecDeque::new(),
             lines: ListState::new(buffer.text().len_lines(), ListAlignment::Top, px(400.)),
             buffer,
             vim,
@@ -627,8 +634,11 @@ impl Editor {
     /// and (on macOS) the global keys. At startup and when config.toml is
     /// saved.
     pub fn apply_config(&mut self, config: Config, cx: &mut Context<Self>) {
-        // Plugins first, so their commands and keys join the keymap below.
+        // Language packs, then plugins (which may add languages), so their
+        // commands and keys join the keymap below.
+        self.load_languages(&config);
         self.load_plugins(&config, cx);
+        self.report_language_problems(cx);
         // Only a changed setting moves the view, so `space m` choices stay.
         if config.view != self.config.view {
             self.view = styled::View::from_config(config.view);

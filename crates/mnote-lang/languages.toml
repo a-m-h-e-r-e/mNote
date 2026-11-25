@@ -1,0 +1,207 @@
+# mNote's built-in language packs, one table each (ADR-0003). The same
+# fields as a user's ~/.config/mnote/languages/<name>/language.toml, which
+# overrides any of them field by field.
+#
+# Eight have a grammar built into mNote (markdown, rust, python, javascript,
+# typescript, tsx, bash, json); the others name a grammar that's loaded at
+# run time (from Neovim's parser folders, or one you install).
+
+[markdown]
+name = "markdown"
+aliases = ["md"]
+extensions = ["md", "markdown"]
+comment = { block = ["<!--", "-->"] }
+indent = { unit = "  ", tab_width = 4 }
+servers = ["marksman"]
+
+[rust]
+name = "rust"
+aliases = ["rs"]
+extensions = ["rs"]
+comment = { line = "//", block = ["/*", "*/"] }
+roots = ["Cargo.toml", ".git"]
+servers = ["rust-analyzer"]
+formatter = ["rustfmt", "--emit=stdout", "--edition=2024"]
+
+[python]
+name = "python"
+aliases = ["py", "python3"]
+extensions = ["py", "pyi", "pyw"]
+shebangs = ["python", "python3"]
+comment = { line = "#" }
+brackets = [["(", ")"], ["[", "]"], ["{", "}"]]
+roots = ["pyproject.toml", "setup.py", "requirements.txt", ".git"]
+servers = ["pyright"]
+
+[javascript]
+name = "javascript"
+aliases = ["js", "jsx", "mjs", "cjs"]
+extensions = ["js", "mjs", "cjs", "jsx"]
+shebangs = ["node"]
+comment = { line = "//", block = ["/*", "*/"] }
+indent = { unit = "  ", tab_width = 2 }
+roots = ["package.json", ".git"]
+servers = ["typescript-language-server"]
+
+[typescript]
+name = "typescript"
+aliases = ["ts", "mts", "cts"]
+extensions = ["ts", "mts", "cts"]
+comment = { line = "//", block = ["/*", "*/"] }
+indent = { unit = "  ", tab_width = 2 }
+roots = ["tsconfig.json", "package.json", ".git"]
+servers = ["typescript-language-server"]
+
+[tsx]
+name = "tsx"
+extensions = ["tsx"]
+comment = { line = "//", block = ["/*", "*/"] }
+indent = { unit = "  ", tab_width = 2 }
+roots = ["tsconfig.json", "package.json", ".git"]
+servers = ["typescript-language-server"]
+
+[bash]
+name = "bash"
+aliases = ["sh", "shell", "zsh", "console"]
+extensions = ["sh", "bash", "zsh"]
+filenames = [".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile"]
+shebangs = ["sh", "bash", "zsh", "dash"]
+comment = { line = "#" }
+indent = { unit = "  ", tab_width = 4 }
+servers = ["bash-language-server"]
+
+[json]
+name = "json"
+aliases = ["jsonc"]
+extensions = ["json", "jsonc"]
+indent = { unit = "  ", tab_width = 2 }
+servers = ["vscode-json-language-server"]
+
+[c]
+name = "c"
+extensions = ["c", "h"]
+comment = { line = "//", block = ["/*", "*/"] }
+roots = ["compile_commands.json", "Makefile", ".git"]
+servers = ["clangd"]
+formatter = ["clang-format"]
+
+[cpp]
+name = "cpp"
+aliases = ["c++", "cxx"]
+extensions = ["cpp", "cc", "cxx", "hpp", "hh", "hxx"]
+comment = { line = "//", block = ["/*", "*/"] }
+roots = ["compile_commands.json", "CMakeLists.txt", ".git"]
+servers = ["clangd"]
+formatter = ["clang-format"]
+
+[go]
+name = "go"
+extensions = ["go"]
+comment = { line = "//", block = ["/*", "*/"] }
+indent = { unit = "\t", tab_width = 4 }
+roots = ["go.mod", ".git"]
+servers = ["gopls"]
+formatter = ["gofmt"]
+
+[lua]
+name = "lua"
+extensions = ["lua"]
+shebangs = ["lua", "luajit"]
+comment = { line = "--", block = ["--[[", "]]"] }
+indent = { unit = "  ", tab_width = 2 }
+roots = [".luarc.json", "stylua.toml", ".git"]
+servers = ["lua-language-server"]
+formatter = ["stylua", "-"]
+
+[toml]
+name = "toml"
+extensions = ["toml"]
+filenames = ["Cargo.lock"]
+comment = { line = "#" }
+servers = ["taplo"]
+
+[yaml]
+name = "yaml"
+aliases = ["yml"]
+extensions = ["yaml", "yml"]
+comment = { line = "#" }
+indent = { unit = "  ", tab_width = 2 }
+servers = ["yaml-language-server"]
+
+[html]
+name = "html"
+extensions = ["html", "htm"]
+comment = { block = ["<!--", "-->"] }
+indent = { unit = "  ", tab_width = 2 }
+brackets = [["<", ">"], ["(", ")"], ["[", "]"], ["{", "}"]]
+servers = ["vscode-html-language-server"]
+
+[css]
+name = "css"
+extensions = ["css"]
+comment = { block = ["/*", "*/"] }
+indent = { unit = "  ", tab_width = 2 }
+servers = ["vscode-css-language-server"]
+
+[java]
+name = "java"
+extensions = ["java"]
+comment = { line = "//", block = ["/*", "*/"] }
+roots = ["pom.xml", "build.gradle", "build.gradle.kts", ".git"]
+servers = ["jdtls"]
+
+[ruby]
+name = "ruby"
+aliases = ["rb"]
+extensions = ["rb", "rake", "gemspec"]
+filenames = ["Gemfile", "Rakefile"]
+shebangs = ["ruby"]
+comment = { line = "#" }
+indent = { unit = "  ", tab_width = 2 }
+roots = ["Gemfile", ".git"]
+servers = ["ruby-lsp"]
+
+[zig]
+name = "zig"
+extensions = ["zig", "zon"]
+comment = { line = "//" }
+roots = ["build.zig", ".git"]
+servers = ["zls"]
+formatter = ["zig", "fmt", "--stdin"]
+
+[swift]
+name = "swift"
+extensions = ["swift"]
+comment = { line = "//", block = ["/*", "*/"] }
+roots = ["Package.swift", ".git"]
+servers = ["sourcekit-lsp"]
+
+[kotlin]
+name = "kotlin"
+aliases = ["kt"]
+extensions = ["kt", "kts"]
+comment = { line = "//", block = ["/*", "*/"] }
+roots = ["build.gradle.kts", "settings.gradle.kts", ".git"]
+servers = ["kotlin-language-server"]
+
+[sql]
+name = "sql"
+extensions = ["sql"]
+comment = { line = "--", block = ["/*", "*/"] }
+indent = { unit = "  ", tab_width = 2 }
+
+[make]
+name = "make"
+aliases = ["makefile"]
+extensions = ["mk"]
+filenames = ["Makefile", "makefile", "GNUmakefile"]
+comment = { line = "#" }
+indent = { unit = "\t", tab_width = 8 }
+
+[dockerfile]
+name = "dockerfile"
+aliases = ["docker"]
+extensions = ["dockerfile"]
+filenames = ["Dockerfile", "Containerfile"]
+comment = { line = "#" }
+servers = ["docker-langserver"]

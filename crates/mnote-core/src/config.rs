@@ -272,6 +272,9 @@ pub struct Config {
     pub wrap_motion: bool,
     /// Lines kept on screen above and below the cursor (`:set scrolloff`).
     pub scrolloff: u32,
+    /// Use Neovim's tree-sitter queries (and later its parsers) when it's
+    /// installed.
+    pub reuse_neovim: bool,
     /// Long lines wrap (`:set wrap`); off, the note scrolls sideways.
     pub wrap: bool,
     /// Vim mappings (`"nnoremap j gj"`), run at start and on save; they
@@ -335,6 +338,7 @@ impl Default for Config {
             system_clipboard: true,
             wrap_motion: false,
             scrolloff: 0,
+            reuse_neovim: true,
             wrap: true,
             mappings: None,
             keys: Vec::new(),
@@ -564,6 +568,9 @@ impl Config {
                 "wrap_motion" => {
                     config.wrap_motion = value.as_bool().ok_or_else(|| wrong("true or false"))?;
                 }
+                "reuse_neovim" => {
+                    config.reuse_neovim = value.as_bool().ok_or_else(|| wrong("true or false"))?;
+                }
                 "scrolloff" => {
                     config.scrolloff = value
                         .as_integer()
@@ -784,6 +791,17 @@ impl Config {
                     on_off(d.wrap_motion)
                 ),
                 on_off(self.wrap_motion).into(),
+            ),
+            Setting::new(
+                "reuse_neovim",
+                &format!(
+                    "Use Neovim's tree-sitter queries (and later its parsers and language\n\
+                     servers) when it's installed, so languages look the same as there.\n\
+                     Language packs in ~/.config/mnote/languages/ override them.\n\
+                     Values: true, false. Default: {}",
+                    on_off(d.reuse_neovim)
+                ),
+                on_off(self.reuse_neovim).into(),
             ),
             Setting::new(
                 "scrolloff",
@@ -1144,6 +1162,7 @@ mod tests {
             system_clipboard: false,
             wrap_motion: true,
             scrolloff: 5,
+            reuse_neovim: false,
             wrap: false,
             panel_radius: Some(0),
             panel_shadow: false,

@@ -260,6 +260,8 @@ impl Editor {
                 handler(self, &event, cx);
             }
         }
+        // A query read for a note just opened may have had a problem.
+        self.report_language_problems(cx);
     }
 
     /// The built-in subscribers: word count and git blame.

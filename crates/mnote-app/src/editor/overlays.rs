@@ -366,6 +366,7 @@ impl Editor {
 
     /// Shows a toast for about four seconds.
     pub(super) fn show_toast(&mut self, text: String, undo: bool, cx: &mut Context<Self>) {
+        self.remember_message(&text);
         self.toast = Some((text.into(), undo));
         self.toast_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_secs(4)).await;
@@ -374,6 +375,56 @@ impl Editor {
                 cx.notify();
             });
         }));
+    }
+
+    /// Keeps `text` for `:messages` (the last 200).
+    pub(super) fn remember_message(&mut self, text: &str) {
+        if self.messages.len() == 200 {
+            self.messages.pop_front();
+        }
+        self.messages.push_back(text.to_owned());
+    }
+
+    /// `:messages`: the toasts and problems so far, oldest first.
+    pub(super) fn list_messages(&mut self) {
+        if self.messages.is_empty() {
+            self.vim.show_message("No messages yet.".to_owned());
+            return;
+        }
+        let text = self.messages.iter().cloned().collect::<Vec<_>>().join("\n");
+        self.vim.show_message(text);
+    }
+
+    /// Loads the language packs if where they come from changed (at start,
+    /// and when config.toml's `reuse_neovim` changes).
+    pub(super) fn load_languages(&mut self, config: &Config) {
+        let config_dir = Config::path().and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+        let sources = mnote_core::lang::languages::Sources::standard(
+            config_dir.as_deref(),
+            config.reuse_neovim,
+        );
+        if self.language_sources.as_ref() != Some(&sources) {
+            mnote_core::lang::languages::load(&sources);
+            self.language_sources = Some(sources);
+        }
+    }
+
+    /// Problems with language packs or queries found since last time: kept
+    /// for `:messages`, the first shown.
+    pub(super) fn report_language_problems(&mut self, cx: &mut Context<Self>) {
+        let problems = mnote_core::lang::languages::take_problems();
+        let Some(first) = problems.first() else {
+            return;
+        };
+        let more = match problems.len() {
+            1 => " (:messages lists it)".to_owned(),
+            n => format!(" (and {} more: :messages)", n - 1),
+        };
+        let toast = format!("Language pack: {first}{more}");
+        for p in &problems[1..] {
+            self.remember_message(&format!("Language pack: {p}"));
+        }
+        self.show_toast(toast, false, cx);
     }
 
     pub(super) fn picker_action(&mut self, action: PickerAction, cx: &mut Context<Self>) {

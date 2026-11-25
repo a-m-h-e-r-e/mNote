@@ -54,6 +54,7 @@ Settings for a plugin go in its table and reach it through `mnote.config("tasks"
 - `mnote.undecorate(namespace)`: Removes every decoration in the namespace.
 - `mnote.open(path, { line })`: Opens a note of the vault (`journal/today`, `.md` optional), at `line` (0-based) if given, once the function returns. A note that doesn't exist is reported.
 - `mnote.apply_edits({ { note, first, last, lines }, … }, { label })`: Replaces lines `first..last` (as `mnote.buf.set_lines` counts them) in several notes as one undo step, once the function returns. Notes that aren't open are opened in the background, edited and saved. `u` in any of them undoes the whole edit in all of them that haven't changed since. Edits to one note mustn't overlap.
+- `mnote.lang.register({ name, extensions, comment, indent, …, queries = { highlights = "…" } })`: Adds a language, or overrides fields of one: the fields of a `language.toml` (see `docs/architecture/code-support.md`), and its queries by kind (`highlights`, `injections`, `indents`, `textobjects`, `folds`, `locals`; `; inherits:` and `; extends` work).
 - `mnote.feedkeys(keys)`: Runs keys in Vim notation (`ggdd`, `<C-w>v`, `<leader>f`) as if typed, through the keymap, mappings and Vim, once the function returns.
 - `mnote.cmd(line)`: Runs an Ex line (`set so=5`, `w`, `daily`; a leading `:` is fine) once the function returns.
 - `mnote.clipboard.get() -> text | nil`: The system clipboard's text.
