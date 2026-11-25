@@ -388,6 +388,14 @@ pub fn builtin() -> Vec<Command> {
         .shown_as("plugins")
         .ex("plugins", 4, ArgKind::None),
         Command::new(
+            "permissions",
+            "Show permissions",
+            "What mNote was allowed to run (plugins, later grammars and servers); pick one to take it back.",
+            act(|e, _, cx| e.list_permissions(cx)),
+        )
+        .shown_as("permissions")
+        .ex("permissions", 5, ArgKind::None),
+        Command::new(
             "plugin-api",
             "Show the plugin API",
             "Every mnote function and event a plugin can use, in short.",

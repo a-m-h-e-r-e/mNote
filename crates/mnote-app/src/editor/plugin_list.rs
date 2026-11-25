@@ -9,8 +9,9 @@
 //! ```
 //!
 //! The first time an enabled plugin would run (or after its code changed)
-//! mNote asks, since a plugin can do anything you can; the answer is kept in
-//! `plugins/.trusted`. A plugin for another API version is skipped, a broken
+//! mNote asks, since a plugin can do anything you can; the answer goes in
+//! the permission store (`mnote_core::permissions`), which took over the old
+//! `plugins/.trusted` file. A plugin for another API version is skipped, a broken
 //! one is reported and the rest still load, and one that keeps failing is
 //! turned off for the session (see `plugins`). `:plugins` lists them all with
 //! how long each took to load. Your own `init.lua` loads last, unasked.
@@ -22,8 +23,13 @@ use std::time::Instant;
 use gpui::Context;
 use mnote_core::config::Config;
 
+use mnote_core::permissions::{Kind, Permissions, Scope};
+
 use super::Editor;
 use super::plugins::LuaHost;
+
+/// What a permission prompt does with the answer (`None`: not now).
+pub(super) type PermissionAnswer = Rc<dyn Fn(&mut Editor, Option<Scope>, &mut Context<Editor>)>;
 
 /// The plugin API this mNote offers: plugin.toml's `api`.
 pub const PLUGIN_API: i64 = 1;
@@ -113,41 +119,23 @@ pub fn discover(dir: &Path) -> Vec<(String, PathBuf)> {
     found
 }
 
-/// A fingerprint of a plugin's code (plugin.toml and init.lua), so trust is
-/// asked again when they change. FNV-1a: stable across runs and builds.
+/// A fingerprint of a plugin's code (plugin.toml and init.lua), so its OK
+/// is asked again when they change. The same one `plugins/.trusted` kept,
+/// so plugins allowed there stay allowed.
 pub fn fingerprint(dir: &Path) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for file in ["plugin.toml", "init.lua"] {
-        for byte in std::fs::read(dir.join(file)).unwrap_or_default() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    mnote_core::permissions::fingerprint_files(&[&dir.join("plugin.toml"), &dir.join("init.lua")])
+}
+
+/// The permission store, carrying over the old `plugins/.trusted` the first
+/// time; in memory only without a config folder.
+pub fn load_permissions() -> Permissions {
+    match Permissions::default_path() {
+        Some(path) => {
+            let legacy = plugins_dir().map(|d| d.join(".trusted"));
+            Permissions::load(path, legacy.as_deref())
         }
-        hash ^= 0xff;
+        None => Permissions::in_memory(),
     }
-    hash
-}
-
-/// Whether plugin `name` with this fingerprint was allowed to run, in the
-/// trust file's lines (`name fingerprint`).
-pub fn trusted(trust: &str, name: &str, print: u64) -> bool {
-    let want = format!("{name} {print:016x}");
-    trust.lines().any(|l| l.trim() == want)
-}
-
-/// The trust file with plugin `name` allowed at this fingerprint (its
-/// older lines dropped).
-pub fn trust(trust: &str, name: &str, print: u64) -> String {
-    let mut lines: Vec<String> = trust
-        .lines()
-        .filter(|l| l.split_whitespace().next() != Some(name))
-        .map(str::to_owned)
-        .collect();
-    lines.push(format!("{name} {print:016x}"));
-    lines.join("\n") + "\n"
-}
-
-fn trust_file() -> Option<PathBuf> {
-    Some(plugins_dir()?.join(".trusted"))
 }
 
 impl Editor {
@@ -162,9 +150,6 @@ impl Editor {
             return;
         }
         self.plugins_tried = true;
-        let trust = trust_file()
-            .and_then(|f| std::fs::read_to_string(f).ok())
-            .unwrap_or_default();
         let dir = plugins_dir();
         for (name, path) in dir.as_deref().map(discover).unwrap_or_default() {
             let manifest = std::fs::read_to_string(path.join("plugin.toml"))
@@ -183,7 +168,10 @@ impl Editor {
                         Status::Off
                     } else if m.api != PLUGIN_API {
                         Status::WrongApi(m.api)
-                    } else if !trusted(&trust, &name, fingerprint(&path)) {
+                    } else if !self
+                        .permissions
+                        .allowed(Kind::Plugin, &name, fingerprint(&path))
+                    {
                         Status::Waiting
                     } else {
                         Status::Loaded
@@ -289,51 +277,131 @@ impl Editor {
         };
         let name = self.plugins[ix].name.clone();
         let about = self.plugins[ix].description.clone();
-        let items = vec![
-            crate::picker::custom::Item {
-                text: "Run it".into(),
-                detail: Some("it can do anything you can".into()),
-            },
-            crate::picker::custom::Item {
-                text: "Not now".into(),
-                detail: Some("ask again next time".into()),
-            },
-        ];
         let title = if about.is_empty() {
             format!("Run the plugin {name}?")
         } else {
             format!("Run the plugin {name}? {about}")
         };
+        let what = match &self.plugins[ix].dir {
+            Some(dir) => format!("its code in {}: it can do anything you can", dir.display()),
+            None => "it can do anything you can".into(),
+        };
+        self.ask_permission(
+            title,
+            what,
+            Rc::new(move |e, scope, cx| e.answer_plugin(ix, scope, cx)),
+            cx,
+        );
+    }
+
+    /// The answer about plugin `ix`: run it (remembered for `scope`), or
+    /// not now (`None`).
+    fn answer_plugin(&mut self, ix: usize, scope: Option<Scope>, cx: &mut Context<Self>) {
+        let Some(entry) = self.plugins.get_mut(ix) else {
+            return;
+        };
+        match scope {
+            Some(scope) => {
+                if let Some(dir) = entry.dir.clone() {
+                    let name = entry.name.clone();
+                    self.permissions
+                        .allow(Kind::Plugin, &name, fingerprint(&dir), scope);
+                }
+                let config = self.config.clone();
+                self.start_plugin(ix, &config, cx);
+            }
+            None => entry.status = Status::Failed("not allowed to run yet".into()),
+        }
+        self.ask_next_plugin(cx);
+        cx.notify();
+    }
+
+    /// Asks whether something may run, in one picker for everything that
+    /// needs an OK: "Allow always", "Allow this session", "Not now".
+    /// `what` says exactly what would run or be read.
+    pub(super) fn ask_permission(
+        &mut self,
+        title: String,
+        what: String,
+        answer: PermissionAnswer,
+        cx: &mut Context<Self>,
+    ) {
+        let items = vec![
+            crate::picker::custom::Item {
+                text: "Allow always".into(),
+                detail: Some(what),
+            },
+            crate::picker::custom::Item {
+                text: "Allow this session".into(),
+                detail: Some("asked again when mNote starts next".into()),
+            },
+            crate::picker::custom::Item {
+                text: "Not now".into(),
+                detail: Some("asked again next time".into()),
+            },
+        ];
         let picker = crate::picker::custom::CustomPicker::new(
             title,
             items,
             Rc::new(move |choice| {
-                crate::picker::PickerCallback(Rc::new(move |e, cx| {
-                    e.answer_plugin(ix, choice == 0, cx)
-                }))
+                let answer = answer.clone();
+                let scope = match choice {
+                    0 => Some(Scope::Always),
+                    1 => Some(Scope::Session),
+                    _ => None,
+                };
+                crate::picker::PickerCallback(Rc::new(move |e, cx| answer(e, scope, cx)))
             }),
         );
         self.open_picker(crate::picker::Picker::new(Box::new(picker)), cx);
     }
 
-    /// The answer about plugin `ix`: run it (and remember), or not now.
-    fn answer_plugin(&mut self, ix: usize, run: bool, cx: &mut Context<Self>) {
-        let Some(entry) = self.plugins.get_mut(ix) else {
+    /// `:permissions`: everything allowed to run; picking one takes its OK
+    /// back (it's asked for again next time).
+    pub(super) fn list_permissions(&mut self, cx: &mut Context<Self>) {
+        let grants = self.permissions.grants();
+        if grants.is_empty() {
+            self.vim
+                .show_message("Nothing has been allowed to run yet.".to_owned());
             return;
-        };
-        if run {
-            if let (Some(dir), Some(file)) = (entry.dir.clone(), trust_file()) {
-                let old = std::fs::read_to_string(&file).unwrap_or_default();
-                let new = trust(&old, &entry.name, fingerprint(&dir));
-                let _ = mnote_core::config::write_file(&file, &new);
-            }
-            let config = self.config.clone();
-            self.start_plugin(ix, &config, cx);
-        } else {
-            entry.status = Status::Failed("not allowed to run yet".into());
         }
-        self.ask_next_plugin(cx);
-        cx.notify();
+        let items: Vec<crate::picker::custom::Item> = grants
+            .iter()
+            .map(|g| crate::picker::custom::Item {
+                text: format!("{} {}", g.kind, g.name),
+                detail: Some(format!(
+                    "{}, code {:08x}",
+                    match g.scope {
+                        Scope::Always => "always",
+                        Scope::Session => "this session",
+                        Scope::Once => "once",
+                    },
+                    g.fingerprint >> 32
+                )),
+            })
+            .collect();
+        let picker = crate::picker::custom::CustomPicker::new(
+            "Permissions: pick one to take it back".into(),
+            items,
+            Rc::new(move |index| {
+                let grant = grants.get(index).cloned();
+                crate::picker::PickerCallback(Rc::new(move |e, cx| {
+                    if let Some(g) = &grant
+                        && e.permissions.revoke(g.kind, &g.name)
+                    {
+                        e.show_toast(
+                            format!(
+                                "{} {} will ask again next time (what's running keeps running)",
+                                g.kind, g.name
+                            ),
+                            false,
+                            cx,
+                        );
+                    }
+                }))
+            }),
+        );
+        self.open_picker(crate::picker::Picker::new(Box::new(picker)), cx);
     }
 
     /// `:plugins`: each plugin, its version, how it stands and its load time.
@@ -395,18 +463,26 @@ mod tests {
     }
 
     #[test]
-    fn trust_is_per_plugin_and_fingerprint() {
-        let file = trust("", "tasks", 7);
-        assert!(trusted(&file, "tasks", 7));
-        assert!(!trusted(&file, "tasks", 8), "its code changed");
-        assert!(!trusted(&file, "other", 7));
-        let file = trust(&file, "tasks", 8);
-        assert!(
-            trusted(&file, "tasks", 8) && !trusted(&file, "tasks", 7),
-            "replaced"
-        );
-        let file = trust(&file, "wordgoal", 1);
-        assert!(trusted(&file, "tasks", 8) && trusted(&file, "wordgoal", 1));
+    fn the_fingerprint_is_the_one_trusted_before() {
+        // plugins/.trusted's fingerprint, as it was computed: FNV-1a over
+        // plugin.toml then init.lua, each followed by 0xff.
+        fn old(dir: &Path) -> u64 {
+            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+            for file in ["plugin.toml", "init.lua"] {
+                for byte in std::fs::read(dir.join(file)).unwrap_or_default() {
+                    hash ^= u64::from(byte);
+                    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+                hash ^= 0xff;
+            }
+            hash
+        }
+        let dir = std::env::temp_dir().join(format!("mnote-print-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        std::fs::write(dir.join("plugin.toml"), "name = \"x\"").expect("write");
+        std::fs::write(dir.join("init.lua"), "-- x").expect("write");
+        assert_eq!(fingerprint(&dir), old(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

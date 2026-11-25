@@ -1053,7 +1053,12 @@ pub fn write_file(path: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!(".config.toml.mnote-tmp-{}", std::process::id()));
+    // Named after the file, so two files written in one folder don't share
+    // a temporary name.
+    let name = path
+        .file_name()
+        .map_or_else(|| "file".into(), |n| n.to_string_lossy());
+    let tmp = dir.join(format!(".{name}.mnote-tmp-{}", std::process::id()));
     let written = (|| {
         let mut file = std::fs::File::create(&tmp)?;
         file.write_all(text.as_bytes())?;

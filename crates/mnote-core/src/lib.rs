@@ -16,6 +16,7 @@ pub mod index;
 pub mod links;
 pub mod mentions;
 mod note_path;
+pub mod permissions;
 pub mod styled;
 pub mod text;
 mod vault;

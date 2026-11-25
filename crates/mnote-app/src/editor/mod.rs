@@ -235,6 +235,8 @@ pub struct Editor {
     /// whether loading was tried.
     plugins: Vec<plugin_list::Entry>,
     plugins_tried: bool,
+    /// What the user allowed to run (plugins; later grammars and servers).
+    pub(super) permissions: mnote_core::permissions::Permissions,
     /// Block renderers, tried in order (see `blocks`).
     blocks: Rc<Vec<(String, blocks::BlockRenderer)>>,
 }
@@ -361,6 +363,7 @@ impl Editor {
             blocks: Rc::default(),
             plugins: Vec::new(),
             plugins_tried: false,
+            permissions: plugin_list::load_permissions(),
             lines: ListState::new(buffer.text().len_lines(), ListAlignment::Top, px(400.)),
             buffer,
             vim,

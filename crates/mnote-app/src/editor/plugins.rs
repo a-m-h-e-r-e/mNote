@@ -1581,7 +1581,7 @@ Plugins are Lua 5.4. Each lives in a folder of its own:\n\n\
     out.push_str(
         "A plugin runs when config.toml turns it on (above any `[table]`, or as its own table):\n\n\
 ```toml\nplugins.tasks.enabled = true\n```\n\n\
-The first time it would run, or after its code changed, mNote asks: a plugin can do anything you can. \
+The first time it would run, or after its code changed, mNote asks (allow always, for this session, or not now): a plugin can do anything you can. `:permissions` lists what's allowed and takes an OK back. \
 `:plugins` lists the installed plugins, whether each runs, and how long it took to load. \
 A plugin for another API version is skipped; one with an error is reported and the others still load; \
 one that fails three times is turned off until mNote restarts. Commands and keys slower than 2 ms say so. \
