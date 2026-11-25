@@ -405,6 +405,11 @@ impl Editor {
         );
         if self.language_sources.as_ref() != Some(&sources) {
             mnote_core::lang::languages::load(&sources);
+            let neovim_data = sources.neovim.as_ref().map(|(_, data)| data.as_path());
+            mnote_core::lang::grammar::set_folders(mnote_core::lang::grammar::folders(
+                config_dir.as_deref(),
+                neovim_data,
+            ));
             self.language_sources = Some(sources);
         }
     }

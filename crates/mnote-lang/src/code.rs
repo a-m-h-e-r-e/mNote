@@ -77,10 +77,13 @@ struct Entry {
     def: LanguageDef,
     /// The language pack it comes from, whose highlight query it uses.
     pack: Option<String>,
-    /// The grammar crate's own highlight query, used until Neovim's
-    /// queries (with their own predicates and capture names) are supported
-    /// for highlighting (AMI-216).
+    /// The grammar crate's own highlight query, used for a built-in grammar
+    /// until Neovim's queries (with their own predicates and capture
+    /// names) are supported for highlighting (AMI-216).
     fallback: Vec<String>,
+    /// A grammar loaded at run time (from Neovim, say): its pack's queries
+    /// from any layer fit it, Neovim's included.
+    loaded: bool,
     /// The compiled query, on first use.
     grammar: OnceLock<Option<Grammar>>,
 }
@@ -99,7 +102,7 @@ impl Entry {
             return self.def.highlights.clone();
         };
         match crate::languages::query(pack, "highlights") {
-            Some(q) if q.layer == crate::queries::Layer::User => vec![q.text],
+            Some(q) if self.loaded || q.layer == crate::queries::Layer::User => vec![q.text],
             _ => self.fallback.clone(),
         }
     }
@@ -209,16 +212,29 @@ fn entries() -> Vec<Arc<Entry>> {
     let mut out: Vec<Arc<Entry>> = crate::languages::packs()
         .into_iter()
         .filter_map(|pack| {
-            let builtin = grammars.iter().find(|b| b.grammar == pack.grammar)?;
+            let builtin = grammars.iter().find(|b| b.grammar == pack.grammar);
+            let (language, fallback, loaded) = match builtin {
+                Some(b) => (
+                    b.language.clone(),
+                    b.highlights.iter().map(|q| (*q).to_owned()).collect(),
+                    false,
+                ),
+                None => (
+                    crate::grammar::loaded_language(&pack.grammar)?,
+                    Vec::new(),
+                    true,
+                ),
+            };
             Some(Arc::new(Entry {
                 def: LanguageDef {
                     name: pack.name.clone(),
                     aliases: pack.aliases.clone(),
-                    language: builtin.language.clone(),
+                    language,
                     highlights: Vec::new(),
                 },
                 pack: Some(pack.name),
-                fallback: builtin.highlights.iter().map(|q| (*q).to_owned()).collect(),
+                fallback,
+                loaded,
                 grammar: OnceLock::new(),
             }))
         })
@@ -230,6 +246,7 @@ fn entries() -> Vec<Arc<Entry>> {
                 def: def.clone(),
                 pack: None,
                 fallback: Vec::new(),
+                loaded: false,
                 grammar: OnceLock::new(),
             }));
         }

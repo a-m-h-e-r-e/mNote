@@ -16,6 +16,7 @@ pub mod commands;
 mod edit_groups;
 pub mod events;
 mod first_run;
+mod grammars;
 mod ime;
 mod input;
 pub(crate) mod keys;
@@ -242,6 +243,10 @@ pub struct Editor {
     language_sources: Option<mnote_core::lang::languages::Sources>,
     /// Toasts and problems so far, for `:messages`.
     pub(super) messages: std::collections::VecDeque<String>,
+    /// Fence languages whose grammar was looked for this session (loaded,
+    /// asked about, or not found), and those waiting to be.
+    grammars_seen: std::collections::HashSet<String>,
+    grammars_wanted: Vec<String>,
     /// Block renderers, tried in order (see `blocks`).
     blocks: Rc<Vec<(String, blocks::BlockRenderer)>>,
 }
@@ -371,6 +376,8 @@ impl Editor {
             permissions: plugin_list::load_permissions(),
             language_sources: None,
             messages: std::collections::VecDeque::new(),
+            grammars_seen: Default::default(),
+            grammars_wanted: Vec::new(),
             lines: ListState::new(buffer.text().len_lines(), ListAlignment::Top, px(400.)),
             buffer,
             vim,

@@ -10,6 +10,7 @@ pub mod code;
 pub mod coords;
 pub mod error;
 pub mod filetype;
+pub mod grammar;
 pub mod languages;
 pub mod pack;
 pub mod queries;

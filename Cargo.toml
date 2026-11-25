@@ -24,6 +24,13 @@ ropey = { version = "1.6.1", default-features = false, features = ["simd"] }
 # tree-sitter + tree-sitter-md: incremental Markdown parsing for structure (headings, lists,
 # code fences) and source-view highlighting. Grammars only, no bundled parser wrapper.
 tree-sitter = "0.27.1"
+# tree-sitter-language: the type a grammar's language function has, for
+# grammars loaded at run time (ADR-0002). Already locked (the grammar crates
+# use it).
+tree-sitter-language = "0.1.9"
+# libloading: opens grammar libraries at run time, in mnote-lang's one unsafe
+# module (ADR-0002). Already locked through gpui.
+libloading = "0.8.9"
 tree-sitter-md = { version = "0.5.4", default-features = false }
 # Grammars for coloring code blocks in the styled view: a short list of common
 # languages; others show plain. Grammars only (no bundled parser wrappers).

@@ -82,7 +82,7 @@ impl Editor {
         }
         if let LineKind::Code { lang, block } = &kind
             && !plain_view
-            && let Some(spans) = self.code_spans(lang, block.clone(), ix)
+            && let Some(spans) = self.code_spans(lang, block.clone(), ix, cx)
         {
             look.styling = styled::code_styling(&spans, p);
         }
@@ -794,8 +794,11 @@ impl Editor {
         lang: &str,
         block: std::ops::Range<usize>,
         ix: usize,
+        cx: &mut Context<Self>,
     ) -> Option<Vec<(std::ops::Range<usize>, CodeStyle)>> {
         if !mnote_core::code::supported(lang) {
+            // A grammar may be loadable (Neovim's, say): asked after the frame.
+            self.want_grammar(lang, cx);
             return None;
         }
         let revision = self.buffer.revision();

@@ -2868,6 +2868,7 @@ dependencies = [
 name = "mnote-lang"
 version = "0.1.0"
 dependencies = [
+ "libloading",
  "regex",
  "ropey",
  "toml 1.2.2+spec-1.1.0",
@@ -2875,6 +2876,7 @@ dependencies = [
  "tree-sitter-bash",
  "tree-sitter-javascript",
  "tree-sitter-json",
+ "tree-sitter-language",
  "tree-sitter-md",
  "tree-sitter-python",
  "tree-sitter-rust",
