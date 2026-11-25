@@ -33,6 +33,9 @@ pub enum MarkKind {
     /// note: an inlay hint, later an inline suggestion. The cursor and the
     /// selection skip over it.
     Ghost { text: String, color: String },
+    /// A hunk of a proposal (see `proposals`): its range would become
+    /// `new`. The review draws it as a diff.
+    Proposal { proposal: u64, new: String },
 }
 
 /// A decoration.
@@ -84,6 +87,11 @@ impl Marks {
             end_bias,
         });
         self.next_id
+    }
+
+    /// The decoration with id `id`, if it's still there.
+    pub fn get(&self, id: u64) -> Option<&Mark> {
+        self.marks.iter().find(|m| m.id == id)
     }
 
     pub fn remove(&mut self, id: u64) {

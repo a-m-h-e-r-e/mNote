@@ -10,6 +10,7 @@ mod changes;
 mod groups;
 mod history;
 mod marks;
+mod proposals;
 
 use std::fmt;
 use std::ops::Range;
@@ -23,6 +24,7 @@ pub use marks::{Mark, MarkKind, Marks};
 use mnote_lang::coords::{ByteOffset, CharOffset, RopeCoords};
 use mnote_lang::syntax::Syntax;
 pub use mnote_lang::syntax::drop_tree_later;
+pub use proposals::{Hunk, HunkState, ProposalId, ProposeError, Resolved, accept_across};
 use ropey::Rope;
 use std::sync::Arc;
 use tree_sitter::Tree;
@@ -87,6 +89,8 @@ pub struct Buffer {
     undone: Option<Undone>,
     /// Its language's name (`markdown`), if it has one.
     language: Option<Arc<str>>,
+    /// Edits held for review, as anchored hunks.
+    proposals: Vec<proposals::Held>,
 }
 
 /// What the last undo or redo did, from [`Buffer::take_undone`].
@@ -157,6 +161,7 @@ impl Buffer {
             group: GroupId::fresh(),
             undone: None,
             language: language.map(Arc::from),
+            proposals: Vec::new(),
         }
     }
 
