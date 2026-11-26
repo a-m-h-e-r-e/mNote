@@ -281,7 +281,8 @@ impl Editor {
     /// end-to-end checks (`tools/check-tabs.sh`), then quits. A line is keys
     /// in Vim's notation (`:tabnew<CR>`, `<C-w>v`), `state` (prints the
     /// tabs, panes and text as `mnote state: …`), `key <D-S-t>` (a ⌘ key
-    /// or chord, through the keymap) or `# a comment`.
+    /// or chord, through the keymap), `wait 500` (milliseconds) or
+    /// `# a comment`.
     pub fn run_script(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
         let lines: Vec<String> = std::fs::read_to_string(&path)
             .map(|t| t.lines().map(str::to_owned).collect())
@@ -293,6 +294,15 @@ impl Editor {
             for line in lines {
                 let line = line.trim().to_owned();
                 if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if let Some(ms) = line
+                    .strip_prefix("wait ")
+                    .and_then(|m| m.parse::<u64>().ok())
+                {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(ms))
+                        .await;
                     continue;
                 }
                 let _ = this.update(cx, |this, cx| {

@@ -588,6 +588,28 @@ impl Editor {
         cx.notify();
     }
 
+    /// Moves tab `from` of pane `pane` to `to` (a tab dragged in its row).
+    pub(super) fn move_tab_within(&mut self, pane: PaneId, from: usize, to: usize) {
+        let Some(slot) = self.panes.iter_mut().find(|p| p.id == pane) else {
+            return;
+        };
+        if from >= slot.tabs.len() || to >= slot.tabs.len() {
+            return;
+        }
+        let tab = slot.tabs.remove(from);
+        slot.tabs.insert(to, tab);
+        let a = slot.active;
+        slot.active = if a == from {
+            to
+        } else if from < a && a <= to {
+            a - 1
+        } else if to <= a && a < from {
+            a + 1
+        } else {
+            a
+        };
+    }
+
     /// `:tabs`: every pane and its tabs, `>` at the active one and `+` at
     /// unsaved text.
     pub(super) fn tab_list(&mut self) {

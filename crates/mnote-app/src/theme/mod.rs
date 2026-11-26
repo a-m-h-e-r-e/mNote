@@ -264,6 +264,20 @@ impl Theme {
                 return Err(format!("there's no colour called {token}"));
             }
         }
+        // Tab rows follow the bars' colours unless the theme names its own.
+        let named = |name: &str| file.colors.iter().any(|(t, _)| t == name);
+        if !named("tabs") {
+            palette.tabs = palette.chrome;
+        }
+        if !named("tab_active") {
+            palette.tab_active = palette.paper;
+        }
+        if !named("tab_text") {
+            palette.tab_text = palette.ink_2;
+        }
+        if !named("tab_preview") {
+            palette.tab_preview = palette.ink_2;
+        }
         theme.palette = Box::leak(Box::new(palette));
         let syntax = syntax::SyntaxColors::new(theme.palette, &file.syntax)?;
         theme.syntax = Box::leak(Box::new(syntax));
@@ -426,6 +440,10 @@ impl Palette {
             "syn_marker" => &mut self.syn_marker,
             "syn_code" => &mut self.syn_code,
             "syn_keyword" => &mut self.syn_keyword,
+            "tabs" => &mut self.tabs,
+            "tab_active" => &mut self.tab_active,
+            "tab_text" => &mut self.tab_text,
+            "tab_preview" => &mut self.tab_preview,
             _ => return false,
         };
         *slot = value;
@@ -464,6 +482,10 @@ impl Palette {
             "syn_marker" => self.syn_marker,
             "syn_code" => self.syn_code,
             "syn_keyword" => self.syn_keyword,
+            "tabs" => self.tabs,
+            "tab_active" => self.tab_active,
+            "tab_text" => self.tab_text,
+            "tab_preview" => self.tab_preview,
             _ => return None,
         })
     }
@@ -504,6 +526,27 @@ mod tests {
             dark.syntax_color(intern("string")),
             Some(dark.palette.syn_code)
         );
+    }
+
+    #[test]
+    fn tab_rows_follow_the_bars_unless_named() {
+        let file = mnote_core::config::ThemeFile::parse(
+            "base = \"dark\"\n[colors]\nchrome = \"#101010\"\npaper = \"#202020\"\n",
+        )
+        .expect("valid");
+        let p = Theme::from_file(&file).expect("applies").palette;
+        assert_eq!((p.tabs, p.tab_active), (0x101010ff, 0x202020ff));
+        assert_eq!((p.tab_text, p.tab_preview), (p.ink_2, p.ink_2));
+        let file = mnote_core::config::ThemeFile::parse(
+            "base = \"dark\"\n[colors]\nchrome = \"#101010\"\ntabs = \"#303030\"\n",
+        )
+        .expect("valid");
+        let p = Theme::from_file(&file).expect("applies").palette;
+        assert_eq!(p.tabs, 0x303030ff, "its own colour");
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            let p = Theme::new(appearance).palette;
+            assert_eq!((p.tabs, p.tab_active), (p.chrome, p.paper));
+        }
     }
 
     #[test]

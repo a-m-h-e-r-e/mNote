@@ -149,6 +149,36 @@ pub enum ViewChoice {
     Plain,
 }
 
+/// When panes show their tab rows (`show_tabs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TabsChoice {
+    /// When any pane has two or more tabs, or there are two or more panes.
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+impl TabsChoice {
+    pub fn name(self) -> &'static str {
+        match self {
+            TabsChoice::Auto => "auto",
+            TabsChoice::Always => "always",
+            TabsChoice::Never => "never",
+        }
+    }
+
+    /// Whether tab rows show, with `panes` panes and at most `tabs` tabs
+    /// in one of them.
+    pub fn shows(self, panes: usize, tabs: usize) -> bool {
+        match self {
+            TabsChoice::Auto => panes > 1 || tabs > 1,
+            TabsChoice::Always => true,
+            TabsChoice::Never => false,
+        }
+    }
+}
+
 /// A global key: modifiers and one key, as written in the config
 /// (`option+n`, `ctrl+shift+space`, `⌥M`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,6 +344,11 @@ pub struct Config {
     pub reuse_neovim: bool,
     /// List the vault's code files in the finder and explorer, beside notes.
     pub show_code_files: bool,
+    /// When panes show their tab rows.
+    pub show_tabs: TabsChoice,
+    /// Show the window's close, minimize and zoom buttons (ADR-0015: they
+    /// are hidden, and the tab rows reach the window's top edge).
+    pub window_buttons: bool,
     /// Above this many megabytes, code fences and other injections aren't
     /// parsed.
     pub large_file_injections_mb: u32,
@@ -384,6 +419,8 @@ impl Default for Config {
             scrolloff: 0,
             reuse_neovim: true,
             show_code_files: true,
+            show_tabs: TabsChoice::Auto,
+            window_buttons: false,
             large_file_injections_mb: 4,
             large_file_highlight_mb: 16,
             wrap: true,
@@ -487,6 +524,18 @@ impl Config {
                                 "\"system\", \"dark\", \"light\" or a theme file's name",
                             ));
                         }
+                    }
+                }
+                "window_buttons" => {
+                    config.window_buttons =
+                        value.as_bool().ok_or_else(|| wrong("true or false"))?;
+                }
+                "show_tabs" => {
+                    config.show_tabs = match value.as_str() {
+                        Some("auto") => TabsChoice::Auto,
+                        Some("always") => TabsChoice::Always,
+                        Some("never") => TabsChoice::Never,
+                        _ => return Err(wrong("\"auto\", \"always\" or \"never\"")),
                     }
                 }
                 "view" => {
@@ -878,6 +927,26 @@ impl Config {
                 on_off(self.show_code_files).into(),
             ),
             Setting::new(
+                "show_tabs",
+                &format!(
+                    "When panes show their tab rows. Values: \"auto\" (when a pane has two\n\
+                     or more tabs, or there are two or more panes), \"always\", \"never\"\n\
+                     (:tabs lists them). Default: {}",
+                    quoted(d.show_tabs.name())
+                ),
+                quoted(self.show_tabs.name()),
+            ),
+            Setting::new(
+                "window_buttons",
+                &format!(
+                    "Show the window's close, minimize and zoom buttons. Without them the\n\
+                     tab rows reach the top edge; ⌘Q, ⌘M and ⌃⌘F do what they did.\n\
+                     Values: true, false. Default: {}",
+                    on_off(d.window_buttons)
+                ),
+                on_off(self.window_buttons).into(),
+            ),
+            Setting::new(
                 "large_file_injections_mb",
                 &format!(
                     "Notes and files larger than this many megabytes don't parse their\n\
@@ -1257,6 +1326,8 @@ mod tests {
             scrolloff: 5,
             reuse_neovim: false,
             show_code_files: false,
+            show_tabs: TabsChoice::Auto,
+            window_buttons: false,
             large_file_injections_mb: 2,
             large_file_highlight_mb: 8,
             wrap: false,
@@ -1513,6 +1584,21 @@ mod tests {
         assert_eq!(config.theme, ThemeChoice::Light);
         assert_eq!(Config::load(&dir.join("none.toml")), Ok(None));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn show_tabs_and_window_buttons_parse() {
+        assert_eq!(Config::default().show_tabs, TabsChoice::Auto);
+        assert!(!Config::default().window_buttons);
+        let config = Config::parse("show_tabs = \"always\"\nwindow_buttons = true").expect("valid");
+        assert_eq!(config.show_tabs, TabsChoice::Always);
+        assert!(config.window_buttons);
+        assert!(config.template().contains("show_tabs = \"always\""));
+        assert!(config.template().contains("window_buttons = true"));
+        assert!(Config::parse("show_tabs = \"sometimes\"").is_err());
+        assert!(!TabsChoice::Auto.shows(1, 1));
+        assert!(TabsChoice::Auto.shows(2, 1) && TabsChoice::Auto.shows(1, 2));
+        assert!(TabsChoice::Always.shows(1, 1) && !TabsChoice::Never.shows(5, 5));
     }
 
     #[test]

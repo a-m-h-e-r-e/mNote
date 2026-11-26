@@ -142,9 +142,10 @@ impl Editor {
         layout: &Layout,
         view: &gpui::Entity<Editor>,
         p: &Palette,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         match layout {
-            Layout::Pane(id) => self.render_pane(*id, view, p),
+            Layout::Pane(id) => self.render_pane(*id, view, p, cx),
             Layout::Split(axis, parts) => {
                 let row = *axis == Axis::Row;
                 div()
@@ -162,20 +163,22 @@ impl Editor {
                             .when(i > 0 && row, |d| d.border_l_1())
                             .when(i > 0 && !row, |d| d.border_t_1())
                             .border_color(Theme::color(p.line))
-                            .child(self.render_layout(part, view, p))
+                            .child(self.render_layout(part, view, p, cx))
                     }))
                     .into_any_element()
             }
         }
     }
 
-    /// One pane: its note's visible lines. With several panes, the focused
-    /// one has a `cursor` rule along its top and the others are quieter.
+    /// One pane: its tab row (when rows show) and its note's visible lines.
+    /// With several panes the others are quieter; the focused one's active
+    /// tab carries the cursor rule (panes draw none of their own).
     pub(super) fn render_pane(
         &self,
         id: PaneId,
         view: &gpui::Entity<Editor>,
         p: &Palette,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let focused = id == self.focused;
         let several = self.panes.len() > 1;
@@ -191,21 +194,25 @@ impl Editor {
         let Some(lines) = lines else {
             return div().flex_1().into_any_element();
         };
+        // A Markdown note keeps the centred reading column; anything else
+        // fills the pane, line numbers at its left edge.
+        let full_width = match self.panes.iter().find(|s| s.id == id).map(|s| &s.note) {
+            Some(DocKey::Note(note)) => !note.is_note(),
+            Some(DocKey::Config) => true,
+            _ => false,
+        };
         let view = view.clone();
-        div()
+        let row = self
+            .tab_rows_shown()
+            .then(|| self.render_tab_row(id, p, cx));
+        let body = div()
             .flex()
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .justify_center()
+            .when(!full_width, |d| d.justify_center())
             .pt(px(space::S8))
-            .when(several, |d| {
-                d.px(px(space::S3)).border_t_2().border_color(if focused {
-                    Theme::color(p.cursor)
-                } else {
-                    gpui::transparent_black()
-                })
-            })
+            .when(several, |d| d.px(px(space::S3)))
             .when(several && !focused, |d| d.opacity(0.72))
             .child(
                 list(lines, move |ix, _window, cx: &mut App| {
@@ -218,8 +225,19 @@ impl Editor {
                     })
                 })
                 .size_full()
-                .max_w(px(size::GUTTER_W + size::MEASURE + space::S8)),
+                .when(!full_width, |l| {
+                    l.max_w(px(size::GUTTER_W + size::MEASURE + space::S8))
+                }),
             )
+            .into_any_element();
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .children(row)
+            .child(body)
             .into_any_element()
     }
 }
@@ -276,6 +294,8 @@ impl Render for Editor {
             .folder_edit
             .as_ref()
             .map(|editor| editor.render(width, height, caret_on, p));
+        // The window buttons and any window action a command asked for.
+        self.sync_window(window);
         let rope = self.buffer.text();
         let cursor = self.vim.cursor();
         let line = line_of(rope, cursor);
@@ -284,11 +304,37 @@ impl Render for Editor {
             Source::Scratch => SharedString::new_static("scratch (not saved)"),
             Source::Untitled(n) => format!("{} (not saved)", panes::untitled_name(*n)).into(),
             Source::Config(_) => SharedString::new_static("config.toml"),
-            Source::Note { note, .. } => note.file_name().to_owned().into(),
+            // The path, as the top bar showed it (ADR-0015), cut from the
+            // left when it's long.
+            Source::Note { note, .. } => shorten_path(&note.to_string()).into(),
         };
         let view = cx.entity();
+        let rows = self.tab_rows_shown();
+        let tabs_here = self
+            .panes
+            .iter()
+            .find(|s| s.id == self.focused)
+            .map_or(1, |s| s.tabs.len());
+        let hint = if self.view != styled::View::Styled {
+            crate::keymap::current()
+                .shown_for("view")
+                .map(|keys| format!("{keys} view: {}", self.view.next().name()))
+        } else if self.panes.len() > 1 && tabs_here > 1 {
+            Some("gt next tab · ⌃w h j k l move".to_owned())
+        } else if self.panes.len() > 1 {
+            Some("⌃w h j k l move · ⌃w c close".to_owned())
+        } else if tabs_here > 1 {
+            Some("gt next tab".to_owned())
+        } else {
+            None
+        };
 
-        let mut status = StatusLine::new(self.vim.mode()).file(file);
+        let mut status = StatusLine::new(self.vim.mode())
+            .file(file)
+            .dirty(self.buffer.is_dirty());
+        if let Some(hint) = hint {
+            status = status.hint(hint);
+        }
         if let Some(tab) = self.tab_position() {
             status = status.item(tab);
         }
@@ -332,23 +378,9 @@ impl Render for Editor {
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, _, _| this.drag_anchor = None),
             )
-            .child(
-                TopBar::new(self.path_segments())
-                    .dirty(self.buffer.is_dirty())
-                    .leading_inset(px(TRAFFIC_LIGHT_INSET))
-                    .when(self.panes.len() > 1, |bar| {
-                        bar.hint("⌃w h j k l move · ⌃w c close")
-                    })
-                    .when(self.vim.command_line().is_some(), |bar| {
-                        bar.hint("⇥ complete · ↑ history · ⌃f edit")
-                    })
-                    .when_some(
-                        crate::keymap::current().shown_for("view").filter(|_| {
-                            self.vim.command_line().is_none() && self.view != styled::View::Styled
-                        }),
-                        |bar, keys| bar.hint(format!("{keys} view: {}", self.view.next().name())),
-                    ),
-            )
+            // No top bar (ADR-0015): with no tab rows, a band along the top
+            // moves the window.
+            .when(!rows, |d| d.child(self.render_top_band()))
             .child({
                 // Registers the editor with the system's text input each
                 // frame (accents, IME); see `ime`.
@@ -367,7 +399,7 @@ impl Render for Editor {
                 .absolute()
                 .size_full()
             })
-            .child(self.render_layout(&self.layout.clone(), &view, p))
+            .child(self.render_layout(&self.layout.clone(), &view, p, cx))
             // The command line takes the status line's place while it's
             // typed, and while it shows the result.
             .map(|editor| {
@@ -409,4 +441,15 @@ impl Render for Editor {
             .children(self.latency.frame_probe())
             .into_any_element()
     }
+}
+
+/// A path for the status line: cut from the left past 60 characters, so
+/// the name stays.
+fn shorten_path(path: &str) -> String {
+    let count = path.chars().count();
+    if count <= 60 {
+        return path.to_owned();
+    }
+    let tail: String = path.chars().skip(count - 59).collect();
+    format!("…{tail}")
 }

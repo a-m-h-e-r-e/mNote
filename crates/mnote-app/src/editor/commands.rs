@@ -363,6 +363,27 @@ pub fn builtin() -> Vec<Command> {
         )
         .bind("<C-w>T"),
         Command::new(
+            "quit-app",
+            "Quit mNote",
+            "Saves every note and quits; unsaved untitled text asks for ! (:qa!).",
+            act(|e, _, cx| e.quit_all(false, false, cx)),
+        )
+        .bind("<D-q>"),
+        Command::new(
+            "window-minimize",
+            "Minimize window",
+            "Puts the window in the Dock.",
+            act(|e, _, cx| e.window_op(super::tab_line::WindowOp::Minimize, cx)),
+        )
+        .bind("<D-m>"),
+        Command::new(
+            "window-fullscreen",
+            "Full screen",
+            "Fills the screen with the window, or leaves full screen.",
+            act(|e, _, cx| e.window_op(super::tab_line::WindowOp::FullScreen, cx)),
+        )
+        .bind("<C-D-f>"),
+        Command::new(
             "close-something",
             "Close",
             "Closes one thing: an overlay, else this pane, else this tab. It never quits mNote (⌘Q does).",

@@ -1,12 +1,13 @@
-//! Window chrome: the [`TopBar`] along the top edge, the [`StatusLine`] along
-//! the bottom, and the [`ModePill`] that leads the status line.
+//! Window chrome: the [`StatusLine`] along the bottom, and the [`ModePill`]
+//! that leads it.
 //!
-//! The note owns the window: these two bars are the only chrome. No sidebar,
-//! tabs or toolbar.
+//! The note owns the window: there's no top bar (ADR-0015) and no sidebar
+//! or toolbar. Panes' tab rows (see `editor::tab_line`) are the top edge; the
+//! status line says where the note lives and holds the hints.
 
 use gpui::{
-    App, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, RenderOnce,
-    SharedString, Styled, Window, div, prelude::FluentBuilder, px,
+    App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div,
+    prelude::FluentBuilder, px,
 };
 use mnote_vim::Mode;
 
@@ -55,105 +56,15 @@ impl RenderOnce for ModePill {
     }
 }
 
-/// The window's top edge: where the note lives, and whether it has unsaved
-/// changes. There is no save button; `:w` and autosave handle saving.
-#[derive(IntoElement)]
-pub struct TopBar {
-    path: Vec<SharedString>,
-    dirty: bool,
-    hint: Option<SharedString>,
-    leading_inset: Pixels,
-}
-
-impl TopBar {
-    /// `path` is the vault-relative folders plus the note name, without `.md`.
-    pub fn new(path: impl IntoIterator<Item = SharedString>) -> Self {
-        Self {
-            path: path.into_iter().collect(),
-            dirty: false,
-            hint: None,
-            leading_inset: px(space::S3),
-        }
-    }
-
-    /// Space before the path, so it clears the macOS traffic-light buttons when
-    /// the title bar is transparent.
-    pub fn leading_inset(mut self, inset: Pixels) -> Self {
-        self.leading_inset = inset;
-        self
-    }
-
-    pub fn dirty(mut self, dirty: bool) -> Self {
-        self.dirty = dirty;
-        self
-    }
-
-    /// One quiet hint at the right end, such as `⌘K commands`.
-    pub fn hint(mut self, hint: impl Into<SharedString>) -> Self {
-        self.hint = Some(hint.into());
-        self
-    }
-}
-
-impl RenderOnce for TopBar {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let p = cx.theme().palette;
-        let last = self.path.len().saturating_sub(1);
-        let crumbs = self.path.into_iter().enumerate().flat_map(move |(i, seg)| {
-            let sep = (i > 0).then(|| {
-                div()
-                    .px(px(6.))
-                    .text_color(Theme::color(p.ink_3))
-                    .child(SharedString::new_static("/"))
-            });
-            let color = if i == last { p.ink } else { p.ink_2 };
-            let seg = div().text_color(Theme::color(color)).child(seg);
-            sep.into_iter().chain(std::iter::once(seg))
-        });
-
-        bar(p)
-            .border_b_1()
-            .pl(self.leading_inset)
-            // The top bar is the window's title bar: drag to move, double-click to zoom.
-            .on_mouse_down(MouseButton::Left, |event, window, _| {
-                if event.click_count >= 2 {
-                    window.titlebar_double_click();
-                } else {
-                    window.start_window_move();
-                }
-            })
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .min_w_0()
-                    .truncate()
-                    .children(crumbs),
-            )
-            .when(self.dirty, |bar| {
-                bar.child(
-                    div()
-                        .flex_none()
-                        .size(px(7.))
-                        .rounded_full()
-                        .bg(Theme::color(p.cursor)),
-                )
-            })
-            .child(div().flex_1())
-            .children(
-                self.hint
-                    .map(|hint| div().text_color(Theme::color(p.ink_3)).child(hint)),
-            )
-    }
-}
-
 /// The Vim status line along the bottom of the window: mode, file, a few facts
 /// about the note, then right-aligned counts such as words and `line:col`.
 #[derive(IntoElement)]
 pub struct StatusLine {
     mode: Mode,
     file: Option<SharedString>,
+    dirty: bool,
     items: Vec<SharedString>,
+    hint: Option<SharedString>,
     right: Vec<SharedString>,
 }
 
@@ -162,7 +73,9 @@ impl StatusLine {
         Self {
             mode,
             file: None,
+            dirty: false,
             items: Vec::new(),
+            hint: None,
             right: Vec::new(),
         }
     }
@@ -170,6 +83,18 @@ impl StatusLine {
     /// The file name, with `.md`, as it is on disk.
     pub fn file(mut self, file: impl Into<SharedString>) -> Self {
         self.file = Some(file.into());
+        self
+    }
+
+    /// Whether the note has unsaved changes: a dot after its name.
+    pub fn dirty(mut self, dirty: bool) -> Self {
+        self.dirty = dirty;
+        self
+    }
+
+    /// One quiet hint before the counts, such as `gt next tab`.
+    pub fn hint(mut self, hint: impl Into<SharedString>) -> Self {
+        self.hint = Some(hint.into());
         self
     }
 
@@ -192,12 +117,30 @@ impl RenderOnce for StatusLine {
         bar(p)
             .border_t_1()
             .child(ModePill::new(self.mode))
-            .children(
-                self.file
-                    .map(|file| div().text_color(Theme::color(p.ink)).child(file)),
-            )
+            .children(self.file.map(|file| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .min_w_0()
+                    .text_color(Theme::color(p.ink))
+                    .child(file)
+                    .when(self.dirty, |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .size(px(7.))
+                                .rounded_full()
+                                .bg(Theme::color(p.cursor)),
+                        )
+                    })
+            }))
             .children(self.items.into_iter().map(|item| div().child(item)))
             .child(div().flex_1())
+            .children(
+                self.hint
+                    .map(|hint| div().text_color(Theme::color(p.ink_3)).child(hint)),
+            )
             .children(self.right.into_iter().map(|value| div().child(value)))
     }
 }

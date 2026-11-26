@@ -60,6 +60,14 @@ pub struct Palette {
     pub syn_code: u32,
     /// Keywords in code blocks.
     pub syn_keyword: u32,
+    /// A pane's tab row ground (`chrome` unless a theme sets it).
+    pub tabs: u32,
+    /// The active tab's ground, open into its note (`paper` unless set).
+    pub tab_active: u32,
+    /// Other tabs' names (`ink_2` unless set).
+    pub tab_text: u32,
+    /// The preview tab's name, in italics (`ink_2` unless set).
+    pub tab_preview: u32,
 }
 
 /// One layer of a box shadow, in px, with an `0xRRGGBBAA` colour.
@@ -102,6 +110,10 @@ pub const DARK: Palette = Palette {
     syn_marker: 0xef7f88ff,
     syn_code: 0x98c379ff,
     syn_keyword: 0xd08ae6ff,
+    tabs: 0x21252bff,
+    tab_active: 0x282c34ff,
+    tab_text: 0xabb2bfff,
+    tab_preview: 0xabb2bfff,
 };
 
 /// The `light` theme.
@@ -134,6 +146,10 @@ pub const LIGHT: Palette = Palette {
     syn_marker: 0xb83a30ff,
     syn_code: 0x357035ff,
     syn_keyword: 0x8f2d9cff,
+    tabs: 0xf2f4f3ff,
+    tab_active: 0xfbfcfbff,
+    tab_text: 0x4c5855ff,
+    tab_preview: 0x4c5855ff,
 };
 
 /// Every modal. The only shadow in mNote. (dark)

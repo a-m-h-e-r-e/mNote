@@ -489,7 +489,8 @@ impl Editor {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .max_w(px(size::MEASURE))
+                    // Notes keep the reading measure; code fills the pane.
+                    .when(!self.full_width(), |d| d.max_w(px(size::MEASURE)))
                     .child(body),
             )
             .children(right_text.into_iter().map(|(label, c)| {

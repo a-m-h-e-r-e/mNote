@@ -39,6 +39,17 @@ impl Editor {
         matches!(&self.source, Source::Note { note, .. } if !note.is_note())
     }
 
+    /// Whether the shown document fills its pane's width, line numbers at
+    /// the left edge: anything but a Markdown note (code files,
+    /// config.toml). Notes keep the centred reading column.
+    pub(super) fn full_width(&self) -> bool {
+        match &self.source {
+            Source::Note { note, .. } => !note.is_note(),
+            Source::Config(_) => true,
+            Source::Scratch | Source::Untitled(_) => false,
+        }
+    }
+
     /// Whether `lang`'s colours can be drawn now. If its query isn't
     /// compiled yet, it's compiled in the background (and the view redrawn
     /// when it's done); if it has no grammar, one may be loadable.

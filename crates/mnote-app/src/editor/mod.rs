@@ -30,6 +30,7 @@ mod plugins;
 mod saving;
 mod services;
 mod styled;
+mod tab_line;
 mod tabs;
 mod untitled;
 mod view;
@@ -65,7 +66,7 @@ use crate::picker::list::ListPicker;
 use crate::picker::palette::CommandPalette;
 use crate::picker::{Job, JobResult, ListEntry, Picker, PickerAction, PickerEffect, PickerOutcome};
 use crate::theme::{ActiveTheme, Palette, StyledExt, Theme, radius, size, space, text};
-use crate::ui::{CommandLine, CompletionPopup, MessagePanel, StatusLine, Toast, TopBar};
+use crate::ui::{CommandLine, CompletionPopup, MessagePanel, StatusLine, Toast};
 use line::{Caret, Highlight, LineText};
 
 /// A table's column widths and alignments, shared by its rows.
@@ -188,6 +189,8 @@ pub struct Editor {
     parked: Vec<Doc>,
     /// Closed tabs, for `:tabreopen`.
     closed_tabs: Vec<tabs::ClosedTab>,
+    /// The tab rows' scroll, and the window buttons' state.
+    tab_rows: tab_line::TabRows,
     /// The last untitled note's number, and the folder each one was
     /// opened from (where the save prompt suggests it goes).
     next_untitled: u32,
@@ -433,6 +436,7 @@ impl Editor {
             next_pane: 1,
             parked: Vec::new(),
             closed_tabs: Vec::new(),
+            tab_rows: Default::default(),
             next_untitled: 0,
             untitled_folders: Default::default(),
             edit_groups: Default::default(),
@@ -822,18 +826,6 @@ impl Editor {
     // ---- saving and reloading ----------------------------------------------
 
     // ---- rendering ----------------------------------------------------------
-
-    fn path_segments(&self) -> Vec<SharedString> {
-        match &self.source {
-            Source::Scratch => vec![SharedString::new_static("scratch")],
-            Source::Untitled(n) => vec![panes::untitled_name(*n).into()],
-            Source::Config(_) => vec![
-                SharedString::new_static("settings"),
-                SharedString::new_static("config.toml"),
-            ],
-            Source::Note { note, .. } => note.segments().map(|s| s.to_owned().into()).collect(),
-        }
-    }
 }
 
 /// A note's buffer; one that doesn't exist yet starts empty and is made on

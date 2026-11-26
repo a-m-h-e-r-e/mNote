@@ -411,6 +411,32 @@ pub fn join_all_spaces(window: &Window) {
     }
 }
 
+/// Shows or hides `window`'s close, minimize and zoom buttons (ADR-0015:
+/// hidden, the tab rows reach the window's top edge).
+pub fn set_window_buttons(window: &Window, visible: bool) {
+    let Some(ns_window) = ns_window(window) else {
+        return;
+    };
+    let hidden = if visible {
+        objc::runtime::NO
+    } else {
+        objc::runtime::YES
+    };
+    // NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton.
+    for kind in 0usize..3 {
+        // SAFETY: a live NSWindow (see `ns_window`);
+        // `-standardWindowButton:` takes an NSWindowButton (NSUInteger) and
+        // returns an NSButton or nil. Main thread.
+        let button: *mut Object = unsafe { msg_send![ns_window, standardWindowButton: kind] };
+        if !button.is_null() {
+            // SAFETY: a live NSButton; `-setHidden:` takes a BOOL.
+            unsafe {
+                let _: () = msg_send![button, setHidden: hidden];
+            }
+        }
+    }
+}
+
 /// Takes `window` off the screen until it's next activated (a summon), so
 /// quick capture shows alone over the app you were in.
 pub fn order_out(window: &Window) {

@@ -72,7 +72,8 @@ impl Chord {
             key,
         };
         let ok = match key {
-            ChordKey::Char(_) => cmd && shift && !ctrl,
+            // ⌘⇧T, or ⌃⌘F.
+            ChordKey::Char(_) => cmd && (shift != ctrl),
             ChordKey::Tab | ChordKey::PageUp | ChordKey::PageDown => ctrl && !cmd,
         };
         ok.then_some(chord)
@@ -228,6 +229,8 @@ pub fn parse(notation: &str) -> Result<Vec<Stroke>, String> {
         }
         if lower.starts_with("<d-s-")
             || lower.starts_with("<s-d-")
+            || lower.starts_with("<c-d-")
+            || lower.starts_with("<d-c-")
             || lower.starts_with("<c-tab>")
             || lower.starts_with("<c-s-tab>")
             || lower.starts_with("<c-page")
@@ -403,6 +406,11 @@ mod tests {
             })
         );
         assert_eq!(Chord::of("t", true, false, false), None);
+        assert_eq!(
+            parse("<C-D-f>"),
+            chord(true, true, false, ChordKey::Char('f'))
+        );
+        assert_eq!(show(&parse("<C-D-f>").expect("ok")), "⌃⌘F");
         assert_eq!(Chord::of("tab", false, false, false), None);
         assert!(parse("").is_err());
         assert!(parse("<D-kk>").is_err());
