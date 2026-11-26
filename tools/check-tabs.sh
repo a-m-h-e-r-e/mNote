@@ -342,6 +342,58 @@ expect preview 5 'a.md links.md >b.md a2.md |'
 # :vsplit {note}: a new pane with that note as its only tab.
 expect preview 6 'pane 2/2 | >a2.md |'
 
+cat > "$SANDBOX/strokes.keys" <<'KEYS'
+:tabnew b<CR>
+:tabnew a2<CR>
+i
+stroke ctrl-tab
+state
+stroke cmd-shift-}
+state
+stroke cmd-shift-]
+state
+stroke ctrl-shift-tab
+stroke ctrl-pageup
+state
+stroke cmd-2
+state
+stroke cmd-9
+state
+<Esc>
+stroke cmd-t
+state
+<C-w>v
+:e b<CR>
+:tabnew a<CR>
+stroke cmd-shift-w
+state
+stroke cmd-w
+state
+stroke cmd-shift-t
+state
+KEYS
+run strokes
+# Keystrokes as the keyboard sends them, in Insert mode: ⌃⇥ wraps round.
+expect strokes 1 '| >a.md b.md a2.md |'
+expect strokes 1 'mode INSERT'
+# ⌘⇧] arrives as ⌘} or as ⌘⇧]; both go to the next tab.
+expect strokes 2 '| a.md >b.md a2.md |'
+expect strokes 3 '| a.md b.md >a2.md |'
+# ⌃⇧⇥ then ⌃PageUp go back two.
+expect strokes 4 '| >a.md b.md a2.md |'
+# ⌘2 and ⌘9 (the last).
+expect strokes 5 '| a.md >b.md a2.md |'
+expect strokes 6 '| a.md b.md >a2.md |'
+expect strokes 6 'mode INSERT'
+# ⌘T: an untitled tab after the active one.
+expect strokes 7 '| a.md b.md a2.md >untitled |'
+# ⌘⇧W closes every tab of the focused pane, and so the pane.
+expect strokes 8 'pane 1/1 | a.md b.md a2.md >untitled |'
+# ⌘W closes the active tab; the pane's last used shows.
+expect strokes 9 'pane 1/1 | a.md b.md >a2.md |'
+# ⌘⇧T reopens the last closed tab (its pane is gone: in this one).
+expect strokes 10 'pane 1/1 | >a.md b.md a2.md |'
+
 if [ "$failed" = 0 ]; then
     echo "tabs: all checks passed"
 fi

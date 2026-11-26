@@ -37,43 +37,9 @@ impl Editor {
         {
             return;
         }
-        // ⌘ bindings (⌘K, ⌘S, ⌘C …), from the keymap. Over a picker or
-        // another overlay only those made for it run.
-        if stroke.modifiers.platform
-            && !stroke.modifiers.control
-            && !stroke.modifiers.alt
-            && !stroke.modifiers.shift
-            && let Some(c) = single_key(&stroke.key)
-            && let Some(id) = crate::keymap::current().cmd(c).map(str::to_owned)
-            && let Some(ix) = crate::commands::by_id(&id)
-        {
-            let overlay = self.picker.is_some()
-                || self.folder_edit.is_some()
-                || self.first_run.is_some()
-                || self.pane_menu.is_some();
-            if !overlay || crate::commands::all()[ix].over_overlays {
-                cx.stop_propagation();
-                self.run_command(ix, cx);
-                return cx.notify();
-            }
-        }
-        // Chords (⌘⇧T, ⌃⇥, ⌃PageDown) run in any mode, as ⌘ keys do.
-        let m = &stroke.modifiers;
-        if !m.alt
-            && let Some(chord) =
-                crate::keymap::Chord::of(&stroke.key, m.platform, m.control, m.shift)
-            && let Some(id) = crate::keymap::current().chord(chord).map(str::to_owned)
-            && let Some(ix) = crate::commands::by_id(&id)
-        {
-            let overlay = self.picker.is_some()
-                || self.folder_edit.is_some()
-                || self.first_run.is_some()
-                || self.pane_menu.is_some();
-            if !overlay || crate::commands::all()[ix].over_overlays {
-                cx.stop_propagation();
-                self.run_command(ix, cx);
-                return cx.notify();
-            }
+        if self.app_stroke(stroke, cx) {
+            cx.stop_propagation();
+            return;
         }
         let Some(key) = keys::vim_key(stroke) else {
             return;
@@ -81,6 +47,36 @@ impl Editor {
         if self.press(key, cx) {
             cx.stop_propagation();
         }
+    }
+
+    /// A keystroke the app takes in any mode, before Vim: a ⌘ binding (⌘K,
+    /// ⌘S, ⌘C …) or a chord (⌘⇧T, ⌃⇥, ⌃PageDown), from the keymap. Over a
+    /// picker or another overlay only those made for it run. Returns whether
+    /// it ran one.
+    pub(super) fn app_stroke(&mut self, stroke: &gpui::Keystroke, cx: &mut Context<Self>) -> bool {
+        let m = &stroke.modifiers;
+        let map = crate::keymap::current();
+        let id = if m.platform && !m.control && !m.alt && !m.shift {
+            single_key(&stroke.key).and_then(|c| map.cmd(c).map(str::to_owned))
+        } else if !m.alt {
+            crate::keymap::Chord::of(&stroke.key, m.platform, m.control, m.shift)
+                .and_then(|chord| map.chord(chord).map(str::to_owned))
+        } else {
+            None
+        };
+        let Some(ix) = id.and_then(|id| crate::commands::by_id(&id)) else {
+            return false;
+        };
+        let overlay = self.picker.is_some()
+            || self.folder_edit.is_some()
+            || self.first_run.is_some()
+            || self.pane_menu.is_some();
+        if overlay && !crate::commands::all()[ix].over_overlays {
+            return false;
+        }
+        self.run_command(ix, cx);
+        cx.notify();
+        true
     }
 
     /// One key, as typed: to the open picker, the leader, or Vim. Returns

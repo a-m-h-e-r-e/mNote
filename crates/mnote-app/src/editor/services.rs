@@ -281,7 +281,8 @@ impl Editor {
     /// end-to-end checks (`tools/check-tabs.sh`), then quits. A line is keys
     /// in Vim's notation (`:tabnew<CR>`, `<C-w>v`), `state` (prints the
     /// tabs, panes and text as `mnote state: …`), `key <D-S-t>` (a ⌘ key
-    /// or chord, through the keymap), `wait 500` (milliseconds) or
+    /// or chord, through the keymap), `stroke cmd-shift-}` (a keystroke as
+    /// the keyboard sends it), `wait 500` (milliseconds) or
     /// `# a comment`.
     pub fn run_script(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
         let lines: Vec<String> = std::fs::read_to_string(&path)
@@ -317,6 +318,19 @@ impl Editor {
                         // `drag 1 2 2 end`: pane 1's tab 2 onto pane 2,
                         // before its tab 1 (or at the end), as a mouse drop.
                         this.script_drag(args, cx);
+                    } else if let Some(stroke) = line.strip_prefix("stroke ") {
+                        // A keystroke as gpui reports it (`cmd-shift-}`), in
+                        // whatever mode Vim is in, as the keyboard sends it.
+                        match gpui::Keystroke::parse(stroke.trim()) {
+                            Ok(stroke) => {
+                                if !this.app_stroke(&stroke, cx)
+                                    && let Some(key) = super::keys::vim_key(&stroke)
+                                {
+                                    this.press(key, cx);
+                                }
+                            }
+                            Err(_) => eprintln!("mnote script: not a keystroke: {stroke}"),
+                        }
                     } else if let Some(keys) = line.strip_prefix("key ") {
                         // A ⌘ key or chord, as the keymap binds it.
                         this.press_binding(keys, cx);

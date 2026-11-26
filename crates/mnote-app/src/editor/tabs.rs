@@ -917,7 +917,7 @@ impl Editor {
             .collect();
         let text: String = self.buffer.to_string().replace('\n', "\\n");
         format!(
-            "pane {}/{} | {} | {} | parked {} | closed {} | overlay {} | reply {} | cursor {} | text {}",
+            "pane {}/{} | {} | {} | parked {} | closed {} | overlay {} | mode {} | reply {} | cursor {} | text {}",
             at + 1,
             order.len(),
             focused,
@@ -931,6 +931,7 @@ impl Editor {
             } else {
                 "none"
             },
+            self.vim.mode().label(),
             self.reply
                 .as_ref()
                 .map_or("-".to_owned(), |r| r.0.to_string()),
