@@ -205,15 +205,16 @@ impl Editor {
         let row = self
             .tab_rows_shown()
             .then(|| self.render_tab_row(id, p, cx));
-        let body = div()
+        // The band above the text says where the cursor is; scrollbars lie
+        // over the text's right and bottom edges.
+        let crumbs = self.render_breadcrumbs(id, full_width, p, cx);
+        let bars = self.render_scrollbars(id, p, cx);
+        let text = div()
             .flex()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .when(!full_width, |d| d.justify_center())
-            .pt(px(space::S8))
-            .when(several, |d| d.px(px(space::S3)))
-            .when(several && !focused, |d| d.opacity(0.72))
             .child(
                 list(lines, move |ix, _window, cx: &mut App| {
                     view.update(cx, |this, cx| {
@@ -228,7 +229,19 @@ impl Editor {
                 .when(!full_width, |l| {
                     l.max_w(px(size::GUTTER_W + size::MEASURE + space::S8))
                 }),
-            )
+            );
+        let body = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .when(several, |d| d.px(px(space::S3)))
+            .when(several && !focused, |d| d.opacity(0.72))
+            .child(crumbs)
+            .child(text)
+            .children(bars)
             .into_any_element();
         div()
             .flex()
@@ -380,8 +393,15 @@ impl Render for Editor {
             .on_key_down(cx.listener(Self::on_key))
             .on_mouse_up(
                 gpui::MouseButton::Left,
-                cx.listener(|this, _, _, _| this.drag_anchor = None),
+                cx.listener(|this, _, _, _| {
+                    this.drag_anchor = None;
+                    this.scrollbar_drag = None;
+                }),
             )
+            // A held scrollbar follows the mouse anywhere in the window.
+            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                this.scrollbar_moved(event, cx);
+            }))
             // No top bar (ADR-0015): with no tab rows, a band along the top
             // moves the window.
             .when(!rows, |d| d.child(self.render_top_band()))

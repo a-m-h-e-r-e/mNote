@@ -24,6 +24,7 @@ pub(crate) mod keys;
 pub(crate) mod line;
 mod lines;
 mod overlays;
+mod pane_chrome;
 mod pane_menu;
 mod panes;
 mod plugin_list;
@@ -195,6 +196,13 @@ pub struct Editor {
     tab_rows: tab_line::TabRows,
     /// How the next note opened takes its place (kept, preview, replace).
     opening: tabs::OpenAs,
+    /// A scrollbar held by the mouse (its pane; vertical), and where each
+    /// pane's are.
+    scrollbar_drag: Option<(PaneId, bool)>,
+    scrollbar_bounds: pane_chrome::ScrollbarBounds,
+    /// `⌘+` / `⌘-` zoom (steps of 10%), over config.toml's fonts.
+    zoom: i32,
+    base_fonts: crate::theme::Fonts,
     /// The session (panes and tabs) has been restored, so changes save it;
     /// the shape last saved, and the save waiting to happen.
     session_restored: bool,
@@ -455,6 +463,10 @@ impl Editor {
             closed_tabs: Vec::new(),
             tab_rows: Default::default(),
             opening: Default::default(),
+            scrollbar_drag: None,
+            scrollbar_bounds: Default::default(),
+            zoom: 0,
+            base_fonts: Default::default(),
             session_restored: false,
             session_shape_saved: String::new(),
             session_task: None,
@@ -759,7 +771,8 @@ impl Editor {
         if !config.autosave {
             self.autosave_task = None;
         }
-        if crate::theme::set_fonts(fonts) {
+        self.base_fonts = fonts.clone();
+        if crate::theme::set_fonts(fonts.zoomed(self.zoom)) {
             self.remeasure_all();
             cx.refresh_windows();
         }

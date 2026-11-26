@@ -50,6 +50,28 @@ pub struct Fonts {
     pub ui_size: f32,
 }
 
+/// Zoom steps (`⌘+` / `⌘-`): 10% each, from 50% to 200%.
+pub const ZOOM_MIN: i32 = -5;
+pub const ZOOM_MAX: i32 = 10;
+
+/// How much bigger zoom level `level` makes text: 1.0 at 0, 1.1 at 1…
+pub fn zoom_factor(level: i32) -> f32 {
+    1.0 + 0.1 * level.clamp(ZOOM_MIN, ZOOM_MAX) as f32
+}
+
+impl Fonts {
+    /// These fonts at zoom level `level`: both sizes scaled, rounded to
+    /// half points.
+    pub fn zoomed(&self, level: i32) -> Fonts {
+        let scale = |size: f32| (size * zoom_factor(level) * 2.0).round() / 2.0;
+        Fonts {
+            note_size: scale(self.note_size),
+            ui_size: scale(self.ui_size),
+            ..self.clone()
+        }
+    }
+}
+
 impl Default for Fonts {
     fn default() -> Self {
         Fonts {
@@ -668,6 +690,20 @@ mod tests {
 #[cfg(test)]
 mod font_tests {
     use super::*;
+
+    #[test]
+    fn zoom_scales_both_sizes_within_limits() {
+        let base = Fonts {
+            note_size: 16.,
+            ui_size: 15.,
+            ..Fonts::default()
+        };
+        assert_eq!(base.zoomed(0), base);
+        let z = base.zoomed(2);
+        assert_eq!((z.note_size, z.ui_size), (19.0, 18.0));
+        assert_eq!(base.zoomed(-5).note_size, 8.0, "50%");
+        assert_eq!(base.zoomed(99).note_size, 32.0, "200% at most");
+    }
 
     #[test]
     fn font_size_scales_note_styles_only() {

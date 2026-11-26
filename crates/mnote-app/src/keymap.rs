@@ -60,6 +60,8 @@ impl Chord {
                     // ⇧ may come as the shifted symbol: ⌘⇧] as `}`.
                     (Some('{'), None) => ChordKey::Char('['),
                     (Some('}'), None) => ChordKey::Char(']'),
+                    (Some('+'), None) => ChordKey::Char('='),
+                    (Some('_'), None) => ChordKey::Char('-'),
                     (Some(c), None) => ChordKey::Char(c),
                     _ => return None,
                 }

@@ -514,6 +514,23 @@ impl Editor {
             .into_any_element()
     }
 
+    /// `⌘+` / `⌘-` (`by` steps) and `⌘0` (`None`): the note text and the
+    /// interface bigger or smaller together, as VS Code and Zed zoom.
+    pub(super) fn zoom(&mut self, by: Option<i32>, cx: &mut Context<Self>) {
+        let level = match by {
+            Some(by) => (self.zoom + by).clamp(crate::theme::ZOOM_MIN, crate::theme::ZOOM_MAX),
+            None => 0,
+        };
+        self.zoom = level;
+        if crate::theme::set_fonts(self.base_fonts.zoomed(level)) {
+            self.remeasure_all();
+            cx.refresh_windows();
+        }
+        let percent = (crate::theme::zoom_factor(level) * 100.).round();
+        self.reply = Some((format!("Zoom {percent}%").into(), false));
+        cx.notify();
+    }
+
     /// `⌘M`, `⌃⌘F`: done at the next frame, which has the window.
     pub(super) fn window_op(&mut self, op: WindowOp, cx: &mut Context<Self>) {
         self.tab_rows.window_op = Some(op);

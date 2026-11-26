@@ -397,6 +397,28 @@ pub fn builtin() -> Vec<Command> {
         )
         .bind("<C-w>T"),
         Command::new(
+            "zoom-in",
+            "Zoom in",
+            "Makes the note text and the interface bigger together, 10% a step (up to 200%).",
+            act(|e, _, cx| e.zoom(Some(1), cx)),
+        )
+        .bind("<D-=>")
+        .bind("<D-S-=>"),
+        Command::new(
+            "zoom-out",
+            "Zoom out",
+            "Makes the note text and the interface smaller together, 10% a step (down to 50%).",
+            act(|e, _, cx| e.zoom(Some(-1), cx)),
+        )
+        .bind("<D-->"),
+        Command::new(
+            "zoom-reset",
+            "Reset zoom",
+            "Back to the sizes config.toml sets (100%).",
+            act(|e, _, cx| e.zoom(None, cx)),
+        )
+        .bind("<D-0>"),
+        Command::new(
             "quit-app",
             "Quit mNote",
             "Saves every note and quits; unsaved untitled text asks for ! (:qa!).",

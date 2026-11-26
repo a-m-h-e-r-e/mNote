@@ -396,6 +396,23 @@ expect strokes 9 'pane 1/1 | a.md b.md >a2.md |'
 # ⌘⇧T reopens the last closed tab (its pane is gone: in this one).
 expect strokes 10 'pane 1/1 | >a.md b.md a2.md |'
 
+cat > "$SANDBOX/zoom.keys" <<'KEYS'
+stroke cmd-=
+state
+stroke cmd-shift-=
+state
+stroke cmd--
+state
+stroke cmd-0
+state
+KEYS
+run zoom
+# ⌘= and ⌘+ zoom in by 10%, ⌘- out, ⌘0 back to 100%.
+expect zoom 1 'reply Zoom 110%'
+expect zoom 2 'reply Zoom 120%'
+expect zoom 3 'reply Zoom 110%'
+expect zoom 4 'reply Zoom 100%'
+
 # Restoring: three runs on one vault, the session kept between them.
 printf 'vault = "%s"\nrestore_session = true\n' "$VAULT" > "$CONFIG"
 cat > "$SANDBOX/session1.keys" <<'KEYS'

@@ -408,10 +408,15 @@ pub fn source_look(kind: &LineKind, content: &str, plain: bool, p: &Palette) -> 
 }
 
 /// Code colours for one line of a block, from the block's highlights.
-/// A line of a code file: monospace, as typed, no background (its colours
-/// are added from its syntax map).
+/// A line of a code file: monospace at the note's size (code blocks inside
+/// a note are smaller; a code file is the whole page), as typed, no
+/// background (its colours are added from its syntax map).
 pub fn code_file_look(content: &str, p: &Palette) -> Look {
-    Look::new(StyledLine::plain(content), text::CODE, Theme::color(p.ink))
+    Look::new(
+        StyledLine::plain(content),
+        text::NOTE_BODY,
+        Theme::color(p.ink),
+    )
 }
 
 /// Code's highlight spans as styling, in the theme's syntax colours; a

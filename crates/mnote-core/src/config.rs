@@ -416,7 +416,7 @@ impl Default for Config {
             git_blame: false,
             font: "IBM Plex Mono".into(),
             ui_font: "IBM Plex Sans".into(),
-            font_size: 16,
+            font_size: 15,
             ui_font_size: 15,
             leader: ' ',
             system_clipboard: true,
