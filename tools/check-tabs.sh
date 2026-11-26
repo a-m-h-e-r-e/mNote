@@ -153,6 +153,83 @@ grep -q '^# Standup notes' "$VAULT/standup notes.md" 2>/dev/null || {
     failed=1
 }
 
+cat > "$SANDBOX/keys.keys" <<'KEYS'
+key <D-t>
+state
+gT
+state
+gt
+state
+2gt
+state
+g<Tab>
+state
+key <D-S-]>
+key <C-Tab>
+state
+key <C-PageUp>
+state
+:e b<CR>
+<C-w>v
+<C-w>T
+state
+:tabmove 0<CR>
+state
+:tabmove<CR>
+state
+key <D-1>
+state
+key <D-9>
+state
+key <D-w>
+state
+key <D-S-t>
+state
+key <D-t>
+ii<Esc>
+key <D-w>
+state
+discard<CR>
+state
+key <D-S-w>
+key <D-S-w>
+key <D-S-w>
+key <D-w>
+state
+KEYS
+run keys
+# ⌘T: a new tab, on an untitled note.
+expect keys 1 'tab 2/2 | >untitled | [>a.md]'
+# gT, gt, {N}gt, g⇥ (the last used).
+expect keys 2 'tab 1/2 | >a.md'
+expect keys 3 'tab 2/2'
+expect keys 4 'tab 2/2'
+expect keys 5 'tab 1/2'
+# ⌘⇧] then ⌃⇥ wrap round; ⌃PageUp goes back.
+expect keys 6 'tab 1/2'
+expect keys 7 'tab 2/2'
+# ⌃w T: the focused pane leaves for a tab of its own, after this one.
+expect keys 8 'tab 3/3 | >b.md | [>a.md] [>b.md]'
+# :tabmove 0 makes it first, :tabmove last.
+expect keys 9 'tab 1/3 | >b.md | [>a.md] [>b.md]'
+expect keys 10 'tab 3/3 | >b.md | [>a.md] [>b.md]'
+# ⌘1 and ⌘9.
+expect keys 11 'tab 1/3 | >a.md'
+expect keys 12 'tab 3/3 | >b.md'
+# ⌘W closes the tab (its last pane); ⌘⇧T reopens it.
+expect keys 13 'tab 1/2'
+expect keys 13 'closed 1'
+expect keys 14 'tab 3/3 | >b.md'
+# Untitled text asks before ⌘W closes it.
+expect keys 15 'tab 4/4 | >untitled 2'
+expect keys 15 'overlay open'
+# Discard closes it, and the last-used tab shows.
+expect keys 16 'tab 3/3 | >b.md'
+expect keys 16 'overlay none'
+# ⌘⇧W closes tabs; ⌘W on the last pane of the last tab never quits.
+expect keys 17 'tab 1/1'
+expect keys 17 'reply ⌘Q quits mNote'
+
 if [ "$failed" = 0 ]; then
     echo "tabs: all checks passed"
 fi

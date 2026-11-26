@@ -1377,6 +1377,32 @@ impl Vim {
                 self.pending = Pending::None;
                 return self.screen_motion(c == 'j', buf);
             }
+            // `gt` / `gT` / `g<Tab>`: tab pages, which are the app's. `{N}gt`
+            // goes to tab N, `{N}gT` back N tabs, `g<Tab>` to the last used.
+            (Pending::G, Key::Char(c @ ('t' | 'T'))) if self.op.is_none() => {
+                let count = self.count.take();
+                self.cancel();
+                if self.mode.is_visual() {
+                    self.leave_visual(buf.text());
+                }
+                let mut command =
+                    crate::ex::AppCommand::new(if c == 't' { "tabnext" } else { "tabprevious" });
+                if let Some(n) = count {
+                    command.args = n.to_string();
+                }
+                self.cmd.app_command = Some(command);
+                return Effect::Handled;
+            }
+            (Pending::G, Key::Tab) if self.op.is_none() => {
+                self.cancel();
+                if self.mode.is_visual() {
+                    self.leave_visual(buf.text());
+                }
+                let mut command = crate::ex::AppCommand::new("tabnext");
+                command.args = "#".to_owned();
+                self.cmd.app_command = Some(command);
+                return Effect::Handled;
+            }
             // `gd` follows the link under the cursor: the app does that.
             (Pending::G, Key::Char('d')) => {
                 self.cancel();

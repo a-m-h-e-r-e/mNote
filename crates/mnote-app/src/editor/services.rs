@@ -280,7 +280,8 @@ impl Editor {
     /// `MNOTE_SCRIPT=file`: plays the file's lines into this window, for
     /// end-to-end checks (`tools/check-tabs.sh`), then quits. A line is keys
     /// in Vim's notation (`:tabnew<CR>`, `<C-w>v`), `state` (prints the
-    /// tabs, panes and text as `mnote state: …`) or `# a comment`.
+    /// tabs, panes and text as `mnote state: …`), `key <D-S-t>` (a ⌘ key
+    /// or chord, through the keymap) or `# a comment`.
     pub fn run_script(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
         let lines: Vec<String> = std::fs::read_to_string(&path)
             .map(|t| t.lines().map(str::to_owned).collect())
@@ -297,6 +298,9 @@ impl Editor {
                 let _ = this.update(cx, |this, cx| {
                     if line == "state" {
                         eprintln!("mnote state: {}", this.state_line());
+                    } else if let Some(keys) = line.strip_prefix("key ") {
+                        // A ⌘ key or chord, as the keymap binds it.
+                        this.press_binding(keys, cx);
                     } else {
                         for key in mnote_vim::parse_keys(&line) {
                             this.press(key, cx);
@@ -309,6 +313,25 @@ impl Editor {
             }
             let _ = this.update(cx, |_, cx| cx.quit());
         }));
+    }
+
+    /// Runs what the keymap binds to a ⌘ key or chord (`<D-w>`), as
+    /// pressing it would.
+    fn press_binding(&mut self, notation: &str, cx: &mut Context<Self>) {
+        use crate::keymap::Stroke;
+        let map = crate::keymap::current();
+        let id = match crate::keymap::parse(notation).as_deref() {
+            Ok([Stroke::Cmd(c)]) => map.cmd(*c).map(str::to_owned),
+            Ok([Stroke::Chord(chord)]) => map.chord(*chord).map(str::to_owned),
+            _ => None,
+        };
+        let overlay = self.picker.is_some() || self.folder_edit.is_some();
+        if let Some(ix) = id.and_then(|id| crate::commands::by_id(&id))
+            && (!overlay || crate::commands::all()[ix].over_overlays)
+        {
+            self.run_command(ix, cx);
+            cx.notify();
+        }
     }
 
     /// `MNOTE_LATENCY_BENCH=n`: types `n` characters into this window, one

@@ -42,7 +42,7 @@ pub fn builtin() -> Vec<Command> {
             .map(|v| ((*v).to_owned(), format!("{v} view")))
             .collect(),
     );
-    vec![
+    let mut all = vec![
         Command::new(
             "find",
             "Find a note",
@@ -281,6 +281,7 @@ pub fn builtin() -> Vec<Command> {
             "A new tab after this one, on the note named or an untitled note.",
             act(|e, call, cx| e.tab_new(call.args.as_deref(), cx)),
         )
+        .bind("<D-t>")
         .shown_as("tabnew")
         .ex("tabnew", 6, ArgKind::Note),
         Command::new(
@@ -289,6 +290,9 @@ pub fn builtin() -> Vec<Command> {
             "Shows the next tab, round the window; :tabnext N shows tab N, # the last used.",
             act(|e, call, cx| e.tab_next(call.args.as_deref(), cx)),
         )
+        .bind("<C-Tab>")
+        .bind("<C-PageDown>")
+        .bind("<D-S-]>")
         .shown_as("tabnext")
         .ex("tabnext", 4, ArgKind::Any),
         Command::new(
@@ -297,6 +301,9 @@ pub fn builtin() -> Vec<Command> {
             "Shows the previous tab, round the window; :tabprevious N goes back N.",
             act(|e, call, cx| e.tab_previous(call.args.as_deref(), cx)),
         )
+        .bind("<C-S-Tab>")
+        .bind("<C-PageUp>")
+        .bind("<D-S-[>")
         .shown_as("tabprevious")
         .ex("tabprevious", 4, ArgKind::Any),
         Command::new(
@@ -305,6 +312,7 @@ pub fn builtin() -> Vec<Command> {
             "Closes this tab and its panes (or tab N); the last-used tab shows. :tabreopen brings it back.",
             act(|e, call, cx| e.tab_close(call.args.as_deref(), call.bang, cx)),
         )
+        .bind("<D-S-w>")
         .shown_as("tabclose")
         .ex("tabclose", 4, ArgKind::Any),
         Command::new(
@@ -321,8 +329,47 @@ pub fn builtin() -> Vec<Command> {
             "Brings back the tab closed last, with its panes, where it was.",
             act(|e, _, cx| e.tab_reopen(cx)),
         )
+        .bind("<D-S-t>")
         .shown_as("tabreopen")
         .ex("tabreopen", 6, ArgKind::None),
+        Command::new(
+            "tab-recent",
+            "Last-used tab",
+            "Goes back to the tab used before this one (g⇥, :tabnext #).",
+            act(|e, _, cx| e.tab_next(Some("#"), cx)),
+        ),
+        Command::new(
+            "tab-last",
+            "Last tab",
+            "Shows the last tab.",
+            act(|e, _, cx| e.tab_edge(true, cx)),
+        )
+        .bind("<D-9>")
+        .shown_as("tablast")
+        .ex("tablast", 4, ArgKind::None),
+        Command::new(
+            "tab-move",
+            "Move tab",
+            "Moves this tab: to the end, after tab N (0 is first), or +N / -N places.",
+            act(|e, call, cx| e.tab_move(call.args.as_deref(), cx)),
+        )
+        .shown_as("tabmove")
+        .ex("tabmove", 4, ArgKind::Any),
+        Command::new(
+            "pane-to-tab",
+            "Move pane to a new tab",
+            "The focused pane leaves this tab for a new one of its own.",
+            act(|e, _, cx| e.pane_to_tab(cx)),
+        )
+        .bind("<C-w>T"),
+        Command::new(
+            "close-something",
+            "Close",
+            "Closes one thing: an overlay, else this pane, else this tab. It never quits mNote (⌘Q does).",
+            act(|e, _, cx| e.close_something(cx)),
+        )
+        .bind("<D-w>")
+        .over_overlays(),
         Command::new(
             "tab-list",
             "List tabs",
@@ -337,6 +384,7 @@ pub fn builtin() -> Vec<Command> {
             "Saves the note under another path, which it is from then on; an untitled note gets its name.",
             act(|e, call, cx| e.save_as(call.args.as_deref(), call.bang, cx)),
         )
+        .bind("<D-S-s>")
         .shown_as("saveas")
         .ex("saveas", 3, ArgKind::Note),
         pane(
@@ -527,13 +575,6 @@ pub fn builtin() -> Vec<Command> {
             act(|e, _, cx| e.tab_edge(false, cx)),
         ),
         Command::ex_only(
-            "tablast",
-            4,
-            ArgKind::None,
-            "Shows the last tab.",
-            act(|e, _, cx| e.tab_edge(true, cx)),
-        ),
-        Command::ex_only(
             "qall",
             2,
             ArgKind::None,
@@ -583,5 +624,16 @@ pub fn builtin() -> Vec<Command> {
             "Goes to the previous place in the results list.",
             act(|e, _, cx| e.list_step(-1, cx)),
         ),
-    ]
+    ];
+    // ⌘1 … ⌘8: tab N (⌘9 is the last tab, above).
+    all.extend((1..=8).map(|n| {
+        Command::new(
+            &format!("tab-{n}"),
+            &format!("Tab {n}"),
+            &format!("Shows tab {n}, if there is one."),
+            act(move |e, _, cx| e.tab_number(n, cx)),
+        )
+        .bind(&format!("<D-{n}>"))
+    }));
+    all
 }

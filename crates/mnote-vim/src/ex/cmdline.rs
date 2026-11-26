@@ -1075,6 +1075,35 @@ mod tests {
     }
 
     #[test]
+    fn gt_and_gt_with_a_count_ask_the_app_for_tabs() {
+        let call = |name: &str, args: &str| AppCommand {
+            name: name.into(),
+            args: args.into(),
+            bang: false,
+        };
+        let (mut vim, mut buf) = setup("one two\n");
+        type_keys(&mut vim, &mut buf, "gt");
+        assert_eq!(vim.take_app_command(), Some(call("tabnext", "")));
+        type_keys(&mut vim, &mut buf, "3gt");
+        assert_eq!(vim.take_app_command(), Some(call("tabnext", "3")));
+        type_keys(&mut vim, &mut buf, "gT");
+        assert_eq!(vim.take_app_command(), Some(call("tabprevious", "")));
+        type_keys(&mut vim, &mut buf, "2gT");
+        assert_eq!(vim.take_app_command(), Some(call("tabprevious", "2")));
+        type_keys(&mut vim, &mut buf, "g<Tab>");
+        assert_eq!(vim.take_app_command(), Some(call("tabnext", "#")));
+        // From visual mode too, which it leaves as Vim does.
+        type_keys(&mut vim, &mut buf, "vlgt");
+        assert_eq!(vim.take_app_command(), Some(call("tabnext", "")));
+        assert_eq!(vim.mode(), crate::Mode::Normal);
+        assert_eq!(buf.to_string(), "one two\n", "nothing changed");
+        // After an operator it isn't a tab key: `dgt` deletes nothing.
+        type_keys(&mut vim, &mut buf, "dgt");
+        assert_eq!(vim.take_app_command(), None);
+        assert_eq!(buf.to_string(), "one two\n");
+    }
+
+    #[test]
     fn gd_asks_the_app_to_follow_a_link() {
         let (mut vim, mut buf) = setup("see [[ui-design]]\n");
         type_keys(&mut vim, &mut buf, "wwgd");

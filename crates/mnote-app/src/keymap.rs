@@ -3,9 +3,10 @@
 //! themselves; config.toml's `[keys]` table adds, moves or removes them.
 //!
 //! Bindings are written as in Vim: `<leader>f`, `<C-w>v` (⌃w then v),
-//! `<C-w><Left>`, and `<D-k>` for ⌘K. A binding that starts with ⌘ works
-//! in any mode; the others work in NORMAL with nothing half typed, before
-//! Vim sees the keys. A sequence that's the start of a longer binding waits
+//! `<C-w><Left>`, and `<D-k>` for ⌘K. Chords — `<D-S-t>` (⌘⇧T),
+//! `<C-Tab>`, `<C-S-Tab>`, `<C-PageDown>`, `<C-PageUp>` — are single keys
+//! too. A binding that starts with ⌘ or is a chord works in any mode; the
+//! others work in NORMAL with nothing half typed, before Vim sees the keys. A sequence that's the start of a longer binding waits
 //! for the next key.
 
 use std::cell::RefCell;
@@ -23,6 +24,59 @@ pub enum Stroke {
     Key(Key),
     /// ⌘ with a letter or symbol (`⌘K` is `Cmd('k')`).
     Cmd(char),
+    /// A key with modifiers Vim doesn't see, in any mode: ⌘⇧T, ⌃⇥, ⌃PageDown.
+    Chord(Chord),
+}
+
+/// A key held with ⌘, ⌃ or ⇧ that the app takes in every mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Chord {
+    pub cmd: bool,
+    pub ctrl: bool,
+    pub shift: bool,
+    pub key: ChordKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChordKey {
+    /// A letter, digit or symbol, unshifted and lower case (`t`, `]`).
+    Char(char),
+    Tab,
+    PageUp,
+    PageDown,
+}
+
+impl Chord {
+    /// The chord for a key with these modifiers, if it's one (⌘ with ⇧,
+    /// or ⌃ with ⇥ or Page Up/Down). Plain ⌘ keys are `Stroke::Cmd`.
+    pub fn of(key: &str, cmd: bool, ctrl: bool, shift: bool) -> Option<Chord> {
+        let key = match key.to_ascii_lowercase().as_str() {
+            "tab" => ChordKey::Tab,
+            "pageup" => ChordKey::PageUp,
+            "pagedown" => ChordKey::PageDown,
+            other => {
+                let mut chars = other.chars();
+                match (chars.next(), chars.next()) {
+                    // ⇧ may come as the shifted symbol: ⌘⇧] as `}`.
+                    (Some('{'), None) => ChordKey::Char('['),
+                    (Some('}'), None) => ChordKey::Char(']'),
+                    (Some(c), None) => ChordKey::Char(c),
+                    _ => return None,
+                }
+            }
+        };
+        let chord = Chord {
+            cmd,
+            ctrl,
+            shift,
+            key,
+        };
+        let ok = match key {
+            ChordKey::Char(_) => cmd && shift && !ctrl,
+            ChordKey::Tab | ChordKey::PageUp | ChordKey::PageDown => ctrl && !cmd,
+        };
+        ok.then_some(chord)
+    }
 }
 
 /// A key sequence and the command (registry id) it runs.
@@ -120,6 +174,14 @@ impl Keymap {
         }
     }
 
+    /// The command bound to `chord`.
+    pub fn chord(&self, chord: Chord) -> Option<&str> {
+        self.bindings
+            .iter()
+            .find(|b| b.strokes == [Stroke::Chord(chord)])
+            .map(|b| b.command.as_str())
+    }
+
     /// The command bound to ⌘ with `key` (lower case).
     pub fn cmd(&self, key: char) -> Option<&str> {
         self.bindings
@@ -146,7 +208,7 @@ fn stroke_is(stroke: Stroke, key: Key, leader: char) -> bool {
     match stroke {
         Stroke::Leader => key == Key::Char(leader),
         Stroke::Key(k) => k == key,
-        Stroke::Cmd(_) => false,
+        Stroke::Cmd(_) | Stroke::Chord(_) => false,
     }
 }
 
@@ -162,6 +224,25 @@ pub fn parse(notation: &str) -> Result<Vec<Stroke>, String> {
         if lower.starts_with("<leader>") {
             strokes.push(Stroke::Leader);
             rest = &rest["<leader>".len()..];
+            continue;
+        }
+        if lower.starts_with("<d-s-")
+            || lower.starts_with("<s-d-")
+            || lower.starts_with("<c-tab>")
+            || lower.starts_with("<c-s-tab>")
+            || lower.starts_with("<c-page")
+        {
+            let end = rest.find('>').ok_or("an unclosed <…>")?;
+            let inner = &lower[1..end];
+            let parts: Vec<&str> = inner.split('-').collect();
+            let (mods, key) = parts.split_at(parts.len() - 1);
+            let has = |m: &str| mods.contains(&m);
+            let key = if key[0].is_empty() { "-" } else { key[0] };
+            match Chord::of(key, has("d"), has("c"), has("s")) {
+                Some(chord) => strokes.push(Stroke::Chord(chord)),
+                None => return Err(format!("{} isn't a key", &rest[..=end])),
+            }
+            rest = &rest[end + 1..];
             continue;
         }
         if lower.starts_with("<d-") {
@@ -187,8 +268,12 @@ pub fn parse(notation: &str) -> Result<Vec<Stroke>, String> {
         }
         rest = &rest[len..];
     }
-    if strokes.iter().skip(1).any(|s| matches!(s, Stroke::Cmd(_))) {
-        return Err("a ⌘ key only works on its own".into());
+    if strokes.len() > 1
+        && strokes
+            .iter()
+            .any(|s| matches!(s, Stroke::Cmd(_) | Stroke::Chord(_)))
+    {
+        return Err("a ⌘ key or chord only works on its own".into());
     }
     Ok(strokes)
 }
@@ -200,6 +285,25 @@ pub fn show(strokes: &[Stroke]) -> String {
         .map(|s| match s {
             Stroke::Leader => mnote_core::config::leader_name(crate::commands::leader()),
             Stroke::Cmd(c) => format!("⌘{}", c.to_ascii_uppercase()),
+            Stroke::Chord(chord) => {
+                let mut out = String::new();
+                if chord.ctrl {
+                    out.push('⌃');
+                }
+                if chord.shift {
+                    out.push('⇧');
+                }
+                if chord.cmd {
+                    out.push('⌘');
+                }
+                match chord.key {
+                    ChordKey::Char(c) => out.extend(c.to_uppercase()),
+                    ChordKey::Tab => out.push('⇥'),
+                    ChordKey::PageUp => out.push_str("PageUp"),
+                    ChordKey::PageDown => out.push_str("PageDown"),
+                }
+                out
+            }
             Stroke::Key(key) => match key {
                 Key::Ctrl(c) => format!("⌃{c}"),
                 Key::Alt(c) => format!("⌥{c}"),
@@ -262,6 +366,44 @@ mod tests {
             Ok(vec![Stroke::Key(Key::Ctrl('w')), Stroke::Key(Key::Left)])
         );
         assert_eq!(parse("<D-K>"), Ok(vec![Stroke::Cmd('k')]));
+        let chord = |cmd, ctrl, shift, key| {
+            Ok(vec![Stroke::Chord(Chord {
+                cmd,
+                ctrl,
+                shift,
+                key,
+            })])
+        };
+        assert_eq!(
+            parse("<D-S-t>"),
+            chord(true, false, true, ChordKey::Char('t'))
+        );
+        assert_eq!(
+            parse("<S-D-]>"),
+            chord(true, false, true, ChordKey::Char(']'))
+        );
+        assert_eq!(parse("<C-Tab>"), chord(false, true, false, ChordKey::Tab));
+        assert_eq!(parse("<C-S-Tab>"), chord(false, true, true, ChordKey::Tab));
+        assert_eq!(
+            parse("<C-PageDown>"),
+            chord(false, true, false, ChordKey::PageDown)
+        );
+        assert!(parse("<C-w><C-Tab>").is_err(), "a chord only on its own");
+        assert_eq!(show(&parse("<D-S-t>").expect("ok")), "⇧⌘T");
+        assert_eq!(show(&parse("<C-S-Tab>").expect("ok")), "⌃⇧⇥");
+        assert_eq!(show(&parse("<C-PageUp>").expect("ok")), "⌃PageUp");
+        // Typed keys map to the same chords; plain ⌘ keys aren't chords.
+        assert_eq!(
+            Chord::of("}", true, false, true),
+            Some(Chord {
+                cmd: true,
+                ctrl: false,
+                shift: true,
+                key: ChordKey::Char(']')
+            })
+        );
+        assert_eq!(Chord::of("t", true, false, false), None);
+        assert_eq!(Chord::of("tab", false, false, false), None);
         assert!(parse("").is_err());
         assert!(parse("<D-kk>").is_err());
         assert!(parse("a<D-k>").is_err(), "⌘ only on its own");

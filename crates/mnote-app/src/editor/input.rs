@@ -55,6 +55,22 @@ impl Editor {
                 return cx.notify();
             }
         }
+        // Chords (⌘⇧T, ⌃⇥, ⌃PageDown) run in any mode, as ⌘ keys do.
+        let m = &stroke.modifiers;
+        if !m.alt
+            && let Some(chord) =
+                crate::keymap::Chord::of(&stroke.key, m.platform, m.control, m.shift)
+            && let Some(id) = crate::keymap::current().chord(chord).map(str::to_owned)
+            && let Some(ix) = crate::commands::by_id(&id)
+        {
+            let overlay =
+                self.picker.is_some() || self.folder_edit.is_some() || self.first_run.is_some();
+            if !overlay || crate::commands::all()[ix].over_overlays {
+                cx.stop_propagation();
+                self.run_command(ix, cx);
+                return cx.notify();
+            }
+        }
         let Some(key) = keys::vim_key(stroke) else {
             return;
         };

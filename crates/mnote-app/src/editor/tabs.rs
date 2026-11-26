@@ -107,6 +107,48 @@ impl TabSet {
         self.order[at as usize]
     }
 
+    /// Moves the current tab to `index` (clamped).
+    pub fn move_current(&mut self, index: usize) {
+        let at = self.current_index();
+        let id = self.order.remove(at);
+        self.order.insert(index.min(self.order.len()), id);
+    }
+
+    /// Where `:tabmove {arg}` puts the current tab: no arg is last, `0`
+    /// first, `N` after tab N, `+N` / `-N` that many places along.
+    pub fn move_target(&self, arg: Option<&str>) -> Option<usize> {
+        let at = self.current_index();
+        let last = self.order.len() - 1;
+        let arg = arg.map(str::trim).filter(|a| !a.is_empty());
+        let Some(arg) = arg else {
+            return Some(last);
+        };
+        if let Some(n) = arg.strip_prefix('+') {
+            let n = if n.is_empty() {
+                1
+            } else {
+                n.parse::<usize>().ok()?
+            };
+            return Some((at + n).min(last));
+        }
+        if let Some(n) = arg.strip_prefix('-') {
+            let n = if n.is_empty() {
+                1
+            } else {
+                n.parse::<usize>().ok()?
+            };
+            return Some(at.saturating_sub(n));
+        }
+        let n = arg.parse::<usize>().ok()?;
+        if n == 0 {
+            return Some(0);
+        }
+        // After tab N as numbered now: one place less once this tab is
+        // out of the way, if it was before N.
+        let n = n.min(self.order.len());
+        Some(if at < n { n - 1 } else { n })
+    }
+
     /// Takes `id` out. The last tab can't go (`None`). When it was the
     /// current one, the last used of the others becomes current.
     pub fn remove(&mut self, id: TabId) -> Option<TabId> {
@@ -525,6 +567,135 @@ impl Editor {
         self.enter_tab(page, cx);
     }
 
+    /// `:tabmove [N|+N|-N]`.
+    pub(super) fn tab_move(&mut self, arg: Option<&str>, cx: &mut Context<Self>) {
+        match self.tabs.move_target(arg) {
+            Some(index) => {
+                self.tabs.move_current(index);
+                cx.notify();
+            }
+            None => {
+                self.reply = Some((
+                    format!("E475: Invalid argument: {}", arg.unwrap_or("")).into(),
+                    true,
+                ));
+            }
+        }
+    }
+
+    /// `:tabnext {N}` from the keys `⌘1` … `⌘8`: tab N, if there is one.
+    pub(super) fn tab_number(&mut self, n: usize, cx: &mut Context<Self>) {
+        if let Some(id) = self.tabs.nth(n) {
+            self.switch_tab(id, cx);
+        }
+    }
+
+    /// `⌃w T`: the focused pane moves to a new tab of its own, after this
+    /// one. With one pane there's nothing to move.
+    pub(super) fn pane_to_tab(&mut self, cx: &mut Context<Self>) {
+        if self.panes.len() < 2 {
+            self.reply = Some(("This tab has one pane: it's a tab of its own".into(), true));
+            return;
+        }
+        self.save_now(cx);
+        let moving = self.focused;
+        let order = self.layout.panes();
+        let at = order.iter().position(|&p| p == moving).unwrap_or(0);
+        let stays = if at > 0 { order[at - 1] } else { order[1] };
+        let mut page = self.stash_tab();
+        page.layout.remove(moving);
+        page.focused = stays;
+        let Some(i) = page.panes.iter().position(|p| p.id == moving) else {
+            return;
+        };
+        let mut slot = page.panes.remove(i);
+        self.tab_pages.push(page);
+        let id = self.tabs.add_after_current();
+        self.tabs.focus(id);
+        if let Some(mut local) = slot.local.take() {
+            self.swap_local(&mut local);
+        }
+        self.layout = Layout::Pane(moving);
+        self.panes = vec![slot];
+        self.focused = moving;
+        self.wraps.borrow_mut().clear();
+        self.restart_blink(cx);
+        cx.notify();
+    }
+
+    /// `⌘W`: closes one thing, and never mNote. An overlay or the command
+    /// line first; else the focused pane; else, on a tab's last pane, the
+    /// tab. On the very last pane it only says that `⌘Q` quits. Text that
+    /// isn't in a file (an untitled or scratch note) asks first.
+    pub(super) fn close_something(&mut self, cx: &mut Context<Self>) {
+        if self.picker.is_some() || self.folder_edit.is_some() || self.vim.command_line().is_some()
+        {
+            self.press(mnote_vim::Key::Esc, cx);
+            return;
+        }
+        if self.panes.len() < 2 && self.tabs.len() < 2 {
+            self.reply = Some(("⌘Q quits mNote".into(), false));
+            return;
+        }
+        let unsaved = matches!(self.source, Source::Untitled(_) | Source::Scratch)
+            && self.buffer.is_dirty()
+            && self.buffer.len_chars() > 0
+            && !self.shown_elsewhere(&self.source.doc_key());
+        if unsaved {
+            return self.ask_before_closing(cx);
+        }
+        self.close_focused(cx);
+    }
+
+    /// Closes the focused pane, or its tab when it's the tab's last.
+    fn close_focused(&mut self, cx: &mut Context<Self>) {
+        self.save_now(cx);
+        if self.panes.len() > 1 {
+            self.close_pane(cx);
+        } else if self.tabs.len() > 1 {
+            self.close_tab(self.tabs.current(), cx);
+        }
+    }
+
+    /// "Save "untitled" before closing?": Save as… (the save prompt),
+    /// Discard, or Cancel.
+    fn ask_before_closing(&mut self, cx: &mut Context<Self>) {
+        let name = self.source.doc_key().label();
+        let item = |text: &str, detail: &str| crate::picker::custom::Item {
+            text: text.into(),
+            detail: Some(detail.into()),
+        };
+        let items = vec![
+            item("Save as…", "name it; ⌘W again closes it"),
+            item(
+                "Discard",
+                "its text goes; ⌘⇧T brings the tab back, not the text",
+            ),
+            item("Cancel", "keep it open"),
+        ];
+        let picker = crate::picker::custom::CustomPicker::new(
+            format!("Save \u{201c}{name}\u{201d} before closing?"),
+            items,
+            std::rc::Rc::new(move |choice| {
+                crate::picker::PickerCallback(std::rc::Rc::new(move |e: &mut Editor, cx| {
+                    match choice {
+                        0 => e.save_prompt(cx),
+                        1 => {
+                            if let Source::Untitled(n) = e.source {
+                                Self::remove_draft(n);
+                            }
+                            // Nothing to keep: the text isn't asked about again.
+                            e.buffer.mark_saved();
+                            e.close_focused(cx);
+                        }
+                        _ => {}
+                    }
+                }))
+            }),
+        );
+        self.open_picker(crate::picker::Picker::new(Box::new(picker)), cx);
+    }
+
     /// `:tabnext [N]`, `gt`: the next tab, or tab N.
     pub(super) fn tab_next(&mut self, arg: Option<&str>, cx: &mut Context<Self>) {
         let arg = arg.map(str::trim).filter(|a| !a.is_empty());
@@ -647,13 +818,18 @@ impl Editor {
             .collect();
         let text: String = self.buffer.to_string().replace('\n', "\\n");
         format!(
-            "tab {}/{} | {} | {} | parked {} | closed {} | reply {} | cursor {} | text {}",
+            "tab {}/{} | {} | {} | parked {} | closed {} | overlay {} | reply {} | cursor {} | text {}",
             self.tabs.current_index() + 1,
             self.tabs.len(),
             pane_list(&self.layout, &self.panes, self.focused),
             others.join(" "),
             self.parked.len(),
             self.closed_tabs.len(),
+            if self.picker.is_some() {
+                "open"
+            } else {
+                "none"
+            },
             self.reply
                 .as_ref()
                 .map_or("-".to_owned(), |r| r.0.to_string()),
@@ -749,6 +925,29 @@ mod tests {
         assert_eq!(tabs.remove(TabId(0)), Some(c));
         assert_eq!(tabs.remove(c), None, "the last tab stays");
         assert_eq!(tabs.len(), 1);
+    }
+
+    #[test]
+    fn tabmove_places_the_tab_as_vim_does() {
+        let mut tabs = TabSet::default();
+        let b = tabs.add_at(1);
+        let c = tabs.add_at(2);
+        let d = tabs.add_at(3);
+        let a = TabId(0);
+        // [a b c d], a current.
+        assert_eq!(tabs.move_target(None), Some(3));
+        assert_eq!(tabs.move_target(Some("0")), Some(0));
+        assert_eq!(tabs.move_target(Some("2")), Some(1), "after b");
+        assert_eq!(tabs.move_target(Some("+2")), Some(2));
+        assert_eq!(tabs.move_target(Some("-")), Some(0));
+        assert_eq!(tabs.move_target(Some("x")), None);
+        tabs.move_current(1);
+        assert_eq!(tabs.order(), [b, a, c, d]);
+        tabs.focus(d);
+        tabs.move_current(tabs.move_target(Some("1")).expect("valid"));
+        assert_eq!(tabs.order(), [b, d, a, c]);
+        tabs.move_current(tabs.move_target(Some("+9")).expect("valid"));
+        assert_eq!(tabs.order(), [b, a, c, d]);
     }
 
     #[test]
