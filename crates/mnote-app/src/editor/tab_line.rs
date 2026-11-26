@@ -34,8 +34,6 @@ pub(super) struct TabRows {
     scroll: RefCell<HashMap<PaneId, ScrollHandle>>,
     /// The tab each row last brought into view.
     revealed: RefCell<HashMap<PaneId, usize>>,
-    /// The tab a drag started on, while the button is down.
-    pub dragging: Option<(PaneId, usize)>,
     /// Whether the window buttons are shown now (`None`: not set yet).
     pub buttons_shown: Option<bool>,
     /// A window action a command asked for, done at the next frame (it
@@ -48,6 +46,35 @@ pub(super) struct TabRows {
 pub(super) enum WindowOp {
     Minimize,
     FullScreen,
+}
+
+/// A tab being dragged: where it's from, and how its ghost looks.
+#[derive(Clone)]
+pub(super) struct DraggedTab {
+    pane: PaneId,
+    index: usize,
+    name: SharedString,
+    colors: (u32, u32, u32),
+}
+
+/// The tab drawn under the pointer while it's dragged.
+struct TabGhost(DraggedTab);
+
+impl gpui::Render for TabGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let (bg, ink, edge) = self.0.colors;
+        div()
+            .px(px(14.))
+            .py(px(6.))
+            .rounded(px(radius::SM))
+            .border_1()
+            .border_color(Theme::color(edge))
+            .bg(Theme::color(bg))
+            .text_color(Theme::color(ink))
+            .text_style(text::STATUS)
+            .opacity(0.9)
+            .child(self.0.name.clone())
+    }
 }
 
 /// One tab as its row draws it.
@@ -173,6 +200,7 @@ impl Editor {
         let inset = self.config.window_buttons && self.layout.top_left_pane() == pane;
         let bar_h = crate::theme::bar_h();
         let wheel = scroll.clone();
+        let cursor = p.cursor;
         div()
             .flex()
             .flex_none()
@@ -231,6 +259,13 @@ impl Editor {
                             .h_full()
                             .border_b_1()
                             .border_color(Theme::color(p.line))
+                            // A tab dragged here goes at the end of the row.
+                            .drag_over::<DraggedTab>(move |style, _, _, _| {
+                                style.border_l_2().border_color(Theme::color(cursor))
+                            })
+                            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                                this.drop_tab(dragged.pane, dragged.index, pane, None, cx);
+                            }))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(
@@ -294,6 +329,13 @@ impl Editor {
         let group: SharedString = format!("tab-{}-{i}", pane.0).into();
         let ink = if tab.active { p.ink } else { p.tab_text };
         let close = self.render_close_slot(pane, &tab, group.clone(), p, cx);
+        let cursor = p.cursor;
+        let dragged = DraggedTab {
+            pane,
+            index: i,
+            name: SharedString::from(tab.name.clone()),
+            colors: (p.overlay, p.ink, p.line_strong),
+        };
         div()
             .id(("tab", id))
             .group(group)
@@ -347,27 +389,21 @@ impl Editor {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _: &gpui::MouseDownEvent, _, cx| {
-                    cx.stop_propagation();
                     if pane != this.focused {
                         this.focus_pane(pane, cx);
                     }
-                    this.tab_rows.dragging = Some((pane, i));
                     this.activate_tab(i, cx);
                 }),
             )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(move |this, _: &gpui::MouseUpEvent, _, cx| {
-                    // Dropped on another tab of the row: it moves there.
-                    if let Some((from_pane, from)) = this.tab_rows.dragging.take()
-                        && from_pane == pane
-                        && from != i
-                    {
-                        this.move_tab_within(pane, from, i);
-                        cx.notify();
-                    }
-                }),
-            )
+            // Dragged, it shows under the pointer; dropped on a tab, it goes
+            // before that tab (in this row or another pane's).
+            .on_drag(dragged, |tab, _, _, cx| cx.new(|_| TabGhost(tab.clone())))
+            .drag_over::<DraggedTab>(move |style, _, _, _| {
+                style.border_l_2().border_color(Theme::color(cursor))
+            })
+            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                this.drop_tab(dragged.pane, dragged.index, pane, Some(i), cx);
+            }))
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(move |this, _: &gpui::MouseDownEvent, _, cx| {

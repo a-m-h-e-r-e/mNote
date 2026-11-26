@@ -243,6 +243,33 @@ expect keys 18 'pane 1/1 | a.md >b.md |'
 expect keys 19 'pane 1/1 | >b.md |'
 expect keys 19 'reply ⌘Q quits mNote'
 
+cat > "$SANDBOX/drag.keys" <<'KEYS'
+:tabnew b<CR>
+:tabnew a2<CR>
+drag 1 3 1 1
+state
+<C-w>v
+:e b<CR>
+drag 1 2 2 end
+state
+drag 2 2 1 end
+state
+<C-w>l
+:tabonly<CR>
+drag 2 1 1 1
+state
+KEYS
+printf 'alpha two\n' > "$VAULT/a2.md"
+run drag
+# Dropped on tab 1 of its row: it goes first.
+expect drag 1 'pane 1/1 | >a2.md a.md b.md |'
+# Onto another pane's row, at the end: it leaves its pane and shows there.
+expect drag 2 'pane 2/2 | a2.md b.md >a.md | [>a2.md b.md]'
+# Onto a pane that already has the note: that tab shows; the dragged goes.
+expect drag 3 'pane 1/2 | a2.md >b.md | [a2.md >a.md]'
+# A pane's last tab dragged away: the pane goes with it.
+expect drag 4 'pane 1/1 | >a.md a2.md b.md |'
+
 if [ "$failed" = 0 ]; then
     echo "tabs: all checks passed"
 fi

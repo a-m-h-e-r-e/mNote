@@ -648,30 +648,45 @@ impl Editor {
     /// `⌃w T`: the active tab leaves for a new pane on the right. A pane
     /// with one tab has nothing to move.
     pub(super) fn tab_to_pane(&mut self, cx: &mut Context<Self>) {
-        let (active, len) = self.focused_tabs();
+        let (_, len) = self.focused_tabs();
         if len < 2 {
             self.reply = Some(("This pane has one tab: nothing to move".into(), true));
             return;
         }
         let from = self.focused;
-        let key = self.source.doc_key();
         // A pane beside on the note, focused; then the tab leaves the old
         // one, which shows its last-used other tab.
         self.split_pane(Axis::Row, cx);
-        let lines = |e: &Self, key: &DocKey| {
-            e.parked_index(key)
-                .map_or(1, |i| e.parked[i].buffer.text().len_lines())
-        };
-        let Some(oi) = self.panes.iter().position(|p| p.id == from) else {
+        self.take_active_tab_from(from);
+        cx.notify();
+    }
+
+    /// Takes the active tab out of pane `pane`, which isn't the focused one:
+    /// it shows its last-used other tab, or goes when that was its last.
+    fn take_active_tab_from(&mut self, pane: PaneId) {
+        if pane == self.focused {
+            return;
+        }
+        let Some(oi) = self.panes.iter().position(|p| p.id == pane) else {
             return;
         };
+        if self.panes[oi].tabs.len() < 2 {
+            self.layout.remove(pane);
+            self.panes.remove(oi);
+            return;
+        }
+        let active = self.panes[oi].active;
+        let key = self.panes[oi].tabs[active].doc.clone();
         let next = self.panes[oi].after_closing(active);
         let next_key = self.panes[oi].tabs[next].doc.clone();
-        let fallback = lines(self, &next_key);
+        let fallback = self
+            .parked_index(&next_key)
+            .map_or(1, |i| self.parked[i].buffer.text().len_lines());
+        let view = self.view;
         let old = &mut self.panes[oi];
         let shown = old.tabs[next].local.take().unwrap_or_else(|| PaneLocal {
             lines: ListState::new(fallback, ListAlignment::Top, px(400.)),
-            view: self.view,
+            view,
             cursor: 0,
             scroll_x: Default::default(),
         });
@@ -680,6 +695,72 @@ impl Editor {
         old.note = next_key;
         old.used.retain(|k| *k != key);
         old.local = Some(shown);
+    }
+
+    /// A tab dropped in a tab row: tab `i` of pane `from` goes before tab
+    /// `at` of pane `to` (`None`: at the end), and shows there. Across panes
+    /// it leaves its pane (which goes with its last tab); if `to` already
+    /// has the note, that tab shows instead.
+    pub(super) fn drop_tab(
+        &mut self,
+        from: PaneId,
+        i: usize,
+        to: PaneId,
+        at: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let len_of = |e: &Self, pane: PaneId| {
+            e.panes
+                .iter()
+                .find(|p| p.id == pane)
+                .map_or(0, |p| p.tabs.len())
+        };
+        if i >= len_of(self, from) || len_of(self, to) == 0 {
+            return;
+        }
+        if from == to {
+            let last = len_of(self, to) - 1;
+            let target = match at {
+                None => last,
+                Some(j) if i < j => j - 1,
+                Some(j) => j.min(last),
+            };
+            if from != self.focused {
+                self.focus_pane(from, cx);
+            }
+            self.move_tab_within(to, i, target);
+            return self.activate_tab(target, cx);
+        }
+        // Show it in its own pane first: its note is then that pane's.
+        if from != self.focused {
+            self.focus_pane(from, cx);
+        }
+        self.activate_tab(i, cx);
+        let key = self.source.doc_key();
+        self.focus_pane(to, cx);
+        let has = self
+            .panes
+            .iter()
+            .find(|p| p.id == to)
+            .and_then(|p| p.tabs.iter().position(|t| t.doc == key));
+        match has {
+            Some(j) => self.activate_tab(j, cx),
+            None => {
+                let before = len_of(self, to);
+                if let Some(doc) = self.unpark(&key) {
+                    self.open_in_tab(doc);
+                }
+                // A new tab (not a blank one replaced): put it where it fell.
+                if len_of(self, to) > before {
+                    let (now, len) = self.focused_tabs();
+                    let target = at.map_or(len - 1, |j| j.min(len - 1));
+                    self.move_tab_within(to, now, target);
+                }
+            }
+        }
+        self.take_active_tab_from(from);
+        self.drop_unshown_docs();
+        self.restart_blink(cx);
         cx.notify();
     }
 

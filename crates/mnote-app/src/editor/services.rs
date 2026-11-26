@@ -308,6 +308,10 @@ impl Editor {
                 let _ = this.update(cx, |this, cx| {
                     if line == "state" {
                         eprintln!("mnote state: {}", this.state_line());
+                    } else if let Some(args) = line.strip_prefix("drag ") {
+                        // `drag 1 2 2 end`: pane 1's tab 2 onto pane 2,
+                        // before its tab 1 (or at the end), as a mouse drop.
+                        this.script_drag(args, cx);
                     } else if let Some(keys) = line.strip_prefix("key ") {
                         // A ⌘ key or chord, as the keymap binds it.
                         this.press_binding(keys, cx);
@@ -323,6 +327,25 @@ impl Editor {
             }
             let _ = this.update(cx, |_, cx| cx.quit());
         }));
+    }
+
+    /// A `drag` script line: panes and tabs counted from 1, panes in the
+    /// layout's reading order.
+    fn script_drag(&mut self, args: &str, cx: &mut Context<Self>) {
+        let parts: Vec<&str> = args.split_whitespace().collect();
+        let order = self.layout.panes();
+        let pane = |s: &str| {
+            s.parse::<usize>()
+                .ok()
+                .and_then(|n| order.get(n.checked_sub(1)?).copied())
+        };
+        let tab = |s: &str| s.parse::<usize>().ok().and_then(|n| n.checked_sub(1));
+        if let [from, i, to, at] = parts.as_slice()
+            && let (Some(from), Some(i), Some(to)) = (pane(from), tab(i), pane(to))
+        {
+            let at = if *at == "end" { None } else { tab(at) };
+            self.drop_tab(from, i, to, at, cx);
+        }
     }
 
     /// Runs what the keymap binds to a ⌘ key or chord (`<D-w>`), as
