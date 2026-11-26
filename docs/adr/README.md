@@ -17,6 +17,7 @@ Each record is one decision: what was decided, why, what else was considered, an
 | [0011](0011-context-api.md) | One context API for completion, plugins and agents | Accepted |
 | [0012](0012-ai-integration-boundaries.md) | Boundaries for AI and agents, fixed now | Accepted |
 | [0013](0013-tab-pages.md) | Tab pages are layouts of panes, Vim's model | Superseded by 0014 |
-| [0014](0014-tabs-on-every-pane.md) | Tabs on every pane, as VS Code has them | Accepted |
+| [0014](0014-tabs-on-every-pane.md) | Tabs on every pane, as VS Code has them | Accepted, amended by 0015 |
+| [0015](0015-no-title-bar.md) | No title bar: tab rows reach the window's top edge | Accepted |
 
-The designs these belong to: [code support](../architecture/code-support.md) (0001–0012), [tab pages](../architecture/tab-pages.md) (0013, superseded) and [tabs on every pane](../architecture/pane-tabs.md) (0014).
+The designs these belong to: [code support](../architecture/code-support.md) (0001–0012), [tab pages](../architecture/tab-pages.md) (0013, superseded) and [tabs on every pane](../architecture/pane-tabs.md) (0014, 0015).

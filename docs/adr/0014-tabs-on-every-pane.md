@@ -1,6 +1,6 @@
 # 0014. Tabs on every pane, as VS Code has them
 
-Status: Accepted (2026-11-26). Supersedes [0013](0013-tab-pages.md).
+Status: Accepted (2026-11-26). Supersedes [0013](0013-tab-pages.md). Amended by [0015](0015-no-title-bar.md): there is no top bar.
 
 ## Context
 

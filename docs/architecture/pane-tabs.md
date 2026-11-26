@@ -1,6 +1,6 @@
 # Tabs on every pane: design
 
-Status: **accepted** (2026-11-26). The decision is [ADR-0014](../adr/0014-tabs-on-every-pane.md), which supersedes [ADR-0013](../adr/0013-tab-pages.md) and [the tab pages design](tab-pages.md).
+Status: **accepted** (2026-11-26), with [ADR-0015](../adr/0015-no-title-bar.md) (accepted): no top bar, so the tab rows reach the window's top edge. The decision is [ADR-0014](../adr/0014-tabs-on-every-pane.md), which supersedes [ADR-0013](../adr/0013-tab-pages.md) and [the tab pages design](tab-pages.md).
 
 Every pane in mNote has its own row of tabs, as every editor group in VS Code does. A pane holds several open notes, shows one of them, and remembers where you were in each. Notes are shared: one note in two panes is one buffer with one undo history. Splits keep working as they do. Each pane of a split has its own tab row, the lower one of an above/below split included.
 
@@ -117,6 +117,11 @@ All of these are registry commands: in the palette, rebindable in `[keys]`, runn
 └──────────────────────────────────────────────┴───────────────────────────────────┘
 ```
 
+- **There is no top bar** ([ADR-0015](../adr/0015-no-title-bar.md)). The window's close, minimize and zoom buttons are hidden, and the panes reach the window's top edge. The tab rows along the top are the window's first row, and their empty part moves the window.
+  - `⌘Q`, `⌘M`, `⌃⌘F` and `⌘W` do what the buttons did.
+  - The status line takes what the top bar showed: the note's path with its unsaved dot, and the hints.
+  - With no rows shown (one note), a 32px band along the top of the note moves the window.
+  - `window_buttons = true` brings the buttons back, with room left for them in the first pane's row.
 - **Every pane has a row along its top,** `bar_h` tall and on `tab` ground. That includes a pane below another (the right column above). It's part of the pane, so splits, `⌃w` moves and resizing all keep it with its pane.
 - **When rows show** (`show_tabs = "auto" | "always" | "never"`):
   - Under `auto`, the default, every pane shows its row when any pane has two or more tabs or the window has two or more panes. Rows then line up across splits.
@@ -125,8 +130,8 @@ All of these are registry commands: in the palette, rebindable in `[keys]`, runn
   - the note's file name (`ideas.md`), cut with `…` after 24 characters;
   - the folder after it in `ink_3` when two of the pane's tabs share a name;
   - italics for the preview tab;
-  - the close slot at its right end: `×` on the active tab and under the pointer (on a soft square on hover), `●` for unsaved text, which turns into `×` under the pointer, and empty otherwise.
-- **The active tab** is on `tab_active` (paper) with no line below it, so it opens into its note.
+  - the close slot at its right end, 2px from the tab's edge: a 16px `×` in a 24px slot on the active tab and under the pointer (on a soft square on hover), `●` for unsaved text, which turns into `×` under the pointer, and empty otherwise.
+- **The active tab** is on `tab_active` (paper) with no line below it, so it opens into its note: the row's bottom hairline runs under the other tabs and the empty part only.
   - In the **focused** pane it carries the `cursor` rule along its top. That is the focus mark: panes no longer draw a rule of their own.
   - In other panes it carries an `ink_3` rule.
 - **Overflow:**
