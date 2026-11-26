@@ -24,6 +24,7 @@ pub(crate) mod keys;
 pub(crate) mod line;
 mod lines;
 mod overlays;
+mod pane_menu;
 mod panes;
 mod plugin_list;
 mod plugins;
@@ -191,6 +192,9 @@ pub struct Editor {
     closed_tabs: Vec<tabs::ClosedTab>,
     /// The tab rows' scroll, and the window buttons' state.
     tab_rows: tab_line::TabRows,
+    /// The open `…` menu, and where each row's `…` button is.
+    pane_menu: Option<pane_menu::PaneMenu>,
+    menu_anchors: pane_menu::MenuAnchors,
     /// The last untitled note's number, and the folder each one was
     /// opened from (where the save prompt suggests it goes).
     next_untitled: u32,
@@ -437,6 +441,8 @@ impl Editor {
             parked: Vec::new(),
             closed_tabs: Vec::new(),
             tab_rows: Default::default(),
+            pane_menu: None,
+            menu_anchors: Default::default(),
             next_untitled: 0,
             untitled_folders: Default::default(),
             edit_groups: Default::default(),

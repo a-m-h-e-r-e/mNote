@@ -308,6 +308,11 @@ impl Editor {
                 let _ = this.update(cx, |this, cx| {
                     if line == "state" {
                         eprintln!("mnote state: {}", this.state_line());
+                    } else if let Some(id) = line.strip_prefix("cmd ") {
+                        // A registry command by id, as the palette runs it.
+                        if let Some(ix) = crate::commands::by_id(id.trim()) {
+                            this.run_command(ix, cx);
+                        }
                     } else if let Some(args) = line.strip_prefix("drag ") {
                         // `drag 1 2 2 end`: pane 1's tab 2 onto pane 2,
                         // before its tab 1 (or at the end), as a mouse drop.

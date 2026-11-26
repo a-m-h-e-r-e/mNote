@@ -284,8 +284,7 @@ impl Editor {
                             ),
                     ),
             )
-            // The pane's tab menu (its items come with AMI-227); for now it
-            // lists the panes and their tabs.
+            // The pane's tab menu: closing in bulk, reopening, splitting.
             .child(
                 div()
                     .id(("tab-menu", pane.0 as usize))
@@ -300,16 +299,25 @@ impl Editor {
                     .border_color(Theme::color(p.line))
                     .text_color(Theme::color(p.ink_2))
                     .hover(|s| s.bg(Theme::color(p.well)))
+                    .relative()
                     .child(SharedString::new_static("…"))
+                    // Where it is, for its menu to open under it.
+                    .child({
+                        let anchors = self.menu_anchors.clone();
+                        gpui::canvas(
+                            move |bounds, _, _| {
+                                anchors.borrow_mut().insert(pane, bounds);
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0()
+                    })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _: &gpui::MouseDownEvent, _, cx| {
                             cx.stop_propagation();
-                            if pane != this.focused {
-                                this.focus_pane(pane, cx);
-                            }
-                            this.tab_list();
-                            cx.notify();
+                            this.open_pane_menu(pane, cx);
                         }),
                     ),
             )

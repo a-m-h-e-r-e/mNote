@@ -334,7 +334,7 @@ impl Editor {
     }
 
     /// The focused pane's active tab and how many it has.
-    fn focused_tabs(&self) -> (usize, usize) {
+    pub(super) fn focused_tabs(&self) -> (usize, usize) {
         self.focused_slot()
             .map(|fi| (self.panes[fi].active, self.panes[fi].tabs.len()))
             .unwrap_or((0, 1))
@@ -351,7 +351,7 @@ impl Editor {
 
     /// Whether closing a tab on `key` loses text: a scratch or untitled
     /// note with text, shown by no other tab.
-    fn loses_text(&self, key: &DocKey) -> bool {
+    pub(super) fn loses_text(&self, key: &DocKey) -> bool {
         if !matches!(key, DocKey::Scratch | DocKey::Untitled(_)) || self.tabs_showing(key) > 1 {
             return false;
         }
@@ -461,30 +461,6 @@ impl Editor {
         self.closed_tabs.push(ClosedTab { pane, index, tab });
         if self.closed_tabs.len() > CLOSED_KEPT {
             self.closed_tabs.remove(0);
-        }
-    }
-
-    /// `:tabonly[!]`: closes the focused pane's other tabs.
-    pub(super) fn tab_only(&mut self, force: bool, cx: &mut Context<Self>) {
-        let Some(fi) = self.focused_slot() else {
-            return;
-        };
-        let active = self.panes[fi].active;
-        let others: Vec<DocKey> = self.panes[fi]
-            .tabs
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != active)
-            .map(|(_, t)| t.doc.clone())
-            .collect();
-        if !force && let Some(lost) = others.iter().find(|k| self.loses_text(k)).cloned() {
-            return self.no_write(&lost);
-        }
-        // From the right, so the indexes still to close stay put.
-        for i in (0..self.panes[fi].tabs.len()).rev() {
-            if i != self.panes[fi].active {
-                self.close_tab_at(i, cx);
-            }
         }
     }
 
@@ -769,6 +745,9 @@ impl Editor {
     /// the pane). On the very last tab it only says that `⌘Q` quits. Text
     /// that isn't in a file (an untitled or scratch note) asks first.
     pub(super) fn close_something(&mut self, cx: &mut Context<Self>) {
+        if self.pane_menu.take().is_some() {
+            return cx.notify();
+        }
         if self.picker.is_some() || self.folder_edit.is_some() || self.vim.command_line().is_some()
         {
             self.press(mnote_vim::Key::Esc, cx);
@@ -875,7 +854,9 @@ impl Editor {
             others.join(" "),
             self.parked.len(),
             self.closed_tabs.len(),
-            if self.picker.is_some() {
+            if self.pane_menu.is_some() {
+                "menu"
+            } else if self.picker.is_some() {
                 "open"
             } else {
                 "none"

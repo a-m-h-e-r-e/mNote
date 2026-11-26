@@ -312,14 +312,13 @@ pub fn builtin() -> Vec<Command> {
             "Closes this tab and its panes (or tab N); the last-used tab shows. :tabreopen brings it back.",
             act(|e, call, cx| e.tab_close(call.args.as_deref(), call.bang, cx)),
         )
-        .bind("<D-S-w>")
         .shown_as("tabclose")
         .ex("tabclose", 4, ArgKind::Any),
         Command::new(
             "tab-only",
             "Close other tabs",
-            "Closes every tab but this one.",
-            act(|e, call, cx| e.tab_only(call.bang, cx)),
+            "Closes this pane's tabs but the active one; unsaved text asks first (:tabonly! doesn't).",
+            act(|e, call, cx| e.close_tabs(super::pane_menu::BulkClose::Others, call.bang, cx)),
         )
         .shown_as("tabonly")
         .ex("tabonly", 4, ArgKind::None),
@@ -332,6 +331,32 @@ pub fn builtin() -> Vec<Command> {
         .bind("<D-S-t>")
         .shown_as("tabreopen")
         .ex("tabreopen", 6, ArgKind::None),
+        Command::new(
+            "pane-close-tabs",
+            "Close all tabs",
+            "Closes every tab of this pane, and so the pane (the last pane keeps a fresh untitled tab).",
+            act(|e, call, cx| e.close_tabs(super::pane_menu::BulkClose::All, call.bang, cx)),
+        )
+        .bind("<D-S-w>"),
+        Command::new(
+            "tab-close-saved",
+            "Close saved tabs",
+            "Closes this pane's tabs with nothing unsaved.",
+            act(|e, _, cx| e.close_tabs(super::pane_menu::BulkClose::Saved, false, cx)),
+        ),
+        Command::new(
+            "tab-close-right",
+            "Close tabs to the right",
+            "Closes this pane's tabs after the active one.",
+            act(|e, call, cx| e.close_tabs(super::pane_menu::BulkClose::Right, call.bang, cx)),
+        ),
+        Command::new(
+            "pane-menu",
+            "Pane menu",
+            "This pane's … menu: close in bulk, reopen, split, move a tab.",
+            act(|e, _, cx| e.open_pane_menu(e.focused, cx)),
+        )
+        .bind("<C-w>."),
         Command::new(
             "tab-recent",
             "Last-used tab",

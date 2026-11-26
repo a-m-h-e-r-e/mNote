@@ -47,8 +47,10 @@ impl Editor {
             && let Some(id) = crate::keymap::current().cmd(c).map(str::to_owned)
             && let Some(ix) = crate::commands::by_id(&id)
         {
-            let overlay =
-                self.picker.is_some() || self.folder_edit.is_some() || self.first_run.is_some();
+            let overlay = self.picker.is_some()
+                || self.folder_edit.is_some()
+                || self.first_run.is_some()
+                || self.pane_menu.is_some();
             if !overlay || crate::commands::all()[ix].over_overlays {
                 cx.stop_propagation();
                 self.run_command(ix, cx);
@@ -63,8 +65,10 @@ impl Editor {
             && let Some(id) = crate::keymap::current().chord(chord).map(str::to_owned)
             && let Some(ix) = crate::commands::by_id(&id)
         {
-            let overlay =
-                self.picker.is_some() || self.folder_edit.is_some() || self.first_run.is_some();
+            let overlay = self.picker.is_some()
+                || self.folder_edit.is_some()
+                || self.first_run.is_some()
+                || self.pane_menu.is_some();
             if !overlay || crate::commands::all()[ix].over_overlays {
                 cx.stop_propagation();
                 self.run_command(ix, cx);
@@ -87,6 +91,10 @@ impl Editor {
 
     /// Layer 1: an open overlay takes every key.
     fn overlay_key(&mut self, key: mnote_vim::Key, cx: &mut Context<Self>) -> bool {
+        if self.pane_menu.is_some() {
+            self.pane_menu_key(key, cx);
+            return true;
+        }
         if self.folder_edit.is_some() {
             self.folder_key(key, cx);
             return true;

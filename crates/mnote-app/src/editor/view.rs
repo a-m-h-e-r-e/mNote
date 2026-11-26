@@ -290,6 +290,7 @@ impl Render for Editor {
             .picker
             .as_mut()
             .map(|picker| picker.render(width, height, caret_on, &mouse, p));
+        let pane_menu = self.render_pane_menu(width, p, cx);
         let folder_edit = self
             .folder_edit
             .as_ref()
@@ -420,6 +421,7 @@ impl Render for Editor {
                     .bottom(px(crate::theme::bar_h() + space::S1))
                     .child(popup)
             }))
+            .children(pane_menu)
             .children(picker)
             .children(folder_edit)
             .children(self.toast.clone().map(|(text, undo)| {

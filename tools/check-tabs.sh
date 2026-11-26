@@ -270,6 +270,45 @@ expect drag 3 'pane 1/2 | a2.md >b.md | [a2.md >a.md]'
 # A pane's last tab dragged away: the pane goes with it.
 expect drag 4 'pane 1/1 | >a.md a2.md b.md |'
 
+cat > "$SANDBOX/bulk.keys" <<'KEYS'
+:tabnew b<CR>
+:tabnew a2<CR>
+:tabfirst<CR>
+cmd tab-close-right
+state
+:tabnew b<CR>
+:tabnew a2<CR>
+:tabprevious<CR>
+cmd tab-only
+state
+:tabnew<CR>
+ix<Esc>
+cmd tab-close-saved
+state
+cmd pane-close-tabs
+state
+discard<CR>
+state
+<C-w>.
+state
+jjjjj<CR>
+state
+KEYS
+run bulk
+# Close to the right, close others.
+expect bulk 1 'pane 1/1 | >a.md |'
+expect bulk 2 'pane 1/1 | >b.md |'
+# Close saved keeps the untitled text.
+expect bulk 3 'pane 1/1 | >untitled |'
+# Close all asks once about text that isn't in a file...
+expect bulk 4 'overlay open'
+# ...and the last pane keeps a fresh untitled tab.
+expect bulk 5 'pane 1/1 | >untitled 2 |'
+# ⌃w . opens the menu; j j j j j ⏎ runs its sixth item, Split right.
+expect bulk 6 'overlay menu'
+expect bulk 7 'pane 2/2 |'
+expect bulk 7 'overlay none'
+
 if [ "$failed" = 0 ]; then
     echo "tabs: all checks passed"
 fi
