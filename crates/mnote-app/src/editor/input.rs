@@ -329,14 +329,35 @@ impl Editor {
                 self.restart_blink(cx);
             }
             PickerOutcome::Act(action) => {
+                // Looked at (the explorer, results, backlinks): a preview.
+                let how = if picker.opens_preview()
+                    || matches!(action, crate::picker::PickerAction::JumpTo { .. })
+                {
+                    super::tabs::OpenAs::Preview
+                } else {
+                    super::tabs::OpenAs::Kept
+                };
+                // Opened again from a place that keeps tabs: a preview is kept.
+                let opens_note = matches!(
+                    action,
+                    crate::picker::PickerAction::OpenNote(_)
+                        | crate::picker::PickerAction::CreateNote(_)
+                        | crate::picker::PickerAction::JumpTo { .. }
+                );
                 self.picker = None;
-                self.picker_action(action, cx);
+                self.open_as(how, |e| e.picker_action(action, cx));
+                if opens_note && how == super::tabs::OpenAs::Kept {
+                    self.keep_active_tab();
+                }
                 self.restart_blink(cx);
             }
             PickerOutcome::ActInSplit { action, vertical } => {
                 self.picker = None;
                 self.split_pane(if vertical { Axis::Row } else { Axis::Column }, cx);
-                self.picker_action(action, cx);
+                // The new pane opens on the note: its first tab.
+                self.open_as(super::tabs::OpenAs::Replace, |e| {
+                    e.picker_action(action, cx)
+                });
                 self.restart_blink(cx);
             }
         }

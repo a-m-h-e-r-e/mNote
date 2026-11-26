@@ -84,6 +84,7 @@ struct TabInfo {
     folder: Option<String>,
     unsaved: bool,
     active: bool,
+    preview: bool,
 }
 
 impl Layout {
@@ -164,6 +165,7 @@ impl Editor {
                     folder,
                     unsaved: self.waits_for_saving(&tab.doc),
                     active: i == slot.active,
+                    preview: tab.preview,
                 }
             })
             .collect();
@@ -385,6 +387,11 @@ impl Editor {
             .child(
                 div()
                     .whitespace_nowrap()
+                    // A preview tab's name is in italics.
+                    .when(tab.preview, |d| {
+                        d.italic()
+                            .when(!tab.active, |d| d.text_color(Theme::color(p.tab_preview)))
+                    })
                     .child(SharedString::from(tab.name.clone())),
             )
             .children(tab.folder.clone().map(|folder| {
@@ -396,11 +403,15 @@ impl Editor {
             .child(close)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _: &gpui::MouseDownEvent, _, cx| {
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                     if pane != this.focused {
                         this.focus_pane(pane, cx);
                     }
                     this.activate_tab(i, cx);
+                    // A double click keeps a preview tab.
+                    if event.click_count >= 2 {
+                        this.keep_active_tab();
+                    }
                 }),
             )
             // Dragged, it shows under the pointer; dropped on a tab, it goes

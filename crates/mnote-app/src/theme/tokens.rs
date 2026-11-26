@@ -66,7 +66,7 @@ pub struct Palette {
     pub tab_active: u32,
     /// Other tabs' names (`ink_2` unless set).
     pub tab_text: u32,
-    /// The preview tab's name, in italics (`ink_2` unless set).
+    /// The preview tab's name, quieter, in italics (`ink_3` unless set).
     pub tab_preview: u32,
 }
 
@@ -113,7 +113,7 @@ pub const DARK: Palette = Palette {
     tabs: 0x21252bff,
     tab_active: 0x282c34ff,
     tab_text: 0xabb2bfff,
-    tab_preview: 0xabb2bfff,
+    tab_preview: 0x969dabff,
 };
 
 /// The `light` theme.
@@ -149,7 +149,7 @@ pub const LIGHT: Palette = Palette {
     tabs: 0xf2f4f3ff,
     tab_active: 0xfbfcfbff,
     tab_text: 0x4c5855ff,
-    tab_preview: 0x4c5855ff,
+    tab_preview: 0x5d6966ff,
 };
 
 /// Every modal. The only shadow in mNote. (dark)

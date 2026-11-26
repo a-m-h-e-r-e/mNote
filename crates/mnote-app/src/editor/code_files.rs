@@ -221,6 +221,8 @@ impl Editor {
             });
         if let Some(note) = note {
             self.switch_to(note, cx);
+            // `:e` keeps the note's tab, a preview or not.
+            self.keep_active_tab();
             return;
         }
         // Doesn't exist yet: a note is made from its name, a file opens empty.

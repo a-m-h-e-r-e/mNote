@@ -274,6 +274,10 @@ impl BacklinksPicker {
 }
 
 impl PickerDelegate for BacklinksPicker {
+    fn opens_preview(&self) -> bool {
+        true
+    }
+
     fn title(&self) -> Option<(SharedString, Option<SharedString>)> {
         let title = match self.linked_notes() {
             0 => format!("No notes link to {}", self.title),

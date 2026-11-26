@@ -346,6 +346,9 @@ pub struct Config {
     pub show_code_files: bool,
     /// When panes show their tab rows.
     pub show_tabs: TabsChoice,
+    /// Notes only looked at (the explorer, results, links) open in one
+    /// preview tab that the next replaces; `false` keeps every one.
+    pub preview_tabs: bool,
     /// Show the window's close, minimize and zoom buttons (ADR-0015: they
     /// are hidden, and the tab rows reach the window's top edge).
     pub window_buttons: bool,
@@ -420,6 +423,7 @@ impl Default for Config {
             reuse_neovim: true,
             show_code_files: true,
             show_tabs: TabsChoice::Auto,
+            preview_tabs: true,
             window_buttons: false,
             large_file_injections_mb: 4,
             large_file_highlight_mb: 16,
@@ -525,6 +529,9 @@ impl Config {
                             ));
                         }
                     }
+                }
+                "preview_tabs" => {
+                    config.preview_tabs = value.as_bool().ok_or_else(|| wrong("true or false"))?;
                 }
                 "window_buttons" => {
                     config.window_buttons =
@@ -937,6 +944,17 @@ impl Config {
                 quoted(self.show_tabs.name()),
             ),
             Setting::new(
+                "preview_tabs",
+                &format!(
+                    "Notes you only look at (the explorer, search results, backlinks,\n\
+                     links) open in one italic preview tab that the next replaces;\n\
+                     editing or space k keeps it. false: every note gets a tab.\n\
+                     Values: true, false. Default: {}",
+                    on_off(d.preview_tabs)
+                ),
+                on_off(self.preview_tabs).into(),
+            ),
+            Setting::new(
                 "window_buttons",
                 &format!(
                     "Show the window's close, minimize and zoom buttons. Without them the\n\
@@ -1327,6 +1345,7 @@ mod tests {
             reuse_neovim: false,
             show_code_files: false,
             show_tabs: TabsChoice::Auto,
+            preview_tabs: true,
             window_buttons: false,
             large_file_injections_mb: 2,
             large_file_highlight_mb: 8,
@@ -1596,6 +1615,12 @@ mod tests {
         assert!(config.template().contains("show_tabs = \"always\""));
         assert!(config.template().contains("window_buttons = true"));
         assert!(Config::parse("show_tabs = \"sometimes\"").is_err());
+        assert!(Config::default().preview_tabs);
+        assert!(
+            !Config::parse("preview_tabs = false")
+                .expect("valid")
+                .preview_tabs
+        );
         assert!(!TabsChoice::Auto.shows(1, 1));
         assert!(TabsChoice::Auto.shows(2, 1) && TabsChoice::Auto.shows(1, 2));
         assert!(TabsChoice::Always.shows(1, 1) && !TabsChoice::Never.shows(5, 5));

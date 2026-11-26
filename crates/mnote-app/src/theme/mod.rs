@@ -276,7 +276,7 @@ impl Theme {
             palette.tab_text = palette.ink_2;
         }
         if !named("tab_preview") {
-            palette.tab_preview = palette.ink_2;
+            palette.tab_preview = palette.ink_3;
         }
         theme.palette = Box::leak(Box::new(palette));
         let syntax = syntax::SyntaxColors::new(theme.palette, &file.syntax)?;
@@ -536,7 +536,7 @@ mod tests {
         .expect("valid");
         let p = Theme::from_file(&file).expect("applies").palette;
         assert_eq!((p.tabs, p.tab_active), (0x101010ff, 0x202020ff));
-        assert_eq!((p.tab_text, p.tab_preview), (p.ink_2, p.ink_2));
+        assert_eq!((p.tab_text, p.tab_preview), (p.ink_2, p.ink_3));
         let file = mnote_core::config::ThemeFile::parse(
             "base = \"dark\"\n[colors]\nchrome = \"#101010\"\ntabs = \"#303030\"\n",
         )

@@ -150,7 +150,7 @@ All of these are registry commands: in the palette, rebindable in `[keys]`, runn
   - A middle click or the `×` closes a tab.
   - Dragging moves a tab within its row, or onto another pane's row to move it to that pane. If the note is already open there, that tab is activated and the dragged one closes.
   - A double click on a row's empty part opens an untitled tab.
-- **Theme keys** (renamed from AMI-220's): `tabs` (row ground, default `chrome`), `tab_active` (default `paper`), `tab_text` (other tabs' names, default `ink_2`), and `tab_preview` (the preview tab's name, default `ink_2`, drawn in italics).
+- **Theme keys** (renamed from AMI-220's): `tabs` (row ground, default `chrome`), `tab_active` (default `paper`), `tab_text` (other tabs' names, default `ink_2`), and `tab_preview` (the preview tab's name, default `ink_3`, drawn in italics).
 
 ## Untitled notes and saving
 

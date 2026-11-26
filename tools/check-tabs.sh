@@ -309,6 +309,39 @@ expect bulk 6 'overlay menu'
 expect bulk 7 'pane 2/2 |'
 expect bulk 7 'overlay none'
 
+cat > "$SANDBOX/preview.keys" <<'KEYS'
+:e links<CR>
+gd
+state
+gT
+j
+gd
+state
+:keep<CR>
+state
+:tabnext 2<CR>
+k
+gd
+state
+ix<Esc>
+state
+:vsplit a2<CR>
+state
+KEYS
+printf '[[b]]\n[[a2]]\n' > "$VAULT/links.md"
+run preview
+# gd looks at a note: the pane's preview tab (~ in the state line).
+expect preview 1 'pane 1/1 | a.md links.md >~b.md |'
+# The next look takes the preview's place.
+expect preview 2 'pane 1/1 | a.md links.md >~a2.md |'
+# :keep keeps it; the next look gets a preview of its own.
+expect preview 3 'a.md links.md >a2.md |'
+expect preview 4 'a.md links.md >~b.md a2.md |'
+# An edit keeps a preview.
+expect preview 5 'a.md links.md >b.md a2.md |'
+# :vsplit {note}: a new pane with that note as its only tab.
+expect preview 6 'pane 2/2 | >a2.md |'
+
 if [ "$failed" = 0 ]; then
     echo "tabs: all checks passed"
 fi

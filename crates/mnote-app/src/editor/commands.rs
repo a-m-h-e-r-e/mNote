@@ -351,6 +351,15 @@ pub fn builtin() -> Vec<Command> {
             act(|e, call, cx| e.close_tabs(super::pane_menu::BulkClose::Right, call.bang, cx)),
         ),
         Command::new(
+            "tab-keep",
+            "Keep preview tab",
+            "The pane's preview tab (in italics) becomes a kept tab: the next note looked at gets its own.",
+            act(|e, _, cx| e.keep_preview(cx)),
+        )
+        .bind("<leader>k")
+        .shown_as("keep")
+        .ex("keep", 4, ArgKind::None),
+        Command::new(
             "pane-menu",
             "Pane menu",
             "This pane's … menu: close in bulk, reopen, split, move a tab.",

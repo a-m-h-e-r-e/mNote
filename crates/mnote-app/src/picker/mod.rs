@@ -270,6 +270,13 @@ pub trait PickerDelegate {
     /// Number of results.
     fn len(&self) -> usize;
 
+    /// Whether a note this picker opens is only looked at (the pane's
+    /// preview tab) rather than kept: the explorer, backlinks and search
+    /// results.
+    fn opens_preview(&self) -> bool {
+        false
+    }
+
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -370,6 +377,11 @@ pub struct Picker {
 }
 
 impl Picker {
+    /// See [`PickerDelegate::opens_preview`].
+    pub fn opens_preview(&self) -> bool {
+        self.delegate.opens_preview()
+    }
+
     pub fn new(mut delegate: Box<dyn PickerDelegate>) -> Self {
         delegate.set_query("");
         Picker {

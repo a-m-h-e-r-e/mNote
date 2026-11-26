@@ -192,6 +192,8 @@ pub struct Editor {
     closed_tabs: Vec<tabs::ClosedTab>,
     /// The tab rows' scroll, and the window buttons' state.
     tab_rows: tab_line::TabRows,
+    /// How the next note opened takes its place (kept, preview, replace).
+    opening: tabs::OpenAs,
     /// The open `…` menu, and where each row's `…` button is.
     pane_menu: Option<pane_menu::PaneMenu>,
     menu_anchors: pane_menu::MenuAnchors,
@@ -441,6 +443,7 @@ impl Editor {
             parked: Vec::new(),
             closed_tabs: Vec::new(),
             tab_rows: Default::default(),
+            opening: Default::default(),
             pane_menu: None,
             menu_anchors: Default::default(),
             next_untitled: 0,

@@ -5,6 +5,8 @@ use super::*;
 
 impl Editor {
     pub(super) fn schedule_autosave(&mut self, cx: &mut Context<Self>) {
+        // An edit keeps a preview tab.
+        self.keep_active_tab();
         // An untitled note has nowhere to save: its text is kept as a draft.
         if matches!(self.source, Source::Untitled(_)) {
             return self.schedule_draft(cx);

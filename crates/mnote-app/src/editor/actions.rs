@@ -120,7 +120,8 @@ impl Editor {
         };
         self.split_pane(axis, cx);
         if let Some(note) = target {
-            self.switch_to(note, cx);
+            // The new pane opens on the note: its first tab.
+            self.open_as(super::tabs::OpenAs::Replace, |e| e.switch_to(note, cx));
         }
     }
 
@@ -284,7 +285,8 @@ impl Editor {
             })
         };
         if let Some((path, line)) = found {
-            return self.go_to(path, line, cx);
+            // Following a link looks at the note: a preview tab.
+            return self.open_as(super::tabs::OpenAs::Preview, |e| e.go_to(path, line, cx));
         }
         if !self.index_ready {
             self.reply = Some((
@@ -336,7 +338,10 @@ impl Editor {
             return;
         };
         self.list_pos = to;
-        self.go_to(entry.path, entry.line, cx);
+        // Stepping through results looks at each: a preview tab.
+        self.open_as(super::tabs::OpenAs::Preview, |e| {
+            e.go_to(entry.path, entry.line, cx)
+        });
         self.reply = Some((
             format!("({} of {}) {}", to + 1, self.list.len(), entry.text).into(),
             false,

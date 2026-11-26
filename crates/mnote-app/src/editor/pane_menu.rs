@@ -27,6 +27,7 @@ const ITEMS: &[Option<(&str, &str)>] = &[
     Some(("Close to the right", "tab-close-right")),
     None,
     Some(("Reopen closed tab", "tab-reopen")),
+    Some(("Keep preview tab", "tab-keep")),
     None,
     Some(("Split right", "vsplit")),
     Some(("Split down", "split")),
@@ -57,8 +58,24 @@ pub(super) enum BulkClose {
     Right,
 }
 
-fn entries() -> impl Iterator<Item = (&'static str, &'static str)> {
-    ITEMS.iter().flatten().copied()
+impl Editor {
+    /// The menu's items: "Keep preview tab" only while the pane has one.
+    fn menu_items(&self) -> Vec<Option<(&'static str, &'static str)>> {
+        let preview = self
+            .pane_menu
+            .as_ref()
+            .and_then(|m| self.panes.iter().find(|p| p.id == m.pane))
+            .is_some_and(|p| p.tabs.iter().any(|t| t.preview));
+        ITEMS
+            .iter()
+            .filter(|i| preview || !matches!(i, Some((_, "tab-keep"))))
+            .copied()
+            .collect()
+    }
+
+    fn entries(&self) -> Vec<(&'static str, &'static str)> {
+        self.menu_items().into_iter().flatten().collect()
+    }
 }
 
 /// How an item's key is shown: its binding, else its ex command.
@@ -84,10 +101,10 @@ impl Editor {
     /// A key while the menu is open: it takes every key.
     pub(super) fn pane_menu_key(&mut self, key: mnote_vim::Key, cx: &mut Context<Self>) {
         use mnote_vim::Key;
+        let count = self.entries().len();
         let Some(menu) = &mut self.pane_menu else {
             return;
         };
-        let count = entries().count();
         match key {
             Key::Char('j') | Key::Down | Key::Ctrl('n') | Key::Tab => {
                 menu.selected = (menu.selected + 1) % count;
@@ -106,10 +123,10 @@ impl Editor {
     }
 
     fn run_menu_item(&mut self, n: usize, cx: &mut Context<Self>) {
-        let Some(menu) = self.pane_menu.take() else {
+        let Some((_, command)) = self.entries().get(n).copied() else {
             return;
         };
-        let Some((_, command)) = entries().nth(n) else {
+        let Some(menu) = self.pane_menu.take() else {
             return;
         };
         if menu.pane != self.focused {
@@ -141,7 +158,7 @@ impl Editor {
         let selected = menu.selected;
         let mut n = 0;
         let mut rows: Vec<AnyElement> = Vec::new();
-        for item in ITEMS {
+        for item in &self.menu_items() {
             let Some((label, command)) = item else {
                 rows.push(
                     div()

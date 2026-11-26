@@ -34,6 +34,10 @@ impl ListPicker {
 }
 
 impl PickerDelegate for ListPicker {
+    fn opens_preview(&self) -> bool {
+        true
+    }
+
     fn title(&self) -> Option<(SharedString, Option<SharedString>)> {
         Some((
             "Results list".into(),

@@ -22,6 +22,9 @@ const CLOSED_KEPT: usize = 10;
 /// when it's the focused pane); another tab keeps its own here.
 pub(super) struct Tab {
     pub doc: DocKey,
+    /// Only looked at (italics): the next looked-at note takes its place,
+    /// and editing or keeping it makes it a kept tab.
+    pub preview: bool,
     /// Its state while it isn't the active tab.
     pub local: Option<PaneLocal>,
     /// The note's revision when it was last shown: a tab on a note edited
@@ -33,10 +36,25 @@ impl Tab {
     pub(super) fn new(doc: DocKey) -> Self {
         Tab {
             doc,
+            preview: false,
             local: None,
             seen: 0,
         }
     }
+}
+
+/// How a note opened in the focused pane takes its place (design: Opening
+/// notes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum OpenAs {
+    /// A tab of its own, kept (the finder, `:e`, a new note).
+    #[default]
+    Kept,
+    /// The pane's preview tab, replacing the last one (the explorer,
+    /// search results, backlinks, `gd`).
+    Preview,
+    /// In place of the active tab (a pane just split, which opens on it).
+    Replace,
 }
 
 /// A closed tab, for `:tabreopen`: its pane, its place, and its state.
@@ -209,13 +227,50 @@ impl Editor {
             && !self.shown_elsewhere(&self.source.doc_key())
     }
 
+    /// Runs `f` with notes it opens taking their place as `how` says.
+    pub(super) fn open_as(&mut self, how: OpenAs, f: impl FnOnce(&mut Self)) {
+        let was = std::mem::replace(&mut self.opening, how);
+        f(self);
+        self.opening = was;
+    }
+
+    /// The focused pane's active tab stops being a preview.
+    pub(super) fn keep_active_tab(&mut self) {
+        if let Some(fi) = self.focused_slot() {
+            let slot = &mut self.panes[fi];
+            let active = slot.active;
+            if let Some(tab) = slot.tabs.get_mut(active) {
+                tab.preview = false;
+            }
+        }
+    }
+
+    /// `:keep`, `space k`, a double click on the tab: the preview tab of the
+    /// focused pane is kept.
+    pub(super) fn keep_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(fi) = self.focused_slot() else {
+            return;
+        };
+        match self.panes[fi].tabs.iter_mut().find(|t| t.preview) {
+            Some(tab) => tab.preview = false,
+            None => self.reply = Some(("No preview tab here".into(), false)),
+        }
+        cx.notify();
+    }
+
     /// Opens `next` in the focused pane: a new tab after the active one,
     /// or that pane's tab for the note if it has one. A blank untitled or
-    /// scratch tab is replaced instead.
+    /// scratch tab is replaced instead; so is the pane's preview tab when
+    /// this is a preview too.
     pub(super) fn open_in_tab(&mut self, mut next: Doc) {
         let key = next.source.doc_key();
         let Some(fi) = self.focused_slot() else {
             return;
+        };
+        let how = if self.config.preview_tabs || self.opening != OpenAs::Preview {
+            self.opening
+        } else {
+            OpenAs::Kept
         };
         if let Some(i) = self.panes[fi].tabs.iter().position(|t| t.doc == key) {
             // It's already here: show that tab (its doc goes back to wait).
@@ -226,8 +281,19 @@ impl Editor {
             }
             return;
         }
-        if self.active_tab_is_blank() {
+        if how == OpenAs::Replace || self.active_tab_is_blank() {
             return self.replace_active(next);
+        }
+        if how == OpenAs::Preview
+            && let Some(p) = self.panes[fi].tabs.iter().position(|t| t.preview)
+        {
+            // The last preview gives its place to this one.
+            self.switch_active_tab(p);
+            self.replace_active(next);
+            if let Some(tab) = self.panes[fi].tabs.get_mut(p) {
+                tab.preview = true;
+            }
+            return;
         }
         let revision = self.buffer.revision();
         let local = self.stash_local();
@@ -240,7 +306,9 @@ impl Editor {
         self.swap_doc(&mut next);
         let at = active + 1;
         let slot = &mut self.panes[fi];
-        slot.tabs.insert(at, Tab::new(key.clone()));
+        let mut tab = Tab::new(key.clone());
+        tab.preview = how == OpenAs::Preview;
+        slot.tabs.insert(at, tab);
         slot.active = at;
         slot.note = key;
         slot.touch(at);
@@ -255,6 +323,7 @@ impl Editor {
             let slot = &mut self.panes[fi];
             let active = slot.active;
             let old = std::mem::replace(&mut slot.tabs[active].doc, key.clone());
+            slot.tabs[active].preview = false;
             slot.used.retain(|k| *k != old);
             slot.note = key;
             slot.touch(active);
@@ -828,7 +897,8 @@ impl Editor {
                 .enumerate()
                 .map(|(i, t)| {
                     let mark = if i == slot.active { ">" } else { "" };
-                    format!("{mark}{}", t.doc.label())
+                    let preview = if t.preview { "~" } else { "" };
+                    format!("{mark}{preview}{}", t.doc.label())
                 })
                 .collect::<Vec<_>>()
                 .join(" ")

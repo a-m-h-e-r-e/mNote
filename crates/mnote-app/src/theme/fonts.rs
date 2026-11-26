@@ -23,6 +23,8 @@ macro_rules! font {
 pub const FILES: &[(&str, &[u8])] = &[
     ("IBMPlexMono-Regular.ttf", font!("IBMPlexMono-Regular.ttf")),
     ("IBMPlexMono-Medium.ttf", font!("IBMPlexMono-Medium.ttf")),
+    // Italics: preview tabs, and emphasis in notes.
+    ("IBMPlexMono-Italic.ttf", font!("IBMPlexMono-Italic.ttf")),
     (
         "IBMPlexMono-SemiBold.ttf",
         font!("IBMPlexMono-SemiBold.ttf"),

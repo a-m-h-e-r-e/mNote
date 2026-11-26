@@ -472,6 +472,10 @@ impl Explorer {
 }
 
 impl PickerDelegate for Explorer {
+    fn opens_preview(&self) -> bool {
+        true
+    }
+
     fn title(&self) -> Option<(SharedString, Option<SharedString>)> {
         let name = self.folder.rsplit('/').next().filter(|n| !n.is_empty());
         let title = name.map_or_else(|| self.vault_name.clone(), str::to_owned);
