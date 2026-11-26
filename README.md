@@ -26,6 +26,11 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+## Docs
+
+- [Tabs and panes](docs/tabs.md): opening notes, preview tabs, keys, the mouse and settings.
+- [Plugins](docs/plugins.md): the Lua API and events.
+
 ## Design
 
 - Design system: https://claude.ai/artifact/VAXKWj371tAeXScQgoDh5S

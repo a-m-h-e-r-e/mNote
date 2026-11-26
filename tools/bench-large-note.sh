@@ -1,8 +1,9 @@
 #!/bin/sh
-# Keystroke latency on a large note (336 KB of long lines), wrapped and not.
-# Types 300 keys into a release build in a throwaway HOME (your own notes
-# and config are never touched) and fails if mNote's own work per key goes
-# over the 8 ms budget at p95.
+# Keystroke latency on a large note (336 KB of long lines), wrapped and not,
+# and on a 1 MB Rust file; then switching tabs (AMI-224): 3 panes × 8 tabs
+# on 1 MB notes, `gt` 200 times. Runs a release build in a throwaway HOME
+# (your own notes and config are never touched) and fails if mNote's own
+# work goes over budget at p95: 8 ms per key, 16 ms per tab switch.
 #
 #   tools/bench-large-note.sh
 #
@@ -66,6 +67,35 @@ colours=$(echo "$out" | sed -n 's/^mnote first colours: \([0-9.]*\) ms.*/\1/p' |
 echo "rust 1 MB: first colours ${colours:-?} ms"
 if [ -z "$colours" ] || [ "$(echo "$colours > 50" | bc)" = 1 ]; then
     echo "  over 50 ms to first colours (or no result)"
+    status=1
+fi
+
+# Switching tabs: 24 notes of 1 MB in n1…n8 | (n9…n16 over n17…n24), then
+# `gt` round the focused pane's 8 tabs.
+python3 -I - "$SANDBOX/home/notes" <<'PY'
+import sys
+words = "the quick brown fox jumps over a lazy dog while notes keep moving along".split()
+for n in range(1, 25):
+    line = lambda i: " ".join(words[(n + i + j) % len(words)] for j in range(12))
+    lines = [f"# Note {n}", ""] + [line(i) for i in range(14000)]
+    open(f"{sys.argv[1]}/n{n}.md", "w").write("\n".join(lines) + "\n")
+PY
+{
+    for n in 1 2 3 4 5 6 7 8; do echo ":e n$n<CR>"; done
+    echo "<C-w>v"
+    for n in 9 10 11 12 13 14 15 16; do echo ":e n$n<CR>"; done
+    echo "<C-w>s"
+    for n in 17 18 19 20 21 22 23 24; do echo ":e n$n<CR>"; done
+    echo "wait 500"
+    echo "bench 200 gt"
+} > "$SANDBOX/tabs.keys"
+printf 'vault = "%s"\nwrap = true\nrestore_session = false\n' "$SANDBOX/home/notes" > "$SANDBOX/home/.config/mnote/config.toml"
+work=$(HOME="$SANDBOX/home" XDG_CONFIG_HOME="$SANDBOX/home/.config" \
+    MNOTE_LATENCY=1 MNOTE_SCRIPT="$SANDBOX/tabs.keys" "$BIN" 2>&1 | grep "mNote's work" || true)
+echo "tab switch, 3 panes × 8 tabs of 1 MB: ${work#*wait): }"
+p95=$(echo "$work" | sed -n 's/.*p95 \([0-9.]*\) ms.*/\1/p')
+if [ -z "$p95" ] || [ "$(echo "$p95 > 16" | bc)" = 1 ]; then
+    echo "  over the 16 ms budget (or no result)"
     status=1
 fi
 exit $status

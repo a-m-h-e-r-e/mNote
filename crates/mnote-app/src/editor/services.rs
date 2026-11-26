@@ -282,8 +282,10 @@ impl Editor {
     /// in Vim's notation (`:tabnew<CR>`, `<C-w>v`), `state` (prints the
     /// tabs, panes and text as `mnote state: …`), `key <D-S-t>` (a ⌘ key
     /// or chord, through the keymap), `stroke cmd-shift-}` (a keystroke as
-    /// the keyboard sends it), `wait 500` (milliseconds) or
-    /// `# a comment`.
+    /// the keyboard sends it), `wait 500` (milliseconds), `bench 200 gt`
+    /// (presses the keys 200 times, 50 ms apart, and prints their
+    /// key-to-pixels times as the latency bench does; needs
+    /// `MNOTE_LATENCY`) or `# a comment`.
     pub fn run_script(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
         let lines: Vec<String> = std::fs::read_to_string(&path)
             .map(|t| t.lines().map(str::to_owned).collect())
@@ -304,6 +306,34 @@ impl Editor {
                     cx.background_executor()
                         .timer(Duration::from_millis(ms))
                         .await;
+                    continue;
+                }
+                if let Some((n, keys)) = line
+                    .strip_prefix("bench ")
+                    .and_then(|rest| rest.split_once(' '))
+                    .and_then(|(n, keys)| Some((n.parse::<usize>().ok()?, keys.to_owned())))
+                {
+                    let keys = mnote_vim::parse_keys(&keys);
+                    let Ok(Some(log)) = this.update(cx, |this, _| this.latency.log.clone()) else {
+                        eprintln!("mnote script: bench needs MNOTE_LATENCY");
+                        continue;
+                    };
+                    let from = log.borrow().len();
+                    for _ in 0..n {
+                        let _ = this.update(cx, |this, cx| {
+                            this.latency.key_pressed();
+                            for key in &keys {
+                                this.press(*key, cx);
+                            }
+                        });
+                        cx.background_executor()
+                            .timer(Duration::from_millis(50))
+                            .await;
+                    }
+                    // The first rounds warm caches up.
+                    let samples: Vec<(f32, f32)> =
+                        log.borrow().iter().skip(from + 5).copied().collect();
+                    eprintln!("{}", LatencyProbe::report(&samples));
                     continue;
                 }
                 let _ = this.update(cx, |this, cx| {

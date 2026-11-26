@@ -32,8 +32,9 @@ const NAME_MAX: usize = 24;
 pub(super) struct TabRows {
     /// Each pane's row scroll.
     scroll: RefCell<HashMap<PaneId, ScrollHandle>>,
-    /// The tab each row last brought into view.
-    revealed: RefCell<HashMap<PaneId, usize>>,
+    /// What each row last brought into view: its active tab, its number of
+    /// tabs and its width.
+    revealed: RefCell<HashMap<PaneId, (usize, usize, i32)>>,
     /// Whether the window buttons are shown now (`None`: not set yet).
     pub buttons_shown: Option<bool>,
     /// A window action a command asked for, done at the next frame (it
@@ -190,12 +191,18 @@ impl Editor {
     ) -> AnyElement {
         let (tabs, focused) = self.tab_infos(pane);
         let scroll = self.row_scroll(pane);
-        // Bring a newly active tab into view, once.
+        // Bring the active tab into view when it changes, and when the row
+        // narrows or gains tabs (a split halves it), once each time.
         if let Some(active) = tabs.iter().find(|t| t.active).map(|t| t.index) {
+            let width = (scroll.bounds().size.width / px(1.)).round() as i32;
+            let seen = (active, tabs.len(), width);
             let mut revealed = self.tab_rows.revealed.borrow_mut();
-            if revealed.get(&pane) != Some(&active) {
-                revealed.insert(pane, active);
+            if revealed.get(&pane) != Some(&seen) {
+                revealed.insert(pane, seen);
                 scroll.scroll_to_item(active);
+                // The width is the last frame's: look again once this one
+                // is laid out (it settles when the width stops changing).
+                cx.notify();
             }
         }
         let top = self.layout.top_panes().contains(&pane);

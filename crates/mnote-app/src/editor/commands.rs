@@ -278,7 +278,7 @@ pub fn builtin() -> Vec<Command> {
         Command::new(
             "tab-new",
             "New tab",
-            "A new tab after this one, on the note named or an untitled note.",
+            "A new tab in this pane, after the active one, on the note named or an untitled note.",
             act(|e, call, cx| e.tab_new(call.args.as_deref(), cx)),
         )
         .bind("<D-t>")
@@ -287,7 +287,7 @@ pub fn builtin() -> Vec<Command> {
         Command::new(
             "tab-next",
             "Next tab",
-            "Shows the next tab, round the window; :tabnext N shows tab N, # the last used.",
+            "Shows this pane's next tab, round its row; :tabnext N shows tab N, # the last used.",
             act(|e, call, cx| e.tab_next(call.args.as_deref(), cx)),
         )
         .bind("<C-Tab>")
@@ -298,7 +298,7 @@ pub fn builtin() -> Vec<Command> {
         Command::new(
             "tab-previous",
             "Previous tab",
-            "Shows the previous tab, round the window; :tabprevious N goes back N.",
+            "Shows this pane's previous tab, round its row; :tabprevious N goes back N.",
             act(|e, call, cx| e.tab_previous(call.args.as_deref(), cx)),
         )
         .bind("<C-S-Tab>")
@@ -309,7 +309,7 @@ pub fn builtin() -> Vec<Command> {
         Command::new(
             "tab-close",
             "Close tab",
-            "Closes this tab and its panes (or tab N); the last-used tab shows. :tabreopen brings it back.",
+            "Closes this pane's active tab (or tab N), and the pane with its last tab; the last-used tab shows. :tabreopen brings it back.",
             act(|e, call, cx| e.tab_close(call.args.as_deref(), call.bang, cx)),
         )
         .shown_as("tabclose")
@@ -325,7 +325,7 @@ pub fn builtin() -> Vec<Command> {
         Command::new(
             "tab-reopen",
             "Reopen closed tab",
-            "Brings back the tab closed last, with its panes, where it was.",
+            "Brings back the tab closed last, in its pane and place (or this pane if that one is gone).",
             act(|e, _, cx| e.tab_reopen(cx)),
         )
         .bind("<D-S-t>")
@@ -375,7 +375,7 @@ pub fn builtin() -> Vec<Command> {
         Command::new(
             "tab-last",
             "Last tab",
-            "Shows the last tab.",
+            "Shows this pane's last tab.",
             act(|e, _, cx| e.tab_edge(true, cx)),
         )
         .bind("<D-9>")
@@ -384,7 +384,7 @@ pub fn builtin() -> Vec<Command> {
         Command::new(
             "tab-move",
             "Move tab",
-            "Moves this tab: to the end, after tab N (0 is first), or +N / -N places.",
+            "Moves the active tab along its row: to the end, after tab N (0 is first), or +N / -N places.",
             act(|e, call, cx| e.tab_move(call.args.as_deref(), cx)),
         )
         .shown_as("tabmove")
@@ -450,7 +450,7 @@ pub fn builtin() -> Vec<Command> {
         Command::new(
             "tab-list",
             "List tabs",
-            "Every tab and the notes of its panes; > marks the focused pane, + unsaved text.",
+            "Every pane and its tabs; > marks each pane's active tab, + unsaved text.",
             act(|e, _, _| e.tab_list()),
         )
         .shown_as("tabs")

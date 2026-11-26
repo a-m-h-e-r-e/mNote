@@ -20,7 +20,8 @@ impl Editor {
         let cursor_line = line_of(rope, cursor);
         // An unfocused pane shows no cursor line.
         let current = ix == cursor_line && !self.drawing_other;
-        let number = if current || !self.vim.options().relativenumber {
+        // Its cursor's line still shows its own number, as Vim's does.
+        let number = if ix == cursor_line || !self.vim.options().relativenumber {
             ix + 1
         } else {
             ix.abs_diff(cursor_line)
