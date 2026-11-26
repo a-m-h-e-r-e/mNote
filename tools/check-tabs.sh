@@ -19,7 +19,9 @@ SANDBOX=$(mktemp -d)
 trap '[ -n "${KEEP:-}" ] || rm -rf "$SANDBOX"' EXIT
 VAULT="$SANDBOX/home/notes"
 mkdir -p "$SANDBOX/home/.config/mnote" "$VAULT"
-printf 'vault = "%s"\n' "$VAULT" > "$SANDBOX/home/.config/mnote/config.toml"
+CONFIG="$SANDBOX/home/.config/mnote/config.toml"
+# Each run starts fresh; the session scenario turns restoring on.
+printf 'vault = "%s"\nrestore_session = false\n' "$VAULT" > "$CONFIG"
 failed=0
 
 # run NAME: plays $SANDBOX/NAME.keys on a.md, leaving its state lines in
@@ -393,6 +395,47 @@ expect strokes 8 'pane 1/1 | a.md b.md a2.md >untitled |'
 expect strokes 9 'pane 1/1 | a.md b.md >a2.md |'
 # ⌘⇧T reopens the last closed tab (its pane is gone: in this one).
 expect strokes 10 'pane 1/1 | >a.md b.md a2.md |'
+
+# Restoring: three runs on one vault, the session kept between them.
+printf 'vault = "%s"\nrestore_session = true\n' "$VAULT" > "$CONFIG"
+cat > "$SANDBOX/session1.keys" <<'KEYS'
+:tabnew b<CR>
+3l
+<C-w>v
+:e a2<CR>
+:tabnew<CR>
+idraft text<Esc>
+<C-w>h
+state
+KEYS
+cat > "$SANDBOX/session2.keys" <<'KEYS'
+state
+gt
+state
+<C-w>l
+state
+KEYS
+cat > "$SANDBOX/session3.keys" <<'KEYS'
+<C-w>l
+state
+KEYS
+run session1
+run session2
+rm -f "$VAULT/a2.md"
+run session3
+printf 'vault = "%s"\nrestore_session = false\n' "$VAULT" > "$CONFIG"
+expect session1 1 'pane 1/2 | a.md >b.md | [b.md a2.md >untitled]'
+# The panes and tabs come back; a.md (named on the command line) shows.
+expect session2 1 'pane 1/2 | >a.md b.md | [b.md a2.md >untitled]'
+# A dormant tab shows with its cursor where it was.
+expect session2 2 '| a.md >b.md |'
+expect session2 2 'cursor 3'
+# The untitled note comes back from its draft, still unsaved.
+expect session2 3 'pane 2/2 | b.md a2.md >untitled |'
+expect session2 3 'text draft text'
+# A note gone from the vault is left out (a.md, named on the command
+# line, opens as a tab in the pane that had focus).
+expect session3 1 'pane 2/2 | b.md untitled >a.md |'
 
 if [ "$failed" = 0 ]; then
     echo "tabs: all checks passed"

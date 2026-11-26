@@ -33,7 +33,7 @@ cp "$NOTE" "$SANDBOX/large.md"
 status=0
 for wrap in true false; do
     cp "$SANDBOX/large.md" "$NOTE"
-    printf 'vault = "%s"\nwrap = %s\n' "$SANDBOX/home/notes" "$wrap" \
+    printf 'vault = "%s"\nwrap = %s\nrestore_session = false\n' "$SANDBOX/home/notes" "$wrap" \
         > "$SANDBOX/home/.config/mnote/config.toml"
     work=$(HOME="$SANDBOX/home" XDG_CONFIG_HOME="$SANDBOX/home/.config" \
         MNOTE_LATENCY=1 MNOTE_LATENCY_BENCH=300 "$BIN" "$NOTE" 2>&1 | grep "mNote's work" || true)
@@ -52,7 +52,7 @@ import sys
 line = "    pub fn example(&self, value: u32) -> Option<String> { let s = format!(\"{value}\"); Some(s) } // note\n"
 open(sys.argv[1], "w").write("pub struct Example;\n\nimpl Example {\n" + line * 10000 + "}\n")
 PY
-printf 'vault = "%s"\nwrap = false\n' "$SANDBOX/home/notes" > "$SANDBOX/home/.config/mnote/config.toml"
+printf 'vault = "%s"\nwrap = false\nrestore_session = false\n' "$SANDBOX/home/notes" > "$SANDBOX/home/.config/mnote/config.toml"
 out=$(HOME="$SANDBOX/home" XDG_CONFIG_HOME="$SANDBOX/home/.config" \
     MNOTE_LATENCY=1 MNOTE_LATENCY_BENCH=300 "$BIN" "$CODE" 2>&1 || true)
 work=$(echo "$out" | grep "mNote's work" || true)

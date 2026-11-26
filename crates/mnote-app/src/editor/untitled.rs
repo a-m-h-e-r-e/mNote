@@ -37,7 +37,7 @@ impl Editor {
     }
 
     /// Where untitled note `n`'s draft is kept.
-    fn draft_path(n: u32) -> Option<PathBuf> {
+    pub(super) fn draft_path(n: u32) -> Option<PathBuf> {
         let dir = Config::path()?.parent()?.join("drafts");
         Some(dir.join(format!("untitled-{}-{n}.md", std::process::id())))
     }

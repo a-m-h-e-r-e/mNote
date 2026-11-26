@@ -30,6 +30,7 @@ mod plugin_list;
 mod plugins;
 mod saving;
 mod services;
+mod session;
 mod styled;
 mod tab_line;
 mod tabs;
@@ -194,6 +195,11 @@ pub struct Editor {
     tab_rows: tab_line::TabRows,
     /// How the next note opened takes its place (kept, preview, replace).
     opening: tabs::OpenAs,
+    /// The session (panes and tabs) has been restored, so changes save it;
+    /// the shape last saved, and the save waiting to happen.
+    session_restored: bool,
+    session_shape_saved: String,
+    session_task: Option<Task<()>>,
     /// The open `…` menu, and where each row's `…` button is.
     pane_menu: Option<pane_menu::PaneMenu>,
     menu_anchors: pane_menu::MenuAnchors,
@@ -373,6 +379,11 @@ impl Editor {
         });
 
         let subscriptions = vec![
+            // The panes and tabs, with every cursor, are kept for next time.
+            cx.on_app_quit(|this, _| {
+                this.save_session();
+                async {}
+            }),
             cx.observe_window_appearance(window, |_, window, cx| {
                 if Theme::sync_with(window, cx) {
                     cx.notify();
@@ -444,6 +455,9 @@ impl Editor {
             closed_tabs: Vec::new(),
             tab_rows: Default::default(),
             opening: Default::default(),
+            session_restored: false,
+            session_shape_saved: String::new(),
+            session_task: None,
             pane_menu: None,
             menu_anchors: Default::default(),
             next_untitled: 0,

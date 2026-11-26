@@ -349,6 +349,8 @@ pub struct Config {
     /// Notes only looked at (the explorer, results, links) open in one
     /// preview tab that the next replaces; `false` keeps every one.
     pub preview_tabs: bool,
+    /// Reopen the vault's panes and tabs as they were left.
+    pub restore_session: bool,
     /// Show the window's close, minimize and zoom buttons (ADR-0015: they
     /// are hidden, and the tab rows reach the window's top edge).
     pub window_buttons: bool,
@@ -424,6 +426,7 @@ impl Default for Config {
             show_code_files: true,
             show_tabs: TabsChoice::Auto,
             preview_tabs: true,
+            restore_session: true,
             window_buttons: false,
             large_file_injections_mb: 4,
             large_file_highlight_mb: 16,
@@ -529,6 +532,10 @@ impl Config {
                             ));
                         }
                     }
+                }
+                "restore_session" => {
+                    config.restore_session =
+                        value.as_bool().ok_or_else(|| wrong("true or false"))?;
                 }
                 "preview_tabs" => {
                     config.preview_tabs = value.as_bool().ok_or_else(|| wrong("true or false"))?;
@@ -944,6 +951,16 @@ impl Config {
                 quoted(self.show_tabs.name()),
             ),
             Setting::new(
+                "restore_session",
+                &format!(
+                    "Reopen the vault's panes and tabs as they were left, with their\n\
+                     cursors and unsaved untitled notes. Kept in mNote's config folder.\n\
+                     Values: true, false. Default: {}",
+                    on_off(d.restore_session)
+                ),
+                on_off(self.restore_session).into(),
+            ),
+            Setting::new(
                 "preview_tabs",
                 &format!(
                     "Notes you only look at (the explorer, search results, backlinks,\n\
@@ -1346,6 +1363,7 @@ mod tests {
             show_code_files: false,
             show_tabs: TabsChoice::Auto,
             preview_tabs: true,
+            restore_session: true,
             window_buttons: false,
             large_file_injections_mb: 2,
             large_file_highlight_mb: 8,
@@ -1616,6 +1634,12 @@ mod tests {
         assert!(config.template().contains("window_buttons = true"));
         assert!(Config::parse("show_tabs = \"sometimes\"").is_err());
         assert!(Config::default().preview_tabs);
+        assert!(Config::default().restore_session);
+        assert!(
+            !Config::parse("restore_session = false")
+                .expect("valid")
+                .restore_session
+        );
         assert!(
             !Config::parse("preview_tabs = false")
                 .expect("valid")

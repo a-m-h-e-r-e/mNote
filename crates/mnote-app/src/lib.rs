@@ -8,6 +8,7 @@ pub mod folder_edit;
 pub mod keymap;
 pub mod picker;
 #[cfg(target_os = "macos")]
+pub mod startup;
 pub mod summon;
 
 /// Today's date, local where the platform tells it, as (year, month, day).

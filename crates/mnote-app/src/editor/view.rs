@@ -297,6 +297,9 @@ impl Render for Editor {
             .map(|editor| editor.render(width, height, caret_on, p));
         // The window buttons and any window action a command asked for.
         self.sync_window(window);
+        // The session is written a second after panes or tabs change.
+        self.schedule_session_save(cx);
+        crate::startup::first_frame();
         let rope = self.buffer.text();
         let cursor = self.vim.cursor();
         let line = line_of(rope, cursor);

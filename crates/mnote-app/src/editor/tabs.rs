@@ -30,6 +30,9 @@ pub(super) struct Tab {
     /// The note's revision when it was last shown: a tab on a note edited
     /// meanwhile measures its lines again.
     pub seen: u64,
+    /// Where a restored tab's cursor goes (row, column) and its view, until
+    /// it's first shown (it's dormant till then: its note isn't read).
+    pub restore: Option<(usize, usize, super::styled::View)>,
 }
 
 impl Tab {
@@ -39,6 +42,7 @@ impl Tab {
             preview: false,
             local: None,
             seen: 0,
+            restore: None,
         }
     }
 }
@@ -195,7 +199,7 @@ impl Editor {
 
     /// Opens `key`'s doc as a parked one if it isn't open. `false`: it
     /// can't be (a scratch or untitled note that was closed).
-    fn ensure_parked(&mut self, key: &DocKey) -> bool {
+    pub(super) fn ensure_parked(&mut self, key: &DocKey) -> bool {
         if self.parked_index(key).is_some() {
             return true;
         }
@@ -367,6 +371,7 @@ impl Editor {
         }
         let tab = &mut self.panes[fi].tabs[i];
         let seen = tab.seen;
+        let restore = tab.restore.take();
         match tab.local.take() {
             Some(mut local) => {
                 self.swap_local(&mut local);
@@ -381,7 +386,15 @@ impl Editor {
                     });
                 }
             }
-            None => self.fresh_view(),
+            None => {
+                self.fresh_view();
+                // A restored tab, shown for the first time: where it was.
+                if let Some((row, col, view)) = restore {
+                    self.view = view;
+                    let at = super::session::char_at(self.buffer.text(), row, col);
+                    self.vim.set_cursor(at);
+                }
+            }
         }
         let slot = &mut self.panes[fi];
         slot.active = i;

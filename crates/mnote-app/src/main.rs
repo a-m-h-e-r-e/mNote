@@ -64,6 +64,7 @@ fn target_from_args(vault: Option<&Path>) -> Result<Target, String> {
 }
 
 fn main() {
+    mnote_app::startup::mark();
     // A mistake in config.toml shows in the window; the defaults are used.
     let (config, mut problem, no_config) = match Config::path().map(|p| Config::load(&p)) {
         Some(Ok(Some(config))) => (config, None, false),
@@ -87,6 +88,13 @@ fn main() {
         }
     };
 
+    // The panes and tabs left last time come back (a vault, not first run);
+    // a note named on the command line opens in them as a tab.
+    let restorable = matches!(target, Target::Note(..)) && !first_run;
+    let opened = match &target {
+        Target::Note(_, note) if from_args => Some(note.clone()),
+        _ => None,
+    };
     Application::new().run(move |cx: &mut App| {
         Theme::init(cx);
         // A theme file that can't be read shows as a notice once the editor
@@ -112,6 +120,9 @@ fn main() {
                         Target::Note(vault, note) => Editor::open(vault, note, window, cx),
                     };
                     editor.apply_config(settings.clone(), cx);
+                    if restorable {
+                        editor.restore_session(opened.clone(), cx);
+                    }
                     if first_run {
                         editor.start_first_run(settings, cx);
                     }
