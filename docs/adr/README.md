@@ -16,5 +16,6 @@ Each record is one decision: what was decided, why, what else was considered, an
 | [0010](0010-edit-origins-and-proposals.md) | Edits carry their origin; edit groups and proposals | Accepted |
 | [0011](0011-context-api.md) | One context API for completion, plugins and agents | Accepted |
 | [0012](0012-ai-integration-boundaries.md) | Boundaries for AI and agents, fixed now | Accepted |
+| [0013](0013-tab-pages.md) | Tab pages are layouts of panes, Vim's model | Accepted |
 
-The design these belong to: [docs/architecture/code-support.md](../architecture/code-support.md).
+The designs these belong to: [code support](../architecture/code-support.md) (0001–0012) and [tab pages](../architecture/tab-pages.md) (0013).
