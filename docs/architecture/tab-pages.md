@@ -1,6 +1,6 @@
 # Tab pages: design
 
-Status: **accepted** (2026-11-26). The decision is recorded in [ADR-0013](../adr/0013-tab-pages.md).
+Status: **superseded** by [tabs on every pane](pane-tabs.md) and [ADR-0014](../adr/0014-tabs-on-every-pane.md) (2026-11-26). It was accepted on 2026-11-26 and built as AMI-218 and AMI-219; it's kept for the record. The decision is recorded in [ADR-0013](../adr/0013-tab-pages.md).
 
 mNote gets tab pages the way Vim has them: **a tab page is a layout of panes**, not a file. Each tab keeps its own splits, its own focused pane and each pane's cursor and scroll; notes are shared by every tab, so one note open in two tabs is one buffer with one undo history. The keys and commands are Vim's (`gt`, `gT`, `:tabnew`, `⌃w T`), with the Mac's (`⌘T`, `⌘1`…`⌘9`) alongside.
 
@@ -159,9 +159,9 @@ A note already shown somewhere doesn't jump to that tab: Vim opens it again in t
   - its number (for `{N}gt` and `⌘N`);
   - its name: the one given with `:tabrename`, or else the focused pane's file name (`ideas.md`, `main.rs`);
   - `+2` when it has more panes than one;
-  - the dirty dot when any of its panes' notes is unsaved.
-- The current tab uses the theme's accent, as the focused pane's border does. Long names are cut with `…`. When tabs don't fit, the line scrolls to keep the current one in view, with `‹` and `›` at the ends, rather than shrinking tabs to nothing.
-- Mouse: click shows a tab; middle-click or the `×` on hover closes it; dragging a tab moves it (`:tabmove`); a double click on the empty part opens a new tab.
+  - a close slot at its right end, as VS Code has: a plain `×` (no box) on the current tab and on the tab under the pointer, which gets a soft square behind it on hover. A tab with unsaved text shows `●` in the slot instead, which turns into `×` under the pointer. Other tabs leave the slot empty, so names don't shift.
+- The current tab uses the theme's accent, as the focused pane's border does. Long names are cut with `…`. When tabs don't fit, the line scrolls sideways, as VS Code's does (trackpad, or the wheel), and keeps the current tab in view; tabs never shrink to nothing.
+- Mouse: click shows a tab; middle-click or the `×` closes it (as `⌘W` would, asking first for untitled text); dragging a tab moves it (`:tabmove`); a double click on the empty part opens a new tab.
 - Themes get `tabline`, `tabline_current` and `tabline_text` keys, defaulting to the top bar's colours, so existing themes look right without changes.
 - The top bar's hint (`⌃w h j k l move · ⌃w c close`) gains `gt next tab` while there are several tabs.
 

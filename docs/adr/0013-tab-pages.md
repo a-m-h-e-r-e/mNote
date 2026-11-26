@@ -1,6 +1,6 @@
 # 0013. Tab pages are layouts of panes, Vim's model
 
-Status: Accepted (2026-11-26)
+Status: Superseded by [0014](0014-tabs-on-every-pane.md) (2026-11-26); accepted 2026-11-26
 
 ## Context
 
