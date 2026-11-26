@@ -68,8 +68,26 @@ enum Request {
         on_stdout: Option<usize>,
         on_exit: Option<usize>,
     },
-    /// `mnote.open`: a note, and the line to put the cursor on.
-    Open { note: NotePath, line: Option<usize> },
+    /// `mnote.open`: a note, the line to put the cursor on, and where.
+    Open {
+        note: NotePath,
+        line: Option<usize>,
+        target: OpenTarget,
+    },
+    /// `mnote.tab.open`: a note as a tab of a pane (the focused one).
+    TabOpen {
+        note: NotePath,
+        pane: Option<u32>,
+        preview: bool,
+    },
+    /// `mnote.tab.close`: tab `index` (from 1) of a pane.
+    TabClose {
+        pane: Option<u32>,
+        index: usize,
+        force: bool,
+    },
+    /// `mnote.tab.activate`: shows tab `index` (from 1) of a pane.
+    TabActivate { pane: Option<u32>, index: usize },
     /// `mnote.feedkeys`: keys to run as typed.
     Keys(Vec<mnote_vim::Key>),
     /// `mnote.cmd`: an Ex line.
@@ -79,6 +97,49 @@ enum Request {
         edits: Vec<(NotePath, Vec<LineEdit>)>,
         label: String,
     },
+}
+
+/// Where `mnote.open` puts a note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenTarget {
+    /// A kept tab in the focused pane.
+    Tab,
+    /// The focused pane's preview tab.
+    Preview,
+    /// A new pane below, or beside.
+    Split,
+    Vsplit,
+}
+
+impl OpenTarget {
+    fn parse(name: Option<&str>) -> mlua::Result<Self> {
+        Ok(match name {
+            None | Some("tab") => OpenTarget::Tab,
+            Some("preview") => OpenTarget::Preview,
+            Some("split") => OpenTarget::Split,
+            Some("vsplit") => OpenTarget::Vsplit,
+            Some(other) => {
+                return Err(mlua::Error::runtime(format!(
+                    "target {other:?}: one of \"tab\", \"preview\", \"split\", \"vsplit\""
+                )));
+            }
+        })
+    }
+}
+
+/// A note path from Lua (`.md` optional), or an error naming it.
+fn lua_note(path: &str) -> mlua::Result<NotePath> {
+    NotePath::new(path)
+        .or_else(|_| NotePath::new(format!("{path}.md")))
+        .map_err(|_| mlua::Error::runtime(format!("{path} isn't a note path in the vault")))
+}
+
+/// How Lua names a tab's document: a note's path, else its label.
+fn doc_name(doc: &super::DocKey) -> String {
+    match doc {
+        super::DocKey::Note(note) => note.to_string(),
+        other => other.label(),
+    }
 }
 
 /// Lines `first..last` (as `mnote.buf.set_lines` counts them) become `lines`.
@@ -143,6 +204,8 @@ const SCOPED: &[(&str, &str)] = &[
     ("buf", "insert"),
     ("", "note"),
     ("", "mode"),
+    ("", "pane"),
+    ("", "tabs"),
     ("", "decorate"),
     ("", "undecorate"),
     ("clipboard", "get"),
@@ -435,21 +498,77 @@ impl LuaHost {
             "open",
             lua.create_function(move |_, (path, opts): (String, Option<Table>)| {
                 let line = opts
+                    .as_ref()
                     .map(|o| o.get::<Option<usize>>("line"))
                     .transpose()?
                     .flatten();
-                let note = NotePath::new(&path)
-                    .or_else(|_| NotePath::new(format!("{path}.md")))
-                    .map_err(|_| {
-                        mlua::Error::runtime(format!("{path} isn't a note path in the vault"))
-                    })?;
+                let target = opts
+                    .as_ref()
+                    .map(|o| o.get::<Option<String>>("target"))
+                    .transpose()?
+                    .flatten();
+                let target = OpenTarget::parse(target.as_deref())?;
+                let note = lua_note(&path)?;
                 state
                     .borrow_mut()
                     .requests
-                    .push(Request::Open { note, line });
+                    .push(Request::Open { note, line, target });
                 Ok(())
             })?,
         )?;
+
+        // mnote.tab: a pane's tabs (the focused pane unless `pane` says).
+        let tab = lua.create_table()?;
+        let state = self.state.clone();
+        tab.set(
+            "open",
+            lua.create_function(move |_, (path, opts): (String, Option<Table>)| {
+                let note = lua_note(&path)?;
+                let (pane, preview) = match &opts {
+                    Some(o) => (
+                        o.get::<Option<u32>>("pane")?,
+                        o.get::<Option<bool>>("preview")?.unwrap_or(false),
+                    ),
+                    None => (None, false),
+                };
+                state.borrow_mut().requests.push(Request::TabOpen {
+                    note,
+                    pane,
+                    preview,
+                });
+                Ok(())
+            })?,
+        )?;
+        let state = self.state.clone();
+        tab.set(
+            "close",
+            lua.create_function(
+                move |_, (pane, index, opts): (Option<u32>, Option<usize>, Option<Table>)| {
+                    let force = match &opts {
+                        Some(o) => o.get::<Option<bool>>("force")?.unwrap_or(false),
+                        None => false,
+                    };
+                    state.borrow_mut().requests.push(Request::TabClose {
+                        pane,
+                        index: index.unwrap_or(0),
+                        force,
+                    });
+                    Ok(())
+                },
+            )?,
+        )?;
+        let state = self.state.clone();
+        tab.set(
+            "activate",
+            lua.create_function(move |_, (pane, index): (Option<u32>, usize)| {
+                state
+                    .borrow_mut()
+                    .requests
+                    .push(Request::TabActivate { pane, index });
+                Ok(())
+            })?,
+        )?;
+        mnote.set("tab", tab)?;
 
         let state = self.state.clone();
         mnote.set(
@@ -725,6 +844,30 @@ impl LuaHost {
                 scope.create_function(move |_, ()| Ok(e.borrow().vim.mode().label()))?,
             )?;
             mnote.set(
+                "pane",
+                scope.create_function(move |_, ()| Ok(e.borrow().focused.0))?,
+            )?;
+            mnote.set(
+                "tabs",
+                scope.create_function(move |lua, pane: Option<u32>| {
+                    let e = e.borrow();
+                    let id = pane.map_or(e.focused, super::panes::PaneId);
+                    let out = lua.create_table()?;
+                    let Some(slot) = e.panes.iter().find(|p| p.id == id) else {
+                        return Ok(out);
+                    };
+                    for (i, tab) in slot.tabs.iter().enumerate() {
+                        let t = lua.create_table()?;
+                        t.set("note", doc_name(&tab.doc))?;
+                        t.set("active", i == slot.active)?;
+                        t.set("preview", tab.preview)?;
+                        t.set("unsaved", e.waits_for_saving(&tab.doc))?;
+                        out.set(i + 1, t)?;
+                    }
+                    Ok(out)
+                })?,
+            )?;
+            mnote.set(
                 "decorate",
                 scope.create_function(move |_, (ns, opts): (String, Table)| {
                     let mut e = e.borrow_mut();
@@ -880,7 +1023,11 @@ impl Editor {
             self.events.on(
                 &[kind],
                 Rc::new(move |e, event, cx| {
-                    let note = e.source.key().map(|n| n.to_string());
+                    // A tab event is about its tab's note; others the open one.
+                    let note = match event.tab_doc() {
+                        Some(doc) => Some(doc_name(doc)),
+                        None => e.source.key().map(|n| n.to_string()),
+                    };
                     if let Some(pattern) = &pattern
                         && !note.as_deref().is_some_and(|n| glob(pattern, n))
                     {
@@ -1112,7 +1259,31 @@ impl Editor {
                     on_stdout,
                     on_exit,
                 } => self.start_job(host, cmd, on_stdout, on_exit, cx),
-                Request::Open { note, line } => self.open_from_plugin(note, line, cx),
+                Request::Open { note, line, target } => {
+                    self.open_from_plugin(note, line, target, cx);
+                }
+                Request::TabOpen {
+                    note,
+                    pane,
+                    preview,
+                } => {
+                    self.focus_plugin_pane(pane, cx);
+                    let target = if preview {
+                        OpenTarget::Preview
+                    } else {
+                        OpenTarget::Tab
+                    };
+                    self.open_from_plugin(note, None, target, cx);
+                }
+                Request::TabClose { pane, index, force } => {
+                    self.focus_plugin_pane(pane, cx);
+                    let n = (index > 0).then(|| index.to_string());
+                    self.tab_close(n.as_deref(), force, cx);
+                }
+                Request::TabActivate { pane, index } => {
+                    self.focus_plugin_pane(pane, cx);
+                    self.tab_number(index, cx);
+                }
                 // Keys and Ex lines run as typed, but their edits are the
                 // plugin's.
                 Request::Keys(keys) => {
@@ -1171,7 +1342,13 @@ impl Editor {
     }
 
     /// `mnote.open`: the note (it must exist), at `line` if given.
-    fn open_from_plugin(&mut self, note: NotePath, line: Option<usize>, cx: &mut Context<Self>) {
+    fn open_from_plugin(
+        &mut self,
+        note: NotePath,
+        line: Option<usize>,
+        target: OpenTarget,
+        cx: &mut Context<Self>,
+    ) {
         let exists = self
             .vault
             .as_ref()
@@ -1180,9 +1357,35 @@ impl Editor {
             self.show_toast(format!("mnote.open: there's no note {note}"), false, cx);
             return;
         }
-        match line {
-            Some(line) => self.go_to(note, line, cx),
-            None => self.switch_to(note, cx),
+        let how = match target {
+            OpenTarget::Tab => super::tabs::OpenAs::Kept,
+            OpenTarget::Preview => super::tabs::OpenAs::Preview,
+            OpenTarget::Split | OpenTarget::Vsplit => {
+                let axis = if target == OpenTarget::Vsplit {
+                    super::panes::Axis::Row
+                } else {
+                    super::panes::Axis::Column
+                };
+                self.split_pane(axis, cx);
+                super::tabs::OpenAs::Replace
+            }
+        };
+        self.open_as(how, |e| match line {
+            Some(line) => e.go_to(note, line, cx),
+            None => e.switch_to(note, cx),
+        });
+        if how == super::tabs::OpenAs::Kept {
+            self.keep_active_tab();
+        }
+    }
+
+    /// Focuses pane `pane` for a tab request, if it's named and exists.
+    fn focus_plugin_pane(&mut self, pane: Option<u32>, cx: &mut Context<Self>) {
+        if let Some(id) = pane.map(super::panes::PaneId)
+            && id != self.focused
+            && self.panes.iter().any(|p| p.id == id)
+        {
+            self.focus_pane(id, cx);
         }
     }
 
@@ -1345,6 +1548,10 @@ fn event_kind(name: &str) -> Option<EventKind> {
         "VaultChanged" => EventKind::VaultChanged,
         "ConfigApplied" => EventKind::ConfigApplied,
         "PaneFocused" => EventKind::PaneFocused,
+        "TabOpened" => EventKind::TabOpened,
+        "TabClosed" => EventKind::TabClosed,
+        "TabActivated" => EventKind::TabActivated,
+        "TabMoved" => EventKind::TabMoved,
         _ => return None,
     })
 }
@@ -1372,6 +1579,18 @@ fn event_table(lua: &Lua, event: &EditorEvent, note: Option<&str>) -> mlua::Resu
         }
         EditorEvent::NoteSaved { note } | EditorEvent::NoteSavePre { note } => {
             t.set("note", note.to_string())?;
+        }
+        EditorEvent::TabOpened { pane, preview, .. } => {
+            t.set("pane", pane.0)?;
+            t.set("preview", *preview)?;
+        }
+        EditorEvent::TabClosed { pane, .. } | EditorEvent::TabActivated { pane, .. } => {
+            t.set("pane", pane.0)?;
+        }
+        EditorEvent::TabMoved { pane, from, to, .. } => {
+            t.set("pane", pane.0)?;
+            t.set("from", from + 1)?;
+            t.set("to", to + 1)?;
         }
         _ => {}
     }
@@ -1582,8 +1801,33 @@ pub const API: &[(&str, &str, &str)] = &[
     ),
     (
         "mnote.open",
-        "(path, { line })",
-        "Opens a note of the vault (`journal/today`, `.md` optional), at `line` (0-based) if given, once the function returns. A note that doesn't exist is reported.",
+        "(path, { line, target })",
+        "Opens a note of the vault (`journal/today`, `.md` optional), at `line` (0-based) if given, once the function returns. `target`: `\"tab\"` (a kept tab in the focused pane, the default), `\"preview\"` (its preview tab), `\"split\"` or `\"vsplit\"` (a new pane below or beside). A note that doesn't exist is reported.",
+    ),
+    (
+        "mnote.pane",
+        "() -> id",
+        "The focused pane's id (stable while it's open).",
+    ),
+    (
+        "mnote.tabs",
+        "(pane?) -> { { note, active, preview, unsaved }, … }",
+        "A pane's tabs in order (the focused pane's without `pane`): each one's note (its path; `untitled` for one with no name), whether it's shown, a preview, or holds text not in a file.",
+    ),
+    (
+        "mnote.tab.open",
+        "(path, { pane, preview })",
+        "Opens a note as a tab of a pane (focusing it), as a preview if `preview`, once the function returns.",
+    ),
+    (
+        "mnote.tab.close",
+        "(pane?, index?, { force })",
+        "Closes tab `index` (from 1; the shown one without it) of a pane, once the function returns. Unsaved untitled text needs `force`.",
+    ),
+    (
+        "mnote.tab.activate",
+        "(pane?, index)",
+        "Shows tab `index` (from 1) of a pane, once the function returns.",
     ),
     (
         "mnote.apply_edits",
@@ -1638,6 +1882,22 @@ pub const EVENTS: &[(&str, &str)] = &[
     ("VaultChanged", "notes changed on disk outside mNote"),
     ("ConfigApplied", "config.toml was applied"),
     ("PaneFocused", "another pane took focus"),
+    (
+        "TabOpened",
+        "a tab opened; `pane` (its id), `note`, `preview`. A pattern matches the tab's note",
+    ),
+    (
+        "TabClosed",
+        "a tab closed (or its pane did); `pane`, `note`",
+    ),
+    (
+        "TabActivated",
+        "a pane shows another of its tabs; `pane`, `note`",
+    ),
+    (
+        "TabMoved",
+        "a tab moved in its row; `pane`, `note`, `from`, `to` (places from 1)",
+    ),
 ];
 
 /// The plugin API reference, as `docs/plugins.md` holds it (written by a
@@ -1780,6 +2040,10 @@ mod tests {
             r#"
             mnote.open("journal/today", { line = 4 })
             mnote.open("ideas.md")
+            mnote.open("ideas", { target = "vsplit" })
+            mnote.tab.open("b", { pane = 3, preview = true })
+            mnote.tab.close(nil, 2, { force = true })
+            mnote.tab.activate(3, 1)
             mnote.feedkeys("gg<C-w>v")
             mnote.cmd(":set so=3")
             mnote.cmd("   ")
@@ -1796,7 +2060,18 @@ mod tests {
         let shown: Vec<String> = requests
             .iter()
             .map(|r| match r {
-                Request::Open { note, line } => format!("open {note} {line:?}"),
+                Request::Open { note, line, target } => {
+                    format!("open {note} {line:?} {target:?}")
+                }
+                Request::TabOpen {
+                    note,
+                    pane,
+                    preview,
+                } => format!("tab open {note} {pane:?} {preview}"),
+                Request::TabClose { pane, index, force } => {
+                    format!("tab close {pane:?} {index} {force}")
+                }
+                Request::TabActivate { pane, index } => format!("tab activate {pane:?} {index}"),
                 Request::Keys(keys) => format!("keys {}", mnote_vim::key_notation(keys)),
                 Request::Ex(line) => format!("ex {line}"),
                 Request::ApplyEdits { edits, label } => format!(
@@ -1813,8 +2088,12 @@ mod tests {
         assert_eq!(
             shown,
             [
-                "open journal/today.md Some(4)",
-                "open ideas.md None",
+                "open journal/today.md Some(4) Tab",
+                "open ideas.md None Tab",
+                "open ideas.md None Vsplit",
+                "tab open b.md Some(3) true",
+                "tab close None 2 true",
+                "tab activate Some(3) 1",
                 "keys gg<C-w>v",
                 "ex set so=3",
                 "apply Rename tag: a.md×2 b.md×1",
@@ -1824,6 +2103,12 @@ mod tests {
             .err()
             .unwrap_or_default();
         assert!(err.contains("isn't a note path"), "{err}");
+        let err = host(r#"mnote.open("a", { target = "window" })"#)
+            .err()
+            .unwrap_or_default();
+        assert!(err.contains("one of"), "{err}");
+        let err = host("mnote.tabs()").err().unwrap_or_default();
+        assert!(err.contains("inside a command or a key"), "{err}");
         // The clipboard needs the window: outside a call it says so.
         let err = host("mnote.clipboard.get()").err().unwrap_or_default();
         assert!(err.contains("inside a command or a key"), "{err}");

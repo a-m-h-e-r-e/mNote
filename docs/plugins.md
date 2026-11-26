@@ -52,7 +52,12 @@ Settings for a plugin go in its table and reach it through `mnote.config("tasks"
 - `mnote.mode() -> mode`: Vim's mode: `NORMAL`, `INSERT`, `VISUAL`…
 - `mnote.decorate(namespace, opts) -> id`: Draws over the note, moving with edits: `{ line, col, end_col, fg, bg }` colours text; `{ line, line_bg }` a line; `{ line, text, color, right }` adds text after it; `{ line, sign, color }` a gutter sign; `{ line, col, ghost, color }` draws text inside the line that isn't part of it (the cursor skips it). `bias = "before"` or `"after"`: which side of text typed exactly at an end the decoration stays on (ghost text: after; the rest: before). Colours are theme token names (`match`, `danger`, `ink_3`).
 - `mnote.undecorate(namespace)`: Removes every decoration in the namespace.
-- `mnote.open(path, { line })`: Opens a note of the vault (`journal/today`, `.md` optional), at `line` (0-based) if given, once the function returns. A note that doesn't exist is reported.
+- `mnote.open(path, { line, target })`: Opens a note of the vault (`journal/today`, `.md` optional), at `line` (0-based) if given, once the function returns. `target`: `"tab"` (a kept tab in the focused pane, the default), `"preview"` (its preview tab), `"split"` or `"vsplit"` (a new pane below or beside). A note that doesn't exist is reported.
+- `mnote.pane() -> id`: The focused pane's id (stable while it's open).
+- `mnote.tabs(pane?) -> { { note, active, preview, unsaved }, … }`: A pane's tabs in order (the focused pane's without `pane`): each one's note (its path; `untitled` for one with no name), whether it's shown, a preview, or holds text not in a file.
+- `mnote.tab.open(path, { pane, preview })`: Opens a note as a tab of a pane (focusing it), as a preview if `preview`, once the function returns.
+- `mnote.tab.close(pane?, index?, { force })`: Closes tab `index` (from 1; the shown one without it) of a pane, once the function returns. Unsaved untitled text needs `force`.
+- `mnote.tab.activate(pane?, index)`: Shows tab `index` (from 1) of a pane, once the function returns.
 - `mnote.apply_edits({ { note, first, last, lines }, … }, { label })`: Replaces lines `first..last` (as `mnote.buf.set_lines` counts them) in several notes as one undo step, once the function returns. Notes that aren't open are opened in the background, edited and saved. `u` in any of them undoes the whole edit in all of them that haven't changed since. Edits to one note mustn't overlap.
 - `mnote.lang.register({ name, extensions, comment, indent, …, queries = { highlights = "…" } })`: Adds a language, or overrides fields of one: the fields of a `language.toml` (see `docs/architecture/code-support.md`), and its queries by kind (`highlights`, `injections`, `indents`, `textobjects`, `folds`, `locals`; `; inherits:` and `; extends` work).
 - `mnote.feedkeys(keys)`: Runs keys in Vim notation (`ggdd`, `<C-w>v`, `<leader>f`) as if typed, through the keymap, mappings and Vim, once the function returns.
@@ -74,6 +79,10 @@ Each handler gets a table with `event` and `note`, and:
 - `VaultChanged`: notes changed on disk outside mNote
 - `ConfigApplied`: config.toml was applied
 - `PaneFocused`: another pane took focus
+- `TabOpened`: a tab opened; `pane` (its id), `note`, `preview`. A pattern matches the tab's note
+- `TabClosed`: a tab closed (or its pane did); `pane`, `note`
+- `TabActivated`: a pane shows another of its tabs; `pane`, `note`
+- `TabMoved`: a tab moved in its row; `pane`, `note`, `from`, `to` (places from 1)
 
 ## Examples
 

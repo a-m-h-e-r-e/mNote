@@ -53,6 +53,23 @@ pub enum EditorEvent {
     ConfigApplied,
     /// Another pane took focus.
     PaneFocused { pane: PaneId },
+    /// A tab opened in `pane` on `doc` (a preview one, or kept).
+    TabOpened {
+        pane: PaneId,
+        doc: DocKey,
+        preview: bool,
+    },
+    /// `pane`'s tab on `doc` closed (or the pane went with it).
+    TabClosed { pane: PaneId, doc: DocKey },
+    /// `pane` shows its tab on `doc`.
+    TabActivated { pane: PaneId, doc: DocKey },
+    /// `pane`'s tab on `doc` moved from place `from` to `to` (from 0).
+    TabMoved {
+        pane: PaneId,
+        doc: DocKey,
+        from: usize,
+        to: usize,
+    },
 }
 
 /// An event's kind, for subscribing.
@@ -68,6 +85,10 @@ pub enum EventKind {
     VaultChanged,
     ConfigApplied,
     PaneFocused,
+    TabOpened,
+    TabClosed,
+    TabActivated,
+    TabMoved,
 }
 
 impl EditorEvent {
@@ -83,6 +104,21 @@ impl EditorEvent {
             EditorEvent::VaultChanged => EventKind::VaultChanged,
             EditorEvent::ConfigApplied => EventKind::ConfigApplied,
             EditorEvent::PaneFocused { .. } => EventKind::PaneFocused,
+            EditorEvent::TabOpened { .. } => EventKind::TabOpened,
+            EditorEvent::TabClosed { .. } => EventKind::TabClosed,
+            EditorEvent::TabActivated { .. } => EventKind::TabActivated,
+            EditorEvent::TabMoved { .. } => EventKind::TabMoved,
+        }
+    }
+
+    /// The document a tab event is about.
+    pub fn tab_doc(&self) -> Option<&DocKey> {
+        match self {
+            EditorEvent::TabOpened { doc, .. }
+            | EditorEvent::TabClosed { doc, .. }
+            | EditorEvent::TabActivated { doc, .. }
+            | EditorEvent::TabMoved { doc, .. } => Some(doc),
+            _ => None,
         }
     }
 }
@@ -98,6 +134,83 @@ pub struct Snapshot {
     pub cursor: (usize, usize),
     /// Who made the latest edit.
     pub origin: Origin,
+    /// Every pane's tabs, in layout order.
+    pub tabs: Vec<PaneTabs>,
+}
+
+/// One pane's tabs, for the diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneTabs {
+    pub pane: PaneId,
+    pub docs: Vec<DocKey>,
+    pub previews: Vec<bool>,
+    pub active: usize,
+}
+
+/// The tab events between two lists of panes' tabs.
+fn tab_diff(old: &[PaneTabs], new: &[PaneTabs], events: &mut Vec<EditorEvent>) {
+    let none = PaneTabs {
+        pane: PaneId(u32::MAX),
+        docs: Vec::new(),
+        previews: Vec::new(),
+        active: usize::MAX,
+    };
+    for now in new {
+        let was = old.iter().find(|p| p.pane == now.pane).unwrap_or(&none);
+        for (i, doc) in now.docs.iter().enumerate() {
+            if !was.docs.contains(doc) {
+                events.push(EditorEvent::TabOpened {
+                    pane: now.pane,
+                    doc: doc.clone(),
+                    preview: now.previews.get(i).copied().unwrap_or(false),
+                });
+            }
+        }
+        for doc in &was.docs {
+            if !now.docs.contains(doc) {
+                events.push(EditorEvent::TabClosed {
+                    pane: now.pane,
+                    doc: doc.clone(),
+                });
+            }
+        }
+        // The tabs both have, in each order: the one that moved furthest.
+        let kept_was: Vec<&DocKey> = was.docs.iter().filter(|d| now.docs.contains(d)).collect();
+        let kept_now: Vec<&DocKey> = now.docs.iter().filter(|d| was.docs.contains(d)).collect();
+        if kept_was != kept_now
+            && let Some((doc, _, _)) = kept_now
+                .iter()
+                .enumerate()
+                .filter_map(|(to, d)| Some((*d, kept_was.iter().position(|w| w == d)?, to)))
+                .max_by_key(|(_, from, to)| from.abs_diff(*to))
+        {
+            // Its places in the whole rows, before and after.
+            let place = |list: &[DocKey]| list.iter().position(|d| d == doc).unwrap_or(0);
+            events.push(EditorEvent::TabMoved {
+                pane: now.pane,
+                doc: doc.clone(),
+                from: place(&was.docs),
+                to: place(&now.docs),
+            });
+        }
+        let active = now.docs.get(now.active);
+        if active.is_some() && active != was.docs.get(was.active) {
+            events.push(EditorEvent::TabActivated {
+                pane: now.pane,
+                doc: active.cloned().unwrap_or(DocKey::Scratch),
+            });
+        }
+    }
+    for was in old {
+        if !new.iter().any(|p| p.pane == was.pane) {
+            for doc in &was.docs {
+                events.push(EditorEvent::TabClosed {
+                    pane: was.pane,
+                    doc: doc.clone(),
+                });
+            }
+        }
+    }
 }
 
 /// The events between two snapshots (`None`: the first one).
@@ -133,6 +246,7 @@ pub fn diff(old: Option<&Snapshot>, new: &Snapshot) -> Vec<EditorEvent> {
             events.push(EditorEvent::InsertLeave);
         }
     }
+    tab_diff(&old.tabs, &new.tabs, &mut events);
     if new.cursor != old.cursor || new.pane != old.pane || new.doc != old.doc {
         events.push(EditorEvent::CursorMoved {
             line: new.cursor.0,
@@ -237,6 +351,18 @@ impl Editor {
             mode: self.vim.mode(),
             cursor: (line, cursor - text.line_to_char(line)),
             origin: self.buffer.last_origin().cloned().unwrap_or_default(),
+            tabs: self
+                .layout
+                .panes()
+                .into_iter()
+                .filter_map(|id| self.panes.iter().find(|p| p.id == id))
+                .map(|p| PaneTabs {
+                    pane: p.id,
+                    docs: p.tabs.iter().map(|t| t.doc.clone()).collect(),
+                    previews: p.tabs.iter().map(|t| t.preview).collect(),
+                    active: p.active,
+                })
+                .collect(),
         }
     }
 
@@ -301,7 +427,77 @@ mod tests {
             mode,
             cursor,
             origin: Origin::User,
+            tabs: Vec::new(),
         }
+    }
+
+    fn tabs(pane: u32, docs: &[&str], active: usize) -> PaneTabs {
+        PaneTabs {
+            pane: PaneId(pane),
+            docs: docs
+                .iter()
+                .map(|d| DocKey::Note(NotePath::new(*d).expect("a note path")))
+                .collect(),
+            previews: vec![false; docs.len()],
+            active,
+        }
+    }
+
+    fn note(path: &str) -> DocKey {
+        DocKey::Note(NotePath::new(path).expect("a note path"))
+    }
+
+    #[test]
+    fn tabs_opening_closing_showing_and_moving_are_events() {
+        let mut events = Vec::new();
+        tab_diff(
+            &[tabs(0, &["a.md"], 0)],
+            &[tabs(0, &["a.md", "b.md"], 1)],
+            &mut events,
+        );
+        assert_eq!(
+            events,
+            [
+                EditorEvent::TabOpened {
+                    pane: PaneId(0),
+                    doc: note("b.md"),
+                    preview: false
+                },
+                EditorEvent::TabActivated {
+                    pane: PaneId(0),
+                    doc: note("b.md")
+                },
+            ]
+        );
+        events.clear();
+        tab_diff(
+            &[tabs(0, &["a.md", "b.md", "c.md"], 0)],
+            &[tabs(0, &["c.md", "a.md", "b.md"], 1)],
+            &mut events,
+        );
+        assert_eq!(
+            events,
+            [EditorEvent::TabMoved {
+                pane: PaneId(0),
+                doc: note("c.md"),
+                from: 2,
+                to: 0
+            }]
+        );
+        events.clear();
+        // A pane gone: its tabs closed.
+        tab_diff(
+            &[tabs(0, &["a.md"], 0), tabs(1, &["b.md"], 0)],
+            &[tabs(0, &["a.md"], 0)],
+            &mut events,
+        );
+        assert_eq!(
+            events,
+            [EditorEvent::TabClosed {
+                pane: PaneId(1),
+                doc: note("b.md")
+            }]
+        );
     }
 
     fn kinds(events: &[EditorEvent]) -> Vec<EventKind> {
