@@ -1,7 +1,11 @@
 #!/bin/sh
-# Tab pages end to end (AMI-218): plays key scripts into a release build in
+# Tabs on every pane end to end (ADR-0014): plays key scripts into a release
+# build in
 # a throwaway HOME (your own notes and config are never touched) and checks
-# the tabs, panes and text it reports, and the files it writes.
+# the panes, their tabs and the text it reports, and the files it writes.
+#
+# A state line reads: pane 1/2 | the focused pane's tabs (> the active one) |
+# [each other pane's tabs] | parked … | closed … | overlay … | reply … | …
 #
 #   tools/check-tabs.sh
 #
@@ -44,63 +48,67 @@ expect() {
 cat > "$SANDBOX/share.keys" <<'KEYS'
 :tabnew b<CR>
 state
-:tabnew a<CR>
+<C-w>v
 ggIX<Esc>
+:tabnew a<CR>
 state
-:tabnext 1<CR>
+<C-w>h
 state
 u
-:tabnext 3<CR>
+<C-w>l
+gT
 state
-:tabclose<CR>
+:q<CR>
 state
 :tabreopen<CR>
 state
 :q<CR>
+:q<CR>
 state
-:tabclose 2<CR>
-state
+:tabclose<CR>
 :tabclose<CR>
 state
 KEYS
 run share
-# A new tab after this one, on the note named.
-expect share 1 'tab 2/2 | >b.md | [>a.md]'
-# The same note in two tabs is one buffer...
-expect share 2 'tab 3/3 | >a.md'
-expect share 2 'text Xalpha'
-expect share 3 'tab 1/3 | >a.md'
-expect share 3 'text Xalpha'
+# A new tab after the active one, in this pane.
+expect share 1 'pane 1/1 | a.md >b.md |'
+# A split opens on the note; its own tabs.
+expect share 2 'pane 2/2 | b.md >a.md | [a.md >b.md]'
+# The same note in two panes is one buffer...
+expect share 3 'pane 1/2 | a.md >b.md |'
+expect share 3 'text Xbeta'
 # ...with one undo history.
-expect share 4 'tab 3/3'
-expect share 4 'text alpha\n'
-# Closing shows the last-used tab (tab 1, not tab 2 to the left).
-expect share 5 'tab 1/2 | >a.md'
+expect share 4 'pane 2/2 | >b.md a.md'
+expect share 4 'text beta\n'
+# :q closes the active tab; the pane's last used shows.
+expect share 5 'pane 2/2 | >a.md |'
 expect share 5 'closed 1'
-expect share 6 'tab 3/3 | >a.md'
-# :q on a tab's last pane closes the tab.
-expect share 7 'tab 1/2'
-expect share 8 'tab 1/1'
-expect share 9 'E784: Cannot close last tab page'
+expect share 6 'pane 2/2 | >b.md a.md'
+# The last tab of a pane closes the pane.
+expect share 7 'pane 1/1 | a.md >b.md |'
+# :tabclose, and the last tab of the last pane stays.
+expect share 8 'pane 1/1 | >a.md |'
+expect share 8 'E784: Cannot close last tab page'
 
-cat > "$SANDBOX/panes.keys" <<'KEYS'
-<C-w>v
-:e b<CR>
-:tabnew<CR>
+cat > "$SANDBOX/cursor.keys" <<'KEYS'
+3l
+:tabnew b<CR>
+l
 state
-:tabprevious<CR>
+gT
 state
-<C-w>w
-state
-:tabonly!<CR>
+<C-w>s
+:tabnew b<CR>
 state
 KEYS
-run panes
-# A tab keeps its own panes; the new one has one, on an untitled note.
-expect panes 1 'tab 2/2 | >untitled | [a.md >b.md]'
-expect panes 2 'tab 1/2 | a.md >b.md |'
-expect panes 3 '| >a.md b.md |'
-expect panes 4 'tab 1/1'
+run cursor
+# Each tab keeps its own cursor.
+expect cursor 1 'a.md >b.md'
+expect cursor 1 'cursor 1'
+expect cursor 2 '>a.md b.md'
+expect cursor 2 'cursor 3'
+# The lower pane of an above/below split has its own tabs.
+expect cursor 3 'pane 2/2 | a.md >b.md | [>a.md b.md]'
 
 cat > "$SANDBOX/open.keys" <<'KEYS'
 :tabnew<CR>
@@ -134,14 +142,14 @@ run untitled
 # Text that isn't in a file needs ! to close.
 expect untitled 1 'E37: No write since last change'
 # :w opens the save prompt, named from the heading; ⏎ saves it.
-expect untitled 2 '>standup notes.md'
+expect untitled 2 'a.md >standup notes.md'
 expect untitled 2 '"standup notes.md" written'
-# A path with another extension saves a code file, making its folder.
+# Another extension saves a code file, making its folder.
 expect untitled 3 '>main.rs'
-# An existing name isn't replaced without !, nor a note open elsewhere.
+# An existing name isn't replaced without !.
 expect untitled 4 'E13: File exists'
-# :q! drops the untitled text, and the last-used tab shows.
-expect untitled 5 'tab 3/3 | >main.rs'
+# :q! drops the untitled text; the pane's last-used tab shows.
+expect untitled 5 'pane 1/1 | a.md standup notes.md >main.rs |'
 for file in "standup notes.md" "src/main.rs"; do
     if [ ! -f "$VAULT/$file" ]; then
         echo "FAIL untitled: $file wasn't written"
@@ -170,9 +178,11 @@ state
 key <C-PageUp>
 state
 :e b<CR>
-<C-w>v
+state
 <C-w>T
 state
+<C-w>h
+:tabnew b<CR>
 :tabmove 0<CR>
 state
 :tabmove<CR>
@@ -191,44 +201,47 @@ key <D-w>
 state
 discard<CR>
 state
-key <D-S-w>
-key <D-S-w>
-key <D-S-w>
+<C-w>l
+key <D-w>
+state
+:tabonly!<CR>
 key <D-w>
 state
 KEYS
 run keys
-# ⌘T: a new tab, on an untitled note.
-expect keys 1 'tab 2/2 | >untitled | [>a.md]'
+# ⌘T: an untitled tab after the active one.
+expect keys 1 'pane 1/1 | a.md >untitled |'
 # gT, gt, {N}gt, g⇥ (the last used).
-expect keys 2 'tab 1/2 | >a.md'
-expect keys 3 'tab 2/2'
-expect keys 4 'tab 2/2'
-expect keys 5 'tab 1/2'
+expect keys 2 '| >a.md untitled |'
+expect keys 3 '| a.md >untitled |'
+expect keys 4 '| a.md >untitled |'
+expect keys 5 '| >a.md untitled |'
 # ⌘⇧] then ⌃⇥ wrap round; ⌃PageUp goes back.
-expect keys 6 'tab 1/2'
-expect keys 7 'tab 2/2'
-# ⌃w T: the focused pane leaves for a tab of its own, after this one.
-expect keys 8 'tab 3/3 | >b.md | [>a.md] [>b.md]'
+expect keys 6 '| >a.md untitled |'
+expect keys 7 '| a.md >untitled |'
+# A note opened over a blank untitled tab takes its place.
+expect keys 8 'pane 1/1 | a.md >b.md |'
+# ⌃w T: the active tab leaves for a new pane on the right.
+expect keys 9 'pane 2/2 | >b.md | [>a.md]'
 # :tabmove 0 makes it first, :tabmove last.
-expect keys 9 'tab 1/3 | >b.md | [>a.md] [>b.md]'
-expect keys 10 'tab 3/3 | >b.md | [>a.md] [>b.md]'
+expect keys 10 'pane 1/2 | >b.md a.md |'
+expect keys 11 'pane 1/2 | a.md >b.md |'
 # ⌘1 and ⌘9.
-expect keys 11 'tab 1/3 | >a.md'
-expect keys 12 'tab 3/3 | >b.md'
-# ⌘W closes the tab (its last pane); ⌘⇧T reopens it.
-expect keys 13 'tab 1/2'
-expect keys 13 'closed 1'
-expect keys 14 'tab 3/3 | >b.md'
-# Untitled text asks before ⌘W closes it.
-expect keys 15 'tab 4/4 | >untitled 2'
-expect keys 15 'overlay open'
-# Discard closes it, and the last-used tab shows.
-expect keys 16 'tab 3/3 | >b.md'
-expect keys 16 'overlay none'
-# ⌘⇧W closes tabs; ⌘W on the last pane of the last tab never quits.
-expect keys 17 'tab 1/1'
-expect keys 17 'reply ⌘Q quits mNote'
+expect keys 12 '| >a.md b.md |'
+expect keys 13 '| a.md >b.md |'
+# ⌘W closes the tab; ⌘⇧T reopens it where it was.
+expect keys 14 'pane 1/2 | >a.md |'
+expect keys 14 'closed 1'
+expect keys 15 'pane 1/2 | a.md >b.md |'
+# Untitled text asks before ⌘W closes it; Discard closes it.
+expect keys 16 '>untitled 2'
+expect keys 16 'overlay open'
+expect keys 17 'pane 1/2 | a.md >b.md |'
+expect keys 17 'overlay none'
+# ⌘W on a pane's last tab closes the pane; never mNote.
+expect keys 18 'pane 1/1 | a.md >b.md |'
+expect keys 19 'pane 1/1 | >b.md |'
+expect keys 19 'reply ⌘Q quits mNote'
 
 if [ "$failed" = 0 ]; then
     echo "tabs: all checks passed"

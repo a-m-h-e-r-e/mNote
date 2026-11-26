@@ -4,7 +4,8 @@
 //! The editor's own fields always hold the focused pane's note and view.
 //! Each other open note waits as a [`Doc`], each other pane as a
 //! [`PaneLocal`]; focusing a pane swaps them in. Two panes on one note share
-//! the one [`Doc`] (one buffer, one undo history), like Vim's windows.
+//! the one [`Doc`] (one buffer, one undo history), like Vim's windows. Each
+//! pane holds tabs, one shown at a time (see [`super::tabs`]).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -122,12 +123,19 @@ pub(super) struct PaneLocal {
     pub scroll_x: Rc<std::cell::Cell<gpui::Pixels>>,
 }
 
-/// A pane: its note, and its state while it isn't focused.
+/// A pane: its tabs, the one shown, and its state while it isn't focused.
 pub(super) struct PaneSlot {
     pub id: PaneId,
+    /// The active tab's note (`tabs[active].doc`).
     pub note: DocKey,
-    /// `None` for the focused pane, whose state is the editor's.
+    /// The active tab's state while the pane isn't focused; `None` for the
+    /// focused pane, whose state is the editor's.
     pub local: Option<PaneLocal>,
+    /// Its open notes, in order (ADR-0014).
+    pub tabs: Vec<super::tabs::Tab>,
+    pub active: usize,
+    /// Its notes, most recently shown first (closing shows the last used).
+    pub used: Vec<DocKey>,
 }
 
 /// A pane's name in the [`Layout`].
@@ -339,10 +347,12 @@ impl Editor {
 
     /// Whether a pane other than the focused one shows `note`.
     pub(super) fn shown_elsewhere(&self, key: &DocKey) -> bool {
-        self.panes
-            .iter()
-            .any(|p| p.id != self.focused && p.note == *key)
-            || self.shown_in_other_tabs(key)
+        self.panes.iter().any(|p| {
+            p.tabs
+                .iter()
+                .enumerate()
+                .any(|(i, t)| t.doc == *key && !(p.id == self.focused && i == p.active))
+        })
     }
 
     /// A new doc for `buffer`, redrawing when its background parse lands.
@@ -352,14 +362,6 @@ impl Editor {
             let _ = tx.try_send(());
         });
         Doc::new(buffer, source)
-    }
-
-    /// Records the focused pane's note (after it opened another).
-    pub(super) fn set_pane_note(&mut self) {
-        let note = self.source.doc_key();
-        if let Some(i) = self.slot(self.focused) {
-            self.panes[i].note = note;
-        }
     }
 
     /// The focused pane's note goes away (it opens another): keep its doc
@@ -419,16 +421,16 @@ impl Editor {
         self.next_pane += 1;
         let lines = ListState::new(self.buffer.text().len_lines(), ListAlignment::Top, px(400.));
         lines.scroll_to(self.lines.logical_scroll_top());
-        self.panes.push(PaneSlot {
+        self.panes.push(PaneSlot::new(
             id,
-            note: self.source.doc_key(),
-            local: Some(PaneLocal {
+            self.source.doc_key(),
+            Some(PaneLocal {
                 lines,
                 view: self.view,
                 cursor: self.vim.cursor(),
                 scroll_x: Rc::new(std::cell::Cell::new(self.scroll_x.get())),
             }),
-        });
+        ));
         self.layout.split(self.focused, id, axis);
         self.focus_pane(id, cx);
     }
@@ -446,18 +448,10 @@ impl Editor {
         self.focus_pane(next, cx);
         self.layout.remove(closing);
         if let Some(i) = self.slot(closing) {
-            let slot = self.panes.remove(i);
-            // Its note's doc goes if no pane shows it any more.
-            let still_shown = slot.note == self.source.doc_key()
-                || self.panes.iter().any(|p| p.note == slot.note)
-                || self.shown_in_other_tabs(&slot.note);
-            if !still_shown
-                && !self.edit_groups.contains(&slot.note)
-                && let Some(d) = self.parked_index(&slot.note)
-            {
-                self.parked.swap_remove(d);
-            }
+            self.panes.remove(i);
         }
+        // Its tabs' docs go if no other tab shows them.
+        self.drop_unshown_docs();
         cx.notify();
         true
     }
@@ -467,18 +461,9 @@ impl Editor {
         let focused = self.focused;
         self.panes.retain(|p| p.id == focused);
         self.layout = Layout::Pane(focused);
-        // Parked docs were saved when they were parked; those in an edit
-        // group stay for its undo.
-        let keep: Vec<bool> = self
-            .parked
-            .iter()
-            .map(|d| {
-                let key = d.source.doc_key();
-                self.edit_groups.contains(&key) || self.shown_in_other_tabs(&key)
-            })
-            .collect();
-        let mut keep = keep.into_iter();
-        self.parked.retain(|_| keep.next().unwrap_or(true));
+        // Parked docs were saved when they were parked; those no other tab
+        // shows go (an edit group's stay, for its undo).
+        self.drop_unshown_docs();
         cx.notify();
     }
 
@@ -523,6 +508,14 @@ impl Editor {
             {
                 local.lines.reset(lines);
                 local.cursor = 0;
+            }
+            for tab in &mut slot.tabs {
+                if tab.doc == *key
+                    && let Some(local) = &mut tab.local
+                {
+                    local.lines.reset(lines);
+                    local.cursor = 0;
+                }
             }
         }
     }
@@ -622,20 +615,26 @@ impl Editor {
             .iter()
             .map(|d| (d.source.doc_key(), d.buffer.text().len_lines()))
             .collect();
-        for slot in &mut self.panes {
-            let Some(local) = &mut slot.local else {
-                continue;
-            };
-            let lines = if slot.note == live {
+        let count = |key: &DocKey| {
+            if *key == live {
                 Some(live_lines)
             } else {
-                counts
-                    .iter()
-                    .find(|(k, _)| *k == slot.note)
-                    .map(|(_, n)| *n)
-            };
-            if let Some(lines) = lines {
+                counts.iter().find(|(k, _)| k == key).map(|(_, n)| *n)
+            }
+        };
+        for slot in &mut self.panes {
+            if let Some(local) = &mut slot.local
+                && let Some(lines) = count(&slot.note)
+            {
                 local.lines.reset(lines);
+            }
+            // Hidden tabs too: their lines are measured in the new fonts.
+            for tab in &mut slot.tabs {
+                if let Some(local) = &mut tab.local
+                    && let Some(lines) = count(&tab.doc)
+                {
+                    local.lines.reset(lines);
+                }
             }
         }
     }

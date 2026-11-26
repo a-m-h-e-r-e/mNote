@@ -174,9 +174,9 @@ impl Editor {
         let unsaved = matches!(self.source, Source::Scratch | Source::Untitled(_))
             && self.buffer.is_dirty()
             && self.buffer.len_chars() > 0;
-        // With split panes, `:q` closes the focused one (notes autosave);
-        // the last pane of a tab closes the tab.
-        if self.panes.len() > 1 || self.last_pane_of_a_tab() {
+        // With tabs or panes left, `:q` closes the active tab, and the pane
+        // with its last tab (notes autosave).
+        if self.closes_not_quits() {
             if write && let Err(err) = self.write(cx) {
                 self.reply = Some((err.into(), true));
                 return;
@@ -188,12 +188,7 @@ impl Editor {
                 ));
                 return;
             }
-            self.save_now(cx);
-            if self.panes.len() > 1 {
-                self.close_pane(cx);
-            } else {
-                self.close_tab(self.tabs.current(), cx);
-            }
+            self.close_active_tab(cx);
             return;
         }
         let result = match self.source {
@@ -211,7 +206,7 @@ impl Editor {
         }
     }
 
-    /// `:qa`, `:wqa`, `:xa`: closes every tab and quits. Unsaved scratch or
+    /// `:qa`, `:wqa`, `:xa`: closes every pane and quits. Unsaved scratch or
     /// untitled text anywhere needs `!`.
     pub(super) fn quit_all(&mut self, write: bool, force: bool, cx: &mut Context<Self>) {
         self.save_now(cx);

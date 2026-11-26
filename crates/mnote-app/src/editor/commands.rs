@@ -356,10 +356,10 @@ pub fn builtin() -> Vec<Command> {
         .shown_as("tabmove")
         .ex("tabmove", 4, ArgKind::Any),
         Command::new(
-            "pane-to-tab",
-            "Move pane to a new tab",
-            "The focused pane leaves this tab for a new one of its own.",
-            act(|e, _, cx| e.pane_to_tab(cx)),
+            "tab-to-pane",
+            "Move tab to a new pane",
+            "The active tab leaves this pane for a new one on the right.",
+            act(|e, _, cx| e.tab_to_pane(cx)),
         )
         .bind("<C-w>T"),
         Command::new(

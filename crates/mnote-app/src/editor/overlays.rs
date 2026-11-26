@@ -345,7 +345,7 @@ impl Editor {
                             follow(note);
                         }
                     }
-                    self.follow_in_other_tabs(&follow);
+                    self.follow_in_tabs(&follow);
                 }
                 PickerEffect::Relinked(done) => {
                     // The watcher skips mNote's own writes: index them here.

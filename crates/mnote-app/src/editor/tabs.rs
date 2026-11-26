@@ -1,207 +1,143 @@
-//! Tab pages (ADR-0013): each tab is a layout of panes; notes are shared by
-//! every tab, as they are by every pane.
+//! Tabs on every pane (ADR-0014): each pane holds several open notes, shows
+//! one, and remembers the cursor, scroll and view of each. Notes are shared
+//! by every tab and pane, as they were by panes: one note in two places is
+//! one buffer with one undo history.
 //!
-//! The editor's own fields hold the current tab's `layout`, `panes` and
-//! `focused`, as they hold the focused pane's note. Every other tab waits as
-//! a [`TabPage`], with each of its panes' state in its [`PaneSlot`]s, and
-//! switching swaps them. A [`Doc`] stays open while a pane in any tab shows
-//! it. [`TabSet`] is the order of the tabs and which were used last, kept
-//! apart as plain data.
+//! The editor's fields hold the focused pane's active tab. A pane's other
+//! tabs wait as [`Tab`]s with their [`PaneLocal`]; switching tabs parks the
+//! shown note and swaps the chosen one in, as focusing a pane does. Tab
+//! commands (`:tabnew`, `gt`, `⌘W` …) act on the focused pane's tabs.
 
 use gpui::{Context, ListAlignment, ListOffset, ListState, px};
 use mnote_core::{Buffer, NotePath};
 use mnote_vim::text::{clamp_normal, line_of};
 
 use super::Editor;
-use super::panes::{Doc, DocKey, Layout, PaneId, PaneLocal, PaneSlot, Source};
-
-/// A tab's name for as long as it's open; indexes change as tabs move.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TabId(pub u32);
+use super::panes::{Axis, Doc, DocKey, PaneId, PaneLocal, PaneSlot, Source};
 
 /// Closed tabs kept for `:tabreopen`.
 const CLOSED_KEPT: usize = 10;
 
-/// The tabs in order, which is current, and the order they were used in.
-#[derive(Debug, Clone)]
-pub struct TabSet {
-    order: Vec<TabId>,
-    current: TabId,
-    /// Most recently used first; the current tab leads.
-    used: Vec<TabId>,
-    next: u32,
+/// A note in a pane. The active tab's state is the pane's (the editor's,
+/// when it's the focused pane); another tab keeps its own here.
+pub(super) struct Tab {
+    pub doc: DocKey,
+    /// Its state while it isn't the active tab.
+    pub local: Option<PaneLocal>,
+    /// The note's revision when it was last shown: a tab on a note edited
+    /// meanwhile measures its lines again.
+    pub seen: u64,
 }
 
-impl Default for TabSet {
-    fn default() -> Self {
-        TabSet {
-            order: vec![TabId(0)],
-            current: TabId(0),
-            used: vec![TabId(0)],
-            next: 1,
+impl Tab {
+    pub(super) fn new(doc: DocKey) -> Self {
+        Tab {
+            doc,
+            local: None,
+            seen: 0,
         }
-    }
-}
-
-impl TabSet {
-    pub fn len(&self) -> usize {
-        self.order.len()
-    }
-
-    pub fn current(&self) -> TabId {
-        self.current
-    }
-
-    /// The tabs in order.
-    pub fn order(&self) -> &[TabId] {
-        &self.order
-    }
-
-    /// Where `id` is, from 0.
-    pub fn index_of(&self, id: TabId) -> Option<usize> {
-        self.order.iter().position(|&t| t == id)
-    }
-
-    pub fn current_index(&self) -> usize {
-        self.index_of(self.current).unwrap_or(0)
-    }
-
-    /// A new tab at `index` (clamped), not yet current.
-    pub fn add_at(&mut self, index: usize) -> TabId {
-        let id = TabId(self.next);
-        self.next += 1;
-        self.order.insert(index.min(self.order.len()), id);
-        self.used.push(id);
-        id
-    }
-
-    /// A new tab just after the current one, not yet current.
-    pub fn add_after_current(&mut self) -> TabId {
-        self.add_at(self.current_index() + 1)
-    }
-
-    /// Makes `id` current.
-    pub fn focus(&mut self, id: TabId) {
-        if self.index_of(id).is_none() {
-            return;
-        }
-        self.current = id;
-        self.used.retain(|&t| t != id);
-        self.used.insert(0, id);
-    }
-
-    /// The tab used before the current one (`:tabnext #`).
-    pub fn previous(&self) -> Option<TabId> {
-        self.used.get(1).copied()
-    }
-
-    /// Tab `n`, counting from 1.
-    pub fn nth(&self, n: usize) -> Option<TabId> {
-        n.checked_sub(1).and_then(|i| self.order.get(i)).copied()
-    }
-
-    /// The tab `delta` places from the current one, wrapping round.
-    pub fn step(&self, delta: isize) -> TabId {
-        let len = self.order.len() as isize;
-        let at = (self.current_index() as isize + delta).rem_euclid(len.max(1));
-        self.order[at as usize]
-    }
-
-    /// Moves the current tab to `index` (clamped).
-    pub fn move_current(&mut self, index: usize) {
-        let at = self.current_index();
-        let id = self.order.remove(at);
-        self.order.insert(index.min(self.order.len()), id);
-    }
-
-    /// Where `:tabmove {arg}` puts the current tab: no arg is last, `0`
-    /// first, `N` after tab N, `+N` / `-N` that many places along.
-    pub fn move_target(&self, arg: Option<&str>) -> Option<usize> {
-        let at = self.current_index();
-        let last = self.order.len() - 1;
-        let arg = arg.map(str::trim).filter(|a| !a.is_empty());
-        let Some(arg) = arg else {
-            return Some(last);
-        };
-        if let Some(n) = arg.strip_prefix('+') {
-            let n = if n.is_empty() {
-                1
-            } else {
-                n.parse::<usize>().ok()?
-            };
-            return Some((at + n).min(last));
-        }
-        if let Some(n) = arg.strip_prefix('-') {
-            let n = if n.is_empty() {
-                1
-            } else {
-                n.parse::<usize>().ok()?
-            };
-            return Some(at.saturating_sub(n));
-        }
-        let n = arg.parse::<usize>().ok()?;
-        if n == 0 {
-            return Some(0);
-        }
-        // After tab N as numbered now: one place less once this tab is
-        // out of the way, if it was before N.
-        let n = n.min(self.order.len());
-        Some(if at < n { n - 1 } else { n })
-    }
-
-    /// Takes `id` out. The last tab can't go (`None`). When it was the
-    /// current one, the last used of the others becomes current.
-    pub fn remove(&mut self, id: TabId) -> Option<TabId> {
-        if self.order.len() < 2 {
-            return None;
-        }
-        let at = self.index_of(id)?;
-        self.order.remove(at);
-        self.used.retain(|&t| t != id);
-        if self.current == id {
-            let next = self.used.first().copied().unwrap_or(self.order[0]);
-            self.focus(next);
-        }
-        Some(self.current)
     }
 }
 
-/// A tab that isn't current: its layout and every pane's own state.
-pub(super) struct TabPage {
-    pub id: TabId,
-    pub layout: Layout,
-    /// Every pane, each with its [`PaneLocal`].
-    pub panes: Vec<PaneSlot>,
-    pub focused: PaneId,
-    /// Each note's revision when the tab was last shown: panes on a note
-    /// edited since then measure their lines again.
-    pub seen: Vec<(DocKey, u64)>,
-}
-
-/// A closed tab, for `:tabreopen`: where it was, and the tab itself.
+/// A closed tab, for `:tabreopen`: its pane, its place, and its state.
 pub(super) struct ClosedTab {
+    pub pane: PaneId,
     pub index: usize,
-    pub page: TabPage,
+    pub tab: Tab,
+}
+
+/// Where `:tabmove {arg}` puts tab `at` of `len`: no arg is last, `0`
+/// first, `N` after tab N, `+N` / `-N` that many places along.
+pub(super) fn move_target(at: usize, len: usize, arg: Option<&str>) -> Option<usize> {
+    let last = len.checked_sub(1)?;
+    let arg = arg.map(str::trim).filter(|a| !a.is_empty());
+    let Some(arg) = arg else {
+        return Some(last);
+    };
+    let steps = |n: &str| {
+        if n.is_empty() {
+            Some(1)
+        } else {
+            n.parse::<usize>().ok()
+        }
+    };
+    if let Some(n) = arg.strip_prefix('+') {
+        return Some((at + steps(n)?).min(last));
+    }
+    if let Some(n) = arg.strip_prefix('-') {
+        return Some(at.saturating_sub(steps(n)?));
+    }
+    let n = arg.parse::<usize>().ok()?;
+    if n == 0 {
+        return Some(0);
+    }
+    // After tab N as numbered now: one place less once this tab is out of
+    // the way, if it was before N.
+    let n = n.min(len);
+    Some(if at < n { n - 1 } else { n })
+}
+
+/// The tab `delta` places from `at` among `len`, wrapping round.
+fn step(at: usize, len: usize, delta: isize) -> usize {
+    (at as isize + delta).rem_euclid(len.max(1) as isize) as usize
+}
+
+impl PaneSlot {
+    /// A pane with one tab, on `note`.
+    pub(super) fn new(id: PaneId, note: DocKey, local: Option<PaneLocal>) -> Self {
+        PaneSlot {
+            id,
+            tabs: vec![Tab::new(note.clone())],
+            active: 0,
+            used: vec![note.clone()],
+            note,
+            local,
+        }
+    }
+
+    /// Marks tab `i` as just used.
+    fn touch(&mut self, i: usize) {
+        let Some(key) = self.tabs.get(i).map(|t| t.doc.clone()) else {
+            return;
+        };
+        self.used.retain(|k| *k != key);
+        self.used.insert(0, key);
+    }
+
+    /// The tab used before the active one.
+    fn previous(&self) -> Option<usize> {
+        let key = self.used.get(1)?;
+        self.tabs.iter().position(|t| t.doc == *key)
+    }
+
+    /// The tab to show when tab `i` (the active one) goes: the last used
+    /// other one, else a neighbour.
+    fn after_closing(&self, i: usize) -> usize {
+        self.used
+            .iter()
+            .filter_map(|k| self.tabs.iter().position(|t| t.doc == *k))
+            .find(|&p| p != i)
+            .unwrap_or(if i > 0 { i - 1 } else { 1 })
+    }
 }
 
 impl Editor {
-    /// Whether any pane of a tab other than the current one shows `key`.
-    pub(super) fn shown_in_other_tabs(&self, key: &DocKey) -> bool {
-        self.tab_pages
-            .iter()
-            .any(|t| t.panes.iter().any(|p| p.note == *key))
+    fn focused_slot(&self) -> Option<usize> {
+        self.panes.iter().position(|p| p.id == self.focused)
     }
 
-    /// Whether any pane at all shows `key` (the focused pane's included).
+    /// Whether any tab of any pane shows `key`.
     fn shown_anywhere(&self, key: &DocKey) -> bool {
         self.source.doc_key() == *key
-            || self.panes.iter().any(|p| p.note == *key)
-            || self.shown_in_other_tabs(key)
+            || self
+                .panes
+                .iter()
+                .any(|p| p.tabs.iter().any(|t| t.doc == *key))
     }
 
-    /// Closes the parked docs no pane shows any more (an edit group's
-    /// stay, for its undo). An untitled note's draft goes with it.
-    fn drop_unshown_docs(&mut self) {
+    /// Closes the parked docs no tab shows any more (an edit group's stay,
+    /// for its undo). An untitled note's draft goes with it.
+    pub(super) fn drop_unshown_docs(&mut self) {
         let keep: Vec<bool> = self
             .parked
             .iter()
@@ -219,52 +155,19 @@ impl Editor {
         self.parked.retain(|_| keep.next().unwrap_or(true));
     }
 
-    /// The revision of `key`'s text, if it's open.
-    fn revision_of(&self, key: &DocKey) -> Option<u64> {
-        if self.source.doc_key() == *key {
-            return Some(self.buffer.revision());
-        }
-        let i = self.parked_index(key)?;
-        Some(self.parked[i].buffer.revision())
-    }
-
-    /// The line count of `key`'s text, if it's open.
-    fn lines_of(&self, key: &DocKey) -> Option<usize> {
-        if self.source.doc_key() == *key {
-            return Some(self.buffer.text().len_lines());
-        }
-        let i = self.parked_index(key)?;
-        Some(self.parked[i].buffer.text().len_lines())
-    }
-
-    /// Moves the current tab's panes into a page, the focused pane's own
-    /// state with them. Its note stays the editor's.
-    fn stash_tab(&mut self) -> TabPage {
-        let fresh = ListState::new(self.buffer.text().len_lines(), ListAlignment::Top, px(400.));
-        let local = PaneLocal {
+    /// The editor's view of the focused tab, taken out (it's being left).
+    fn stash_local(&mut self) -> PaneLocal {
+        let fresh = ListState::new(0, ListAlignment::Top, px(400.));
+        PaneLocal {
             lines: std::mem::replace(&mut self.lines, fresh),
             view: self.view,
             cursor: self.vim.cursor(),
             scroll_x: std::mem::take(&mut self.scroll_x),
-        };
-        if let Some(slot) = self.panes.iter_mut().find(|p| p.id == self.focused) {
-            slot.local = Some(local);
-        }
-        let panes = std::mem::take(&mut self.panes);
-        let seen = panes
-            .iter()
-            .filter_map(|p| Some((p.note.clone(), self.revision_of(&p.note)?)))
-            .collect();
-        TabPage {
-            id: self.tabs.current(),
-            layout: std::mem::replace(&mut self.layout, Layout::Pane(self.focused)),
-            panes,
-            focused: self.focused,
-            seen,
         }
     }
 
-    /// Parks the editor's note (its tab is being left).
+    /// Parks the editor's note; the editor holds a placeholder until
+    /// another is swapped in.
     fn park_focused_doc(&mut self) {
         let mut doc = Doc::new(Buffer::new_plain(""), Source::Scratch);
         self.swap_doc(&mut doc);
@@ -274,8 +177,8 @@ impl Editor {
 
     /// Opens `key`'s doc as a parked one if it isn't open. `false`: it
     /// can't be (a scratch or untitled note that was closed).
-    fn ensure_doc(&mut self, key: &DocKey) -> bool {
-        if self.source.doc_key() == *key || self.parked_index(key).is_some() {
+    fn ensure_parked(&mut self, key: &DocKey) -> bool {
+        if self.parked_index(key).is_some() {
             return true;
         }
         let DocKey::Note(note) = key else {
@@ -298,367 +201,489 @@ impl Editor {
         }
     }
 
-    /// Makes `page` the current tab: its panes the editor's, its focused
-    /// pane's note and state swapped in. The editor's note must have been
-    /// parked first ([`Self::park_focused_doc`]).
-    fn enter_tab(&mut self, mut page: TabPage, cx: &mut Context<Self>) {
-        // Panes on notes edited while the tab was hidden measure again,
-        // keeping their place.
-        for slot in &mut page.panes {
-            let Some(local) = &mut slot.local else {
-                continue;
-            };
-            let seen = page.seen.iter().find(|(k, _)| *k == slot.note).map(|s| s.1);
-            let now = self.revision_of(&slot.note);
-            if seen.is_some() && seen == now {
-                continue;
-            }
-            if let Some(lines) = self.lines_of(&slot.note) {
-                let top = local.lines.logical_scroll_top();
-                local.lines.reset(lines);
-                local.lines.scroll_to(ListOffset {
-                    item_ix: top.item_ix.min(lines.saturating_sub(1)),
-                    offset_in_item: px(0.),
-                });
-            }
-        }
-        self.layout = page.layout;
-        self.panes = page.panes;
-        self.focused = page.focused;
-        let Some(fi) = self.panes.iter().position(|p| p.id == self.focused) else {
+    /// Whether the focused pane's active tab is a blank scratch or untitled
+    /// note, which a note opened over it replaces (no empty tab is left).
+    fn active_tab_is_blank(&self) -> bool {
+        matches!(self.source, Source::Scratch | Source::Untitled(_))
+            && self.buffer.len_chars() == 0
+            && !self.shown_elsewhere(&self.source.doc_key())
+    }
+
+    /// Opens `next` in the focused pane: a new tab after the active one,
+    /// or that pane's tab for the note if it has one. A blank untitled or
+    /// scratch tab is replaced instead.
+    pub(super) fn open_in_tab(&mut self, mut next: Doc) {
+        let key = next.source.doc_key();
+        let Some(fi) = self.focused_slot() else {
             return;
         };
-        // The editor holds a placeholder (its note was parked): the
-        // focused pane's doc takes its place.
-        let key = self.panes[fi].note.clone();
+        if let Some(i) = self.panes[fi].tabs.iter().position(|t| t.doc == key) {
+            // It's already here: show that tab (its doc goes back to wait).
+            if key != self.source.doc_key() {
+                next.autosave_task = None;
+                self.parked.push(next);
+                self.switch_active_tab(i);
+            }
+            return;
+        }
+        if self.active_tab_is_blank() {
+            return self.replace_active(next);
+        }
+        let revision = self.buffer.revision();
+        let local = self.stash_local();
+        let active = self.panes[fi].active;
+        if let Some(tab) = self.panes[fi].tabs.get_mut(active) {
+            tab.local = Some(local);
+            tab.seen = revision;
+        }
+        self.park_focused_doc();
+        self.swap_doc(&mut next);
+        let at = active + 1;
+        let slot = &mut self.panes[fi];
+        slot.tabs.insert(at, Tab::new(key.clone()));
+        slot.active = at;
+        slot.note = key;
+        slot.touch(at);
+        self.fresh_view();
+    }
+
+    /// Puts `next` in the focused tab's place (the blank note there goes).
+    fn replace_active(&mut self, mut next: Doc) {
+        self.swap_doc(&mut next);
+        let key = self.source.doc_key();
+        if let Some(fi) = self.focused_slot() {
+            let slot = &mut self.panes[fi];
+            let active = slot.active;
+            let old = std::mem::replace(&mut slot.tabs[active].doc, key.clone());
+            slot.used.retain(|k| *k != old);
+            slot.note = key;
+            slot.touch(active);
+        }
+        self.park_or_drop(next);
+        self.fresh_view();
+    }
+
+    /// The view of a note just shown: top, no scroll, measured anew.
+    fn fresh_view(&mut self) {
+        self.wraps.borrow_mut().clear();
+        self.scroll_x.set(px(0.));
+        self.vim.set_cursor(0);
+        self.vim.clear_jumps();
+        self.lines.reset(self.buffer.text().len_lines());
+    }
+
+    /// Shows tab `i` of the focused pane: the shown note is parked, tab
+    /// `i`'s swapped in with its cursor and scroll.
+    fn switch_active_tab(&mut self, i: usize) {
+        let Some(fi) = self.focused_slot() else {
+            return;
+        };
+        let active = self.panes[fi].active;
+        if i == active || i >= self.panes[fi].tabs.len() {
+            return;
+        }
+        let key = self.panes[fi].tabs[i].doc.clone();
+        if !self.ensure_parked(&key) {
+            self.reply = Some((format!("{} can't be opened", key.label()).into(), true));
+            return;
+        }
+        let revision = self.buffer.revision();
+        let local = self.stash_local();
+        let tab = &mut self.panes[fi].tabs[active];
+        tab.local = Some(local);
+        tab.seen = revision;
+        self.park_focused_doc();
         if let Some(mut doc) = self.unpark(&key) {
             self.swap_doc(&mut doc);
         }
-        if let Some(mut local) = self.panes[fi].local.take() {
-            self.swap_local(&mut local);
-        }
-        // Every other pane's cursor stays inside its note's text.
-        for slot in &mut self.panes {
-            if let Some(local) = &mut slot.local
-                && let Some(i) = self
-                    .parked
-                    .iter()
-                    .position(|d| d.source.doc_key() == slot.note)
-            {
-                local.cursor = clamp_normal(self.parked[i].buffer.text(), local.cursor);
+        let tab = &mut self.panes[fi].tabs[i];
+        let seen = tab.seen;
+        match tab.local.take() {
+            Some(mut local) => {
+                self.swap_local(&mut local);
+                // Edited while hidden: its lines measure again, in place.
+                let lines = self.buffer.text().len_lines();
+                if self.buffer.revision() != seen || self.lines.item_count() != lines {
+                    let top = self.lines.logical_scroll_top();
+                    self.lines.reset(lines);
+                    self.lines.scroll_to(ListOffset {
+                        item_ix: top.item_ix.min(lines.saturating_sub(1)),
+                        offset_in_item: px(0.),
+                    });
+                }
             }
+            None => self.fresh_view(),
         }
+        let slot = &mut self.panes[fi];
+        slot.active = i;
+        slot.note = key;
+        slot.touch(i);
         let cursor = clamp_normal(self.buffer.text(), self.vim.cursor());
         self.vim.set_cursor(cursor);
-        let lines = self.buffer.text().len_lines();
-        if self.lines.item_count() != lines {
-            self.lines.reset(lines);
-        }
         self.lines
             .scroll_to_reveal_item(line_of(self.buffer.text(), cursor));
         self.wraps.borrow_mut().clear();
+    }
+
+    /// Shows tab `i` of the focused pane, saving the note left.
+    pub(super) fn activate_tab(&mut self, i: usize, cx: &mut Context<Self>) {
+        self.save_now(cx);
+        self.switch_active_tab(i);
         self.restart_blink(cx);
         cx.notify();
     }
 
-    /// Shows tab `target`.
-    pub(super) fn switch_tab(&mut self, target: TabId, cx: &mut Context<Self>) {
-        if target == self.tabs.current() {
-            return;
-        }
-        let Some(i) = self.tab_pages.iter().position(|t| t.id == target) else {
-            return;
-        };
-        let next = self.tab_pages.remove(i);
-        self.save_now(cx);
-        let page = self.stash_tab();
-        self.park_focused_doc();
-        self.tab_pages.push(page);
-        self.tabs.focus(target);
-        self.enter_tab(next, cx);
+    /// The focused pane's active tab and how many it has.
+    fn focused_tabs(&self) -> (usize, usize) {
+        self.focused_slot()
+            .map(|fi| (self.panes[fi].active, self.panes[fi].tabs.len()))
+            .unwrap_or((0, 1))
     }
 
-    /// A new tab after this one, on the focused note (as `:split` is),
-    /// which becomes current.
-    fn open_tab_here(&mut self, cx: &mut Context<Self>) {
-        self.save_now(cx);
-        let id = self.tabs.add_after_current();
-        let view = self.view;
-        let top = self.lines.logical_scroll_top();
-        let page = self.stash_tab();
-        self.tab_pages.push(page);
-        self.tabs.focus(id);
-        let pane = PaneId(self.next_pane);
-        self.next_pane += 1;
-        self.layout = Layout::Pane(pane);
-        self.panes = vec![PaneSlot {
-            id: pane,
-            note: self.source.doc_key(),
-            local: None,
-        }];
-        self.focused = pane;
-        self.view = view;
-        self.lines.scroll_to(top);
-        self.wraps.borrow_mut().clear();
-        self.restart_blink(cx);
-        cx.notify();
-    }
-
-    /// `:tabnew [note]`, `:tabedit {note}`, `⌘T`: a new tab after this one,
-    /// on the note named, or else an untitled note (as Neovim's empty
-    /// buffer).
+    /// `:tabnew [note]`, `:tabedit {note}`, `⌘T`: a new tab after the
+    /// active one, on the note named, or an untitled note.
     pub(super) fn tab_new(&mut self, arg: Option<&str>, cx: &mut Context<Self>) {
-        let arg = arg.map(str::trim).filter(|a| !a.is_empty());
-        self.open_tab_here(cx);
-        match arg {
+        match arg.map(str::trim).filter(|a| !a.is_empty()) {
             Some(arg) => self.edit_path(Some(arg), cx),
             None => self.open_untitled(cx),
         }
     }
 
-    /// Whether closing the tab `panes` would lose text that isn't in a
-    /// file: a scratch or untitled note with text that no other tab shows.
-    fn unsaved_in(&self, panes: &[PaneSlot], focused_doc: Option<&DocKey>) -> Option<String> {
-        let mut keys: Vec<DocKey> = panes.iter().map(|p| p.note.clone()).collect();
-        if let Some(k) = focused_doc {
-            keys.push(k.clone());
+    /// Whether closing a tab on `key` loses text: a scratch or untitled
+    /// note with text, shown by no other tab.
+    fn loses_text(&self, key: &DocKey) -> bool {
+        if !matches!(key, DocKey::Scratch | DocKey::Untitled(_)) || self.tabs_showing(key) > 1 {
+            return false;
         }
-        keys.into_iter().find_map(|key| {
-            if !matches!(key, DocKey::Scratch | DocKey::Untitled(_)) {
-                return None;
-            }
-            let dirty = if self.source.doc_key() == key {
-                self.buffer.is_dirty() && self.buffer.len_chars() > 0
-            } else {
-                self.parked_index(&key).is_some_and(|i| {
-                    self.parked[i].buffer.is_dirty() && self.parked[i].buffer.len_chars() > 0
-                })
-            };
-            dirty.then(|| key.label())
+        if self.source.doc_key() == *key {
+            return self.buffer.is_dirty() && self.buffer.len_chars() > 0;
+        }
+        self.parked_index(key).is_some_and(|i| {
+            let buffer = &self.parked[i].buffer;
+            buffer.is_dirty() && buffer.len_chars() > 0
         })
     }
 
-    /// `:tabclose[!] [N]`: closes the current tab, or tab N. The last tab
-    /// stays. Unsaved scratch or untitled text needs `!`.
+    /// How many tabs, in all panes, show `key`.
+    fn tabs_showing(&self, key: &DocKey) -> usize {
+        self.panes
+            .iter()
+            .map(|p| p.tabs.iter().filter(|t| t.doc == *key).count())
+            .sum()
+    }
+
+    fn no_write(&mut self, key: &DocKey) {
+        self.reply = Some((
+            format!(
+                "E37: No write since last change in {} (add ! to override)",
+                key.label()
+            )
+            .into(),
+            true,
+        ));
+    }
+
+    /// `:tabclose[!] [N]`: closes the focused pane's active tab, or tab N.
+    /// The last tab of the last pane stays. Unsaved scratch or untitled text
+    /// needs `!`.
     pub(super) fn tab_close(&mut self, arg: Option<&str>, force: bool, cx: &mut Context<Self>) {
+        let (active, len) = self.focused_tabs();
         let target = match arg.map(str::trim).filter(|a| !a.is_empty()) {
-            None => self.tabs.current(),
-            Some(n) => match n.parse::<usize>().ok().and_then(|n| self.tabs.nth(n)) {
-                Some(id) => id,
+            None => active,
+            Some(n) => match n.parse::<usize>().ok().filter(|n| (1..=len).contains(n)) {
+                Some(n) => n - 1,
                 None => {
                     self.reply = Some((format!("E475: Invalid argument: {n}").into(), true));
                     return;
                 }
             },
         };
-        if self.tabs.len() < 2 {
+        if len < 2 && self.panes.len() < 2 {
             self.reply = Some(("E784: Cannot close last tab page".into(), true));
             return;
         }
-        if !force {
-            let lost = if target == self.tabs.current() {
-                self.unsaved_in(&self.panes, None)
-            } else {
-                self.tab_pages
-                    .iter()
-                    .find(|t| t.id == target)
-                    .and_then(|t| self.unsaved_in(&t.panes, None))
-            };
-            if let Some(name) = lost {
-                self.reply = Some((
-                    format!("E37: No write since last change in {name} (add ! to override)").into(),
-                    true,
-                ));
-                return;
+        if let Some(fi) = self.focused_slot() {
+            let key = self.panes[fi].tabs[target].doc.clone();
+            if !force && self.loses_text(&key) {
+                return self.no_write(&key);
             }
         }
-        self.close_tab(target, cx);
+        self.close_tab_at(target, cx);
     }
 
-    /// Closes tab `target` (it isn't the last), keeping it for
-    /// `:tabreopen`. The last-used tab shows when it was current.
-    pub(super) fn close_tab(&mut self, target: TabId, cx: &mut Context<Self>) {
-        let index = self.tabs.index_of(target).unwrap_or(0);
-        let page = if target == self.tabs.current() {
-            self.save_now(cx);
-            let page = self.stash_tab();
-            self.park_focused_doc();
-            let Some(next) = self.tabs.remove(target) else {
-                return;
-            };
-            let Some(i) = self.tab_pages.iter().position(|t| t.id == next) else {
-                return;
-            };
-            let next = self.tab_pages.remove(i);
-            self.enter_tab(next, cx);
-            page
-        } else {
-            let Some(i) = self.tab_pages.iter().position(|t| t.id == target) else {
-                return;
-            };
-            self.tabs.remove(target);
-            self.tab_pages.remove(i)
+    /// Closes tab `i` of the focused pane, keeping it for `:tabreopen`. The
+    /// pane's last-used tab shows; its last tab closes the pane. `false`
+    /// when it's the last tab of the last pane (nothing closes).
+    pub(super) fn close_tab_at(&mut self, i: usize, cx: &mut Context<Self>) -> bool {
+        let Some(fi) = self.focused_slot() else {
+            return false;
         };
-        self.closed_tabs.push(ClosedTab { index, page });
+        let len = self.panes[fi].tabs.len();
+        if i >= len {
+            return false;
+        }
+        self.save_now(cx);
+        if len < 2 {
+            // The pane's last tab: the pane goes, and with it the tab.
+            let pane = self.focused;
+            let tab = Tab::new(self.panes[fi].tabs[0].doc.clone());
+            if !self.close_pane(cx) {
+                return false;
+            }
+            self.keep_closed(pane, 0, tab);
+            self.drop_unshown_docs();
+            return true;
+        }
+        if i == self.panes[fi].active {
+            let next = self.panes[fi].after_closing(i);
+            self.switch_active_tab(next);
+        }
+        let slot = &mut self.panes[fi];
+        let mut tab = slot.tabs.remove(i);
+        if i < slot.active {
+            slot.active -= 1;
+        }
+        let key = tab.doc.clone();
+        slot.used.retain(|k| *k != key);
+        tab.seen = 0;
+        self.keep_closed(self.focused, i, tab);
+        self.drop_unshown_docs();
+        self.restart_blink(cx);
+        cx.notify();
+        true
+    }
+
+    fn keep_closed(&mut self, pane: PaneId, index: usize, tab: Tab) {
+        // A note with no name can't be opened again.
+        if matches!(tab.doc, DocKey::Scratch | DocKey::Untitled(_)) {
+            return;
+        }
+        self.closed_tabs.push(ClosedTab { pane, index, tab });
         if self.closed_tabs.len() > CLOSED_KEPT {
             self.closed_tabs.remove(0);
         }
-        self.drop_unshown_docs();
-        cx.notify();
     }
 
-    /// `:tabonly[!]`: closes every other tab.
+    /// `:tabonly[!]`: closes the focused pane's other tabs.
     pub(super) fn tab_only(&mut self, force: bool, cx: &mut Context<Self>) {
-        if !force
-            && let Some(name) = self
-                .tab_pages
-                .iter()
-                .find_map(|t| self.unsaved_in(&t.panes, None))
-        {
-            self.reply = Some((
-                format!("E37: No write since last change in {name} (add ! to override)").into(),
-                true,
-            ));
+        let Some(fi) = self.focused_slot() else {
             return;
+        };
+        let active = self.panes[fi].active;
+        let others: Vec<DocKey> = self.panes[fi]
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != active)
+            .map(|(_, t)| t.doc.clone())
+            .collect();
+        if !force && let Some(lost) = others.iter().find(|k| self.loses_text(k)).cloned() {
+            return self.no_write(&lost);
         }
-        let others: Vec<TabId> = self.tab_pages.iter().map(|t| t.id).collect();
-        for id in others {
-            self.close_tab(id, cx);
+        // From the right, so the indexes still to close stay put.
+        for i in (0..self.panes[fi].tabs.len()).rev() {
+            if i != self.panes[fi].active {
+                self.close_tab_at(i, cx);
+            }
         }
     }
 
     /// `:tabreopen`, `⌘⇧T`: brings back the most recently closed tab where
-    /// it was. Panes on notes that can't be opened again are left out.
+    /// it was, or in the focused pane if its pane is gone.
     pub(super) fn tab_reopen(&mut self, cx: &mut Context<Self>) {
-        let Some(closed) = self.closed_tabs.pop() else {
+        let Some(ClosedTab {
+            pane,
+            index,
+            mut tab,
+        }) = self.closed_tabs.pop()
+        else {
             self.reply = Some(("No closed tab to reopen".into(), true));
             return;
         };
-        let ClosedTab { index, mut page } = closed;
-        let gone: Vec<PaneId> = page
-            .panes
-            .iter()
-            .filter(|p| !self.ensure_doc(&p.note))
-            .map(|p| p.id)
-            .collect();
-        for id in &gone {
-            if !page.layout.remove(*id) {
-                // Its only pane: nothing to bring back.
-                self.reply = Some(("The closed tab's notes can't be opened again".into(), true));
-                return;
-            }
-            page.panes.retain(|p| p.id != *id);
-        }
-        if !page.panes.iter().any(|p| p.id == page.focused)
-            && let Some(first) = page.layout.panes().first()
-        {
-            page.focused = *first;
-        }
-        // Pane ids are kept: they're unique in the window, and no other
-        // pane took them while the tab was closed.
-        page.seen.clear();
-        let id = self.tabs.add_at(index);
-        page.id = id;
-        self.save_now(cx);
-        let current = self.stash_tab();
-        self.park_focused_doc();
-        self.tab_pages.push(current);
-        self.tabs.focus(id);
-        self.enter_tab(page, cx);
-    }
-
-    /// `:tabmove [N|+N|-N]`.
-    pub(super) fn tab_move(&mut self, arg: Option<&str>, cx: &mut Context<Self>) {
-        match self.tabs.move_target(arg) {
-            Some(index) => {
-                self.tabs.move_current(index);
-                cx.notify();
-            }
-            None => {
-                self.reply = Some((
-                    format!("E475: Invalid argument: {}", arg.unwrap_or("")).into(),
-                    true,
-                ));
-            }
-        }
-    }
-
-    /// `:tabnext {N}` from the keys `⌘1` … `⌘8`: tab N, if there is one.
-    pub(super) fn tab_number(&mut self, n: usize, cx: &mut Context<Self>) {
-        if let Some(id) = self.tabs.nth(n) {
-            self.switch_tab(id, cx);
-        }
-    }
-
-    /// `⌃w T`: the focused pane moves to a new tab of its own, after this
-    /// one. With one pane there's nothing to move.
-    pub(super) fn pane_to_tab(&mut self, cx: &mut Context<Self>) {
-        if self.panes.len() < 2 {
-            self.reply = Some(("This tab has one pane: it's a tab of its own".into(), true));
+        if self.source.doc_key() != tab.doc && !self.ensure_parked(&tab.doc) {
+            self.reply = Some((
+                format!("{} can't be opened again", tab.doc.label()).into(),
+                true,
+            ));
             return;
         }
-        self.save_now(cx);
-        let moving = self.focused;
-        let order = self.layout.panes();
-        let at = order.iter().position(|&p| p == moving).unwrap_or(0);
-        let stays = if at > 0 { order[at - 1] } else { order[1] };
-        let mut page = self.stash_tab();
-        page.layout.remove(moving);
-        page.focused = stays;
-        let Some(i) = page.panes.iter().position(|p| p.id == moving) else {
+        if pane != self.focused && self.panes.iter().any(|p| p.id == pane) {
+            self.focus_pane(pane, cx);
+        }
+        let Some(fi) = self.focused_slot() else {
             return;
         };
-        let mut slot = page.panes.remove(i);
-        self.tab_pages.push(page);
-        let id = self.tabs.add_after_current();
-        self.tabs.focus(id);
-        if let Some(mut local) = slot.local.take() {
-            self.swap_local(&mut local);
+        if let Some(i) = self.panes[fi].tabs.iter().position(|t| t.doc == tab.doc) {
+            return self.activate_tab(i, cx);
         }
-        self.layout = Layout::Pane(moving);
-        self.panes = vec![slot];
-        self.focused = moving;
-        self.wraps.borrow_mut().clear();
-        self.restart_blink(cx);
+        let at = index.min(self.panes[fi].tabs.len());
+        tab.seen = 0;
+        self.panes[fi].tabs.insert(at, tab);
+        if at <= self.panes[fi].active {
+            self.panes[fi].active += 1;
+        }
+        self.activate_tab(at, cx);
+    }
+
+    fn invalid(&mut self, arg: Option<&str>) {
+        self.reply = Some((
+            format!("E475: Invalid argument: {}", arg.unwrap_or("")).into(),
+            true,
+        ));
+    }
+
+    /// `:tabnext [N]`, `gt`: the next tab, tab N, or the last used (`#`).
+    pub(super) fn tab_next(&mut self, arg: Option<&str>, cx: &mut Context<Self>) {
+        let (active, len) = self.focused_tabs();
+        let arg = arg.map(str::trim).filter(|a| !a.is_empty());
+        let target = match arg {
+            None => Some(step(active, len, 1)),
+            Some("#") => self.focused_slot().and_then(|fi| self.panes[fi].previous()),
+            Some(n) => n
+                .parse::<usize>()
+                .ok()
+                .filter(|n| (1..=len).contains(n))
+                .map(|n| n - 1),
+        };
+        match target {
+            Some(i) => self.activate_tab(i, cx),
+            None => self.invalid(arg),
+        }
+    }
+
+    /// `:tabprevious [N]`, `gT`: the previous tab, or N tabs back.
+    pub(super) fn tab_previous(&mut self, arg: Option<&str>, cx: &mut Context<Self>) {
+        let (active, len) = self.focused_tabs();
+        let arg = arg.map(str::trim).filter(|a| !a.is_empty());
+        match arg.map_or(Some(1), |n| n.parse::<isize>().ok()) {
+            Some(n) => self.activate_tab(step(active, len, -n), cx),
+            None => self.invalid(arg),
+        }
+    }
+
+    /// `:tabfirst`, `:tablast`.
+    pub(super) fn tab_edge(&mut self, last: bool, cx: &mut Context<Self>) {
+        let (_, len) = self.focused_tabs();
+        self.activate_tab(if last { len - 1 } else { 0 }, cx);
+    }
+
+    /// `⌘1` … `⌘8`: tab N, if there is one.
+    pub(super) fn tab_number(&mut self, n: usize, cx: &mut Context<Self>) {
+        let (_, len) = self.focused_tabs();
+        if (1..=len).contains(&n) {
+            self.activate_tab(n - 1, cx);
+        }
+    }
+
+    /// `:tabmove [N|+N|-N]`: moves the active tab in its row.
+    pub(super) fn tab_move(&mut self, arg: Option<&str>, cx: &mut Context<Self>) {
+        let (active, len) = self.focused_tabs();
+        let (Some(fi), Some(to)) = (self.focused_slot(), move_target(active, len, arg)) else {
+            return self.invalid(arg);
+        };
+        let slot = &mut self.panes[fi];
+        let tab = slot.tabs.remove(active);
+        slot.tabs.insert(to, tab);
+        slot.active = to;
+        cx.notify();
+    }
+
+    /// `:tabs`: every pane and its tabs, `>` at the active one and `+` at
+    /// unsaved text.
+    pub(super) fn tab_list(&mut self) {
+        let mut out = Vec::new();
+        for (n, id) in self.layout.panes().iter().enumerate() {
+            let Some(slot) = self.panes.iter().find(|p| p.id == *id) else {
+                continue;
+            };
+            let focused = if *id == self.focused {
+                " (focused)"
+            } else {
+                ""
+            };
+            out.push(format!("Pane {}{focused}", n + 1));
+            for (i, tab) in slot.tabs.iter().enumerate() {
+                let mark = if i == slot.active { '>' } else { ' ' };
+                let dirty = if self.source.doc_key() == tab.doc {
+                    self.buffer.is_dirty()
+                } else {
+                    self.parked_index(&tab.doc)
+                        .is_some_and(|d| self.parked[d].buffer.is_dirty())
+                };
+                let plus = if dirty { '+' } else { ' ' };
+                out.push(format!("{mark}{plus}  {}", tab.doc.label()));
+            }
+        }
+        self.vim.show_message(out.join("\n"));
+    }
+
+    /// For the status line while the focused pane has several tabs: `2/5`.
+    pub(super) fn tab_position(&self) -> Option<String> {
+        let (active, len) = self.focused_tabs();
+        (len > 1).then(|| format!("{}/{len}", active + 1))
+    }
+
+    /// `⌃w T`: the active tab leaves for a new pane on the right. A pane
+    /// with one tab has nothing to move.
+    pub(super) fn tab_to_pane(&mut self, cx: &mut Context<Self>) {
+        let (active, len) = self.focused_tabs();
+        if len < 2 {
+            self.reply = Some(("This pane has one tab: nothing to move".into(), true));
+            return;
+        }
+        let from = self.focused;
+        let key = self.source.doc_key();
+        // A pane beside on the note, focused; then the tab leaves the old
+        // one, which shows its last-used other tab.
+        self.split_pane(Axis::Row, cx);
+        let lines = |e: &Self, key: &DocKey| {
+            e.parked_index(key)
+                .map_or(1, |i| e.parked[i].buffer.text().len_lines())
+        };
+        let Some(oi) = self.panes.iter().position(|p| p.id == from) else {
+            return;
+        };
+        let next = self.panes[oi].after_closing(active);
+        let next_key = self.panes[oi].tabs[next].doc.clone();
+        let fallback = lines(self, &next_key);
+        let old = &mut self.panes[oi];
+        let shown = old.tabs[next].local.take().unwrap_or_else(|| PaneLocal {
+            lines: ListState::new(fallback, ListAlignment::Top, px(400.)),
+            view: self.view,
+            cursor: 0,
+            scroll_x: Default::default(),
+        });
+        old.tabs.remove(active);
+        old.active = if next > active { next - 1 } else { next };
+        old.note = next_key;
+        old.used.retain(|k| *k != key);
+        old.local = Some(shown);
         cx.notify();
     }
 
     /// `⌘W`: closes one thing, and never mNote. An overlay or the command
-    /// line first; else the focused pane; else, on a tab's last pane, the
-    /// tab. On the very last pane it only says that `⌘Q` quits. Text that
-    /// isn't in a file (an untitled or scratch note) asks first.
+    /// line first; else the focused pane's active tab (its last tab closes
+    /// the pane). On the very last tab it only says that `⌘Q` quits. Text
+    /// that isn't in a file (an untitled or scratch note) asks first.
     pub(super) fn close_something(&mut self, cx: &mut Context<Self>) {
         if self.picker.is_some() || self.folder_edit.is_some() || self.vim.command_line().is_some()
         {
             self.press(mnote_vim::Key::Esc, cx);
             return;
         }
-        if self.panes.len() < 2 && self.tabs.len() < 2 {
+        let (active, len) = self.focused_tabs();
+        if len < 2 && self.panes.len() < 2 {
             self.reply = Some(("⌘Q quits mNote".into(), false));
             return;
         }
-        let unsaved = matches!(self.source, Source::Untitled(_) | Source::Scratch)
-            && self.buffer.is_dirty()
-            && self.buffer.len_chars() > 0
-            && !self.shown_elsewhere(&self.source.doc_key());
-        if unsaved {
+        if self.loses_text(&self.source.doc_key()) {
             return self.ask_before_closing(cx);
         }
-        self.close_focused(cx);
-    }
-
-    /// Closes the focused pane, or its tab when it's the tab's last.
-    fn close_focused(&mut self, cx: &mut Context<Self>) {
-        self.save_now(cx);
-        if self.panes.len() > 1 {
-            self.close_pane(cx);
-        } else if self.tabs.len() > 1 {
-            self.close_tab(self.tabs.current(), cx);
-        }
+        self.close_tab_at(active, cx);
     }
 
     /// "Save "untitled" before closing?": Save as… (the save prompt),
-    /// Discard, or Cancel.
+    /// Discard (closes the tab), or Cancel.
     fn ask_before_closing(&mut self, cx: &mut Context<Self>) {
         let name = self.source.doc_key().label();
         let item = |text: &str, detail: &str| crate::picker::custom::Item {
@@ -667,10 +692,7 @@ impl Editor {
         };
         let items = vec![
             item("Save as…", "name it; ⌘W again closes it"),
-            item(
-                "Discard",
-                "its text goes; ⌘⇧T brings the tab back, not the text",
-            ),
+            item("Discard", "its text goes"),
             item("Cancel", "keep it open"),
         ];
         let picker = crate::picker::custom::CustomPicker::new(
@@ -686,7 +708,8 @@ impl Editor {
                             }
                             // Nothing to keep: the text isn't asked about again.
                             e.buffer.mark_saved();
-                            e.close_focused(cx);
+                            let (active, _) = e.focused_tabs();
+                            e.close_tab_at(active, cx);
                         }
                         _ => {}
                     }
@@ -696,89 +719,8 @@ impl Editor {
         self.open_picker(crate::picker::Picker::new(Box::new(picker)), cx);
     }
 
-    /// `:tabnext [N]`, `gt`: the next tab, or tab N.
-    pub(super) fn tab_next(&mut self, arg: Option<&str>, cx: &mut Context<Self>) {
-        let arg = arg.map(str::trim).filter(|a| !a.is_empty());
-        let target = match arg {
-            None => Some(self.tabs.step(1)),
-            Some("#") => self.tabs.previous(),
-            Some(n) => n.parse::<usize>().ok().and_then(|n| self.tabs.nth(n)),
-        };
-        match target {
-            Some(id) => self.switch_tab(id, cx),
-            None => {
-                self.reply = Some((
-                    format!("E475: Invalid argument: {}", arg.unwrap_or("")).into(),
-                    true,
-                ))
-            }
-        }
-    }
-
-    /// `:tabprevious [N]`, `gT`: the previous tab, or N tabs back.
-    pub(super) fn tab_previous(&mut self, arg: Option<&str>, cx: &mut Context<Self>) {
-        let arg = arg.map(str::trim).filter(|a| !a.is_empty());
-        let steps = match arg {
-            None => Some(1),
-            Some(n) => n.parse::<isize>().ok(),
-        };
-        match steps {
-            Some(n) => {
-                let id = self.tabs.step(-n);
-                self.switch_tab(id, cx);
-            }
-            None => {
-                self.reply = Some((
-                    format!("E475: Invalid argument: {}", arg.unwrap_or("")).into(),
-                    true,
-                ))
-            }
-        }
-    }
-
-    /// `:tabfirst`, `:tablast`.
-    pub(super) fn tab_edge(&mut self, last: bool, cx: &mut Context<Self>) {
-        let order = self.tabs.order();
-        let id = if last { order.last() } else { order.first() };
-        if let Some(&id) = id {
-            self.switch_tab(id, cx);
-        }
-    }
-
-    /// `:tabs`: every tab and its panes' notes, `>` at the focused pane and
-    /// `+` at unsaved text, as Vim lists them.
-    pub(super) fn tab_list(&mut self) {
-        let mut out = Vec::new();
-        for (i, &id) in self.tabs.order().iter().enumerate() {
-            out.push(format!("Tab page {}", i + 1));
-            let (layout, panes, focused) = if id == self.tabs.current() {
-                (&self.layout, &self.panes, Some(self.focused))
-            } else {
-                match self.tab_pages.iter().find(|t| t.id == id) {
-                    Some(t) => (&t.layout, &t.panes, None),
-                    None => continue,
-                }
-            };
-            for pane in layout.panes() {
-                let Some(slot) = panes.iter().find(|p| p.id == pane) else {
-                    continue;
-                };
-                let mark = if focused == Some(pane) { '>' } else { ' ' };
-                let dirty = if self.source.doc_key() == slot.note {
-                    self.buffer.is_dirty()
-                } else {
-                    self.parked_index(&slot.note)
-                        .is_some_and(|d| self.parked[d].buffer.is_dirty())
-                };
-                let plus = if dirty { '+' } else { ' ' };
-                out.push(format!("{mark}{plus}  {}", slot.note.label()));
-            }
-        }
-        self.vim.show_message(out.join("\n"));
-    }
-
     /// A scratch or untitled note with text that isn't in a file, in any
-    /// tab, by name.
+    /// pane, by name.
     pub(super) fn unsaved_anywhere(&self) -> Option<String> {
         let unsaved = |source: &Source, buffer: &Buffer| {
             matches!(source, Source::Scratch | Source::Untitled(_))
@@ -794,34 +736,39 @@ impl Editor {
             .map(|d| d.source.doc_key().label())
     }
 
-    /// The tabs, panes and focused text in one line, for `MNOTE_SCRIPT`
-    /// checks: `tab 2/2 | >b.md a.md | [a.md] | parked 1 | reply … | text …`.
+    /// The panes and their tabs in one line, for `MNOTE_SCRIPT` checks:
+    /// `pane 1/2 | a.md >b.md | [>c.md] | parked 1 | …`: the focused pane's
+    /// tabs, then the other panes' in layout order.
     pub(super) fn state_line(&self) -> String {
-        let pane_list = |layout: &Layout, panes: &[PaneSlot], focused: PaneId| {
-            layout
-                .panes()
-                .into_iter()
-                .filter_map(|id| panes.iter().find(|p| p.id == id))
-                .map(|p| {
-                    let mark = if p.id == focused { ">" } else { "" };
-                    format!("{mark}{}", p.note.label())
+        let row = |slot: &PaneSlot| {
+            slot.tabs
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    let mark = if i == slot.active { ">" } else { "" };
+                    format!("{mark}{}", t.doc.label())
                 })
                 .collect::<Vec<_>>()
                 .join(" ")
         };
-        let others: Vec<String> = self
-            .tabs
-            .order()
+        let order = self.layout.panes();
+        let at = order.iter().position(|&p| p == self.focused).unwrap_or(0);
+        let focused = self
+            .focused_slot()
+            .map(|fi| row(&self.panes[fi]))
+            .unwrap_or_default();
+        let others: Vec<String> = order
             .iter()
-            .filter_map(|id| self.tab_pages.iter().find(|t| t.id == *id))
-            .map(|t| format!("[{}]", pane_list(&t.layout, &t.panes, t.focused)))
+            .filter(|&&id| id != self.focused)
+            .filter_map(|id| self.panes.iter().find(|p| p.id == *id))
+            .map(|p| format!("[{}]", row(p)))
             .collect();
         let text: String = self.buffer.to_string().replace('\n', "\\n");
         format!(
-            "tab {}/{} | {} | {} | parked {} | closed {} | overlay {} | reply {} | cursor {} | text {}",
-            self.tabs.current_index() + 1,
-            self.tabs.len(),
-            pane_list(&self.layout, &self.panes, self.focused),
+            "pane {}/{} | {} | {} | parked {} | closed {} | overlay {} | reply {} | cursor {} | text {}",
+            at + 1,
+            order.len(),
+            focused,
             others.join(" "),
             self.parked.len(),
             self.closed_tabs.len(),
@@ -838,53 +785,59 @@ impl Editor {
         )
     }
 
-    /// For the status line while there are several tabs: `tab 2/3`.
-    pub(super) fn tab_position(&self) -> Option<String> {
-        (self.tabs.len() > 1)
-            .then(|| format!("tab {}/{}", self.tabs.current_index() + 1, self.tabs.len()))
-    }
-
-    /// After a note moved: panes in other tabs follow it.
-    pub(super) fn follow_in_other_tabs(&mut self, follow: &dyn Fn(&mut NotePath)) {
-        for page in &mut self.tab_pages {
-            for slot in &mut page.panes {
-                if let DocKey::Note(note) = &mut slot.note {
-                    follow(note);
-                }
-            }
-            for (key, _) in &mut page.seen {
+    /// After a note moved: every tab on it follows, closed ones too.
+    pub(super) fn follow_in_tabs(&mut self, follow: &dyn Fn(&mut NotePath)) {
+        for slot in &mut self.panes {
+            let keys = slot
+                .tabs
+                .iter_mut()
+                .map(|t| &mut t.doc)
+                .chain(slot.used.iter_mut());
+            for key in keys {
                 if let DocKey::Note(note) = key {
                     follow(note);
                 }
             }
         }
         for closed in &mut self.closed_tabs {
-            for slot in &mut closed.page.panes {
-                if let DocKey::Note(note) = &mut slot.note {
-                    follow(note);
+            if let DocKey::Note(note) = &mut closed.tab.doc {
+                follow(note);
+            }
+        }
+    }
+
+    /// After an untitled note was named: every tab on it, in every pane,
+    /// shows it by its new name.
+    pub(super) fn rename_doc_everywhere(&mut self, from: &DocKey, to: &DocKey) {
+        for slot in &mut self.panes {
+            if slot.note == *from {
+                slot.note = to.clone();
+            }
+            let keys = slot
+                .tabs
+                .iter_mut()
+                .map(|t| &mut t.doc)
+                .chain(slot.used.iter_mut());
+            for key in keys {
+                if key == from {
+                    *key = to.clone();
                 }
             }
         }
     }
 
-    /// After an untitled note was named: every pane on it, in every tab,
-    /// shows the note by its new name.
-    pub(super) fn rename_doc_everywhere(&mut self, from: &DocKey, to: &DocKey) {
-        let all = self
-            .panes
-            .iter_mut()
-            .chain(self.tab_pages.iter_mut().flat_map(|t| t.panes.iter_mut()));
-        for slot in all {
-            if slot.note == *from {
-                slot.note = to.clone();
-            }
-        }
+    /// Whether `:q` here closes a tab (or the pane with it) rather than
+    /// quitting mNote.
+    pub(super) fn closes_not_quits(&self) -> bool {
+        let (_, len) = self.focused_tabs();
+        len > 1 || self.panes.len() > 1
     }
 
-    /// Whether this is the last pane of its tab with other tabs open:
-    /// closing it closes the tab.
-    pub(super) fn last_pane_of_a_tab(&self) -> bool {
-        self.panes.len() < 2 && self.tabs.len() > 1
+    /// `:q` with tabs or panes left: the active tab closes, and the pane
+    /// with its last tab.
+    pub(super) fn close_active_tab(&mut self, cx: &mut Context<Self>) {
+        let (active, _) = self.focused_tabs();
+        self.close_tab_at(active, cx);
     }
 }
 
@@ -893,72 +846,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tabs_open_after_the_current_one_and_step_round() {
-        let mut tabs = TabSet::default();
-        let b = tabs.add_after_current();
-        tabs.focus(b);
-        let c = tabs.add_after_current();
-        assert_eq!(tabs.order(), [TabId(0), b, c]);
-        tabs.focus(TabId(0));
-        let d = tabs.add_after_current();
-        assert_eq!(tabs.order(), [TabId(0), d, b, c]);
-        assert_eq!(tabs.step(1), d);
-        assert_eq!(tabs.step(-1), c, "wraps");
-        assert_eq!(tabs.step(5), d);
-        assert_eq!(tabs.nth(4), Some(c));
-        assert_eq!(tabs.nth(0), None);
-        assert_eq!(tabs.nth(5), None);
-    }
-
-    #[test]
-    fn closing_shows_the_last_used_tab() {
-        let mut tabs = TabSet::default();
-        let b = tabs.add_after_current();
-        let c = tabs.add_at(9);
-        tabs.focus(c);
-        tabs.focus(b);
-        // Used: b, c, 0. Closing b shows c, not 0 to its left.
-        assert_eq!(tabs.remove(b), Some(c));
-        assert_eq!(tabs.current(), c);
-        assert_eq!(tabs.previous(), Some(TabId(0)));
-        // Closing another tab keeps the current one.
-        assert_eq!(tabs.remove(TabId(0)), Some(c));
-        assert_eq!(tabs.remove(c), None, "the last tab stays");
-        assert_eq!(tabs.len(), 1);
+    fn tabs_step_round() {
+        assert_eq!(step(0, 3, 1), 1);
+        assert_eq!(step(2, 3, 1), 0, "wraps");
+        assert_eq!(step(0, 3, -1), 2);
+        assert_eq!(step(1, 3, 5), 0);
+        assert_eq!(step(0, 1, 1), 0);
     }
 
     #[test]
     fn tabmove_places_the_tab_as_vim_does() {
-        let mut tabs = TabSet::default();
-        let b = tabs.add_at(1);
-        let c = tabs.add_at(2);
-        let d = tabs.add_at(3);
-        let a = TabId(0);
-        // [a b c d], a current.
-        assert_eq!(tabs.move_target(None), Some(3));
-        assert_eq!(tabs.move_target(Some("0")), Some(0));
-        assert_eq!(tabs.move_target(Some("2")), Some(1), "after b");
-        assert_eq!(tabs.move_target(Some("+2")), Some(2));
-        assert_eq!(tabs.move_target(Some("-")), Some(0));
-        assert_eq!(tabs.move_target(Some("x")), None);
-        tabs.move_current(1);
-        assert_eq!(tabs.order(), [b, a, c, d]);
-        tabs.focus(d);
-        tabs.move_current(tabs.move_target(Some("1")).expect("valid"));
-        assert_eq!(tabs.order(), [b, d, a, c]);
-        tabs.move_current(tabs.move_target(Some("+9")).expect("valid"));
-        assert_eq!(tabs.order(), [b, a, c, d]);
+        // Tab 0 of 4.
+        assert_eq!(move_target(0, 4, None), Some(3));
+        assert_eq!(move_target(0, 4, Some("0")), Some(0));
+        assert_eq!(move_target(0, 4, Some("2")), Some(1), "after tab 2");
+        assert_eq!(move_target(0, 4, Some("+2")), Some(2));
+        assert_eq!(move_target(0, 4, Some("+9")), Some(3));
+        assert_eq!(move_target(3, 4, Some("-")), Some(2));
+        assert_eq!(move_target(3, 4, Some("1")), Some(1), "after tab 1");
+        assert_eq!(move_target(0, 4, Some("x")), None);
     }
 
     #[test]
-    fn the_previous_tab_is_the_one_used_before() {
-        let mut tabs = TabSet::default();
-        let b = tabs.add_after_current();
-        let c = tabs.add_after_current();
-        tabs.focus(c);
-        assert_eq!(tabs.previous(), Some(TabId(0)));
-        tabs.focus(b);
-        assert_eq!(tabs.previous(), Some(c));
-        assert_ne!(b, c);
+    fn a_pane_remembers_the_tab_used_before() {
+        let a = DocKey::Config;
+        let b = DocKey::Scratch;
+        let c = DocKey::Untitled(1);
+        let mut slot = PaneSlot::new(PaneId(0), a.clone(), None);
+        slot.tabs.push(Tab::new(b.clone()));
+        slot.tabs.push(Tab::new(c.clone()));
+        slot.touch(2);
+        assert_eq!(slot.previous(), Some(0));
+        slot.touch(1);
+        assert_eq!(slot.previous(), Some(2));
+        assert_eq!(slot.used, [b, c.clone(), a]);
+        // Closing the active tab (1) shows the last used other one.
+        assert_eq!(slot.after_closing(1), 2);
     }
 }

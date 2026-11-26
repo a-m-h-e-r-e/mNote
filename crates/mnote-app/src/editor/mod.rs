@@ -186,10 +186,6 @@ pub struct Editor {
     next_pane: u32,
     /// Open notes other than the focused pane's, shared by every tab.
     parked: Vec<Doc>,
-    /// The tabs' order, and the tabs other than the current one (whose
-    /// panes are the fields above).
-    tabs: tabs::TabSet,
-    tab_pages: Vec<tabs::TabPage>,
     /// Closed tabs, for `:tabreopen`.
     closed_tabs: Vec<tabs::ClosedTab>,
     /// The last untitled note's number, and the folder each one was
@@ -431,17 +427,11 @@ impl Editor {
             table_cache: std::collections::HashMap::new(),
             image_paths: RefCell::default(),
             syntax_ready,
-            panes: vec![PaneSlot {
-                id: PaneId(0),
-                note: first_note,
-                local: None,
-            }],
+            panes: vec![PaneSlot::new(PaneId(0), first_note, None)],
             focused: PaneId(0),
             layout: Layout::Pane(PaneId(0)),
             next_pane: 1,
             parked: Vec::new(),
-            tabs: Default::default(),
-            tab_pages: Vec::new(),
             closed_tabs: Vec::new(),
             next_untitled: 0,
             untitled_folders: Default::default(),
@@ -646,26 +636,10 @@ impl Editor {
         cx.notify();
     }
 
-    /// Puts `next` in the focused pane; the doc it replaces stays open if
-    /// another pane shows it.
-    fn show_doc(&mut self, mut next: Doc) {
-        std::mem::swap(&mut self.buffer, &mut next.buffer);
-        std::mem::swap(&mut self.source, &mut next.source);
-        std::mem::swap(&mut self.autosave, &mut next.autosave);
-        std::mem::swap(&mut self.autosave_task, &mut next.autosave_task);
-        std::mem::swap(&mut self.notice, &mut next.notice);
-        std::mem::swap(&mut self.tree, &mut next.tree);
-        std::mem::swap(&mut self.code_cache, &mut next.code_cache);
-        std::mem::swap(&mut self.line_cache, &mut next.line_cache);
-        std::mem::swap(&mut self.table_cache, &mut next.table_cache);
-        std::mem::swap(&mut self.image_paths, &mut next.image_paths);
-        self.set_pane_note();
-        self.park_or_drop(next);
-        self.wraps.borrow_mut().clear();
-        self.scroll_x.set(px(0.));
-        self.vim.set_cursor(0);
-        self.vim.clear_jumps();
-        self.lines.reset(self.buffer.text().len_lines());
+    /// Opens `next` in the focused pane, as a tab of its own (ADR-0014).
+    fn show_doc(&mut self, next: Doc) {
+        // A new tab in the focused pane (or its tab for the note).
+        self.open_in_tab(next);
     }
 
     /// Takes settings into use: the view and line numbers here, the theme,
