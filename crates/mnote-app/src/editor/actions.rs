@@ -52,10 +52,25 @@ impl Editor {
         }
     }
 
-    /// `:w [path]` (and ⌘S): saves now.
+    /// `:w [path]` (and ⌘S): saves now. An untitled note opens the save
+    /// prompt; with a path it's named (and a scratch note too); a note
+    /// with a name writes a copy there.
     pub(super) fn write_command(&mut self, call: &Invocation, cx: &mut Context<Self>) {
-        if call.args.is_some() {
-            self.reply = Some(("Writing to another file isn't supported yet".into(), true));
+        let path = call
+            .args
+            .as_deref()
+            .map(str::trim)
+            .filter(|a| !a.is_empty());
+        if let Some(path) = path {
+            match self.source {
+                Source::Untitled(_) | Source::Scratch => self.save_as(Some(path), call.bang, cx),
+                Source::Note { .. } => self.write_copy(path, call.bang),
+                Source::Config(_) => {
+                    self.reply = Some(("config.toml stays where it is".into(), true));
+                }
+            }
+        } else if matches!(self.source, Source::Untitled(_)) {
+            self.save_prompt(cx);
         } else if let Err(err) = self.write(cx) {
             self.reply = Some((err.into(), true));
         } else if let Source::Note { note, .. } = &self.source {
@@ -136,7 +151,7 @@ impl Editor {
 
     /// `:w`: saves now. A scratch note has nowhere to go.
     pub(super) fn write(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
-        if matches!(self.source, Source::Scratch) {
+        if matches!(self.source, Source::Scratch | Source::Untitled(_)) {
             return Err("E32: No file name".into());
         }
         self.save_now(cx);
@@ -152,22 +167,41 @@ impl Editor {
     /// `:q`, `:wq`, `:x`. Notes autosave, so quitting saves them first; only
     /// unsaved scratch text needs `!` to throw away.
     pub(super) fn quit(&mut self, write: bool, force: bool, cx: &mut Context<Self>) {
-        // With split panes, `:q` closes the focused one (notes autosave).
-        if self.panes.len() > 1 {
+        // `:wq` on an untitled note names it first.
+        if write && matches!(self.source, Source::Untitled(_)) {
+            return self.save_prompt(cx);
+        }
+        let unsaved = matches!(self.source, Source::Scratch | Source::Untitled(_))
+            && self.buffer.is_dirty()
+            && self.buffer.len_chars() > 0;
+        // With split panes, `:q` closes the focused one (notes autosave);
+        // the last pane of a tab closes the tab.
+        if self.panes.len() > 1 || self.last_pane_of_a_tab() {
             if write && let Err(err) = self.write(cx) {
                 self.reply = Some((err.into(), true));
                 return;
             }
+            if unsaved && !force && !self.shown_elsewhere(&self.source.doc_key()) {
+                self.reply = Some((
+                    "E37: No write since last change (add ! to override)".into(),
+                    true,
+                ));
+                return;
+            }
             self.save_now(cx);
-            self.close_pane(cx);
+            if self.panes.len() > 1 {
+                self.close_pane(cx);
+            } else {
+                self.close_tab(self.tabs.current(), cx);
+            }
             return;
         }
         let result = match self.source {
             Source::Scratch if write => Err("E32: No file name".to_owned()),
-            Source::Scratch if self.buffer.is_dirty() && !force => {
+            Source::Scratch | Source::Untitled(_) if unsaved && !force => {
                 Err("E37: No write since last change (add ! to override)".to_owned())
             }
-            Source::Scratch => Ok(()),
+            Source::Scratch | Source::Untitled(_) => Ok(()),
             Source::Note { .. } | Source::Config(_) => self.write(cx),
         };
         match result {
@@ -175,6 +209,22 @@ impl Editor {
             Err(_) if force => cx.quit(),
             Err(err) => self.reply = Some((err.into(), true)),
         }
+    }
+
+    /// `:qa`, `:wqa`, `:xa`: closes every tab and quits. Unsaved scratch or
+    /// untitled text anywhere needs `!`.
+    pub(super) fn quit_all(&mut self, write: bool, force: bool, cx: &mut Context<Self>) {
+        self.save_now(cx);
+        if !force && let Some(name) = self.unsaved_anywhere() {
+            let err = if write {
+                format!("E141: No file name for {name}")
+            } else {
+                format!("E37: No write since last change in {name} (add ! to override)")
+            };
+            self.reply = Some((err.into(), true));
+            return;
+        }
+        cx.quit();
     }
 
     /// Switches the view and says which it is.

@@ -275,6 +275,70 @@ pub fn builtin() -> Vec<Command> {
             .ex("only", 2, ArgKind::None),
             'o',
         ),
+        Command::new(
+            "tab-new",
+            "New tab",
+            "A new tab after this one, on the note named or an untitled note.",
+            act(|e, call, cx| e.tab_new(call.args.as_deref(), cx)),
+        )
+        .shown_as("tabnew")
+        .ex("tabnew", 6, ArgKind::Note),
+        Command::new(
+            "tab-next",
+            "Next tab",
+            "Shows the next tab, round the window; :tabnext N shows tab N, # the last used.",
+            act(|e, call, cx| e.tab_next(call.args.as_deref(), cx)),
+        )
+        .shown_as("tabnext")
+        .ex("tabnext", 4, ArgKind::Any),
+        Command::new(
+            "tab-previous",
+            "Previous tab",
+            "Shows the previous tab, round the window; :tabprevious N goes back N.",
+            act(|e, call, cx| e.tab_previous(call.args.as_deref(), cx)),
+        )
+        .shown_as("tabprevious")
+        .ex("tabprevious", 4, ArgKind::Any),
+        Command::new(
+            "tab-close",
+            "Close tab",
+            "Closes this tab and its panes (or tab N); the last-used tab shows. :tabreopen brings it back.",
+            act(|e, call, cx| e.tab_close(call.args.as_deref(), call.bang, cx)),
+        )
+        .shown_as("tabclose")
+        .ex("tabclose", 4, ArgKind::Any),
+        Command::new(
+            "tab-only",
+            "Close other tabs",
+            "Closes every tab but this one.",
+            act(|e, call, cx| e.tab_only(call.bang, cx)),
+        )
+        .shown_as("tabonly")
+        .ex("tabonly", 4, ArgKind::None),
+        Command::new(
+            "tab-reopen",
+            "Reopen closed tab",
+            "Brings back the tab closed last, with its panes, where it was.",
+            act(|e, _, cx| e.tab_reopen(cx)),
+        )
+        .shown_as("tabreopen")
+        .ex("tabreopen", 6, ArgKind::None),
+        Command::new(
+            "tab-list",
+            "List tabs",
+            "Every tab and the notes of its panes; > marks the focused pane, + unsaved text.",
+            act(|e, _, _| e.tab_list()),
+        )
+        .shown_as("tabs")
+        .ex("tabs", 4, ArgKind::None),
+        Command::new(
+            "save-as",
+            "Save as",
+            "Saves the note under another path, which it is from then on; an untitled note gets its name.",
+            act(|e, call, cx| e.save_as(call.args.as_deref(), call.bang, cx)),
+        )
+        .shown_as("saveas")
+        .ex("saveas", 3, ArgKind::Note),
         pane(
             Command::new(
                 "pane-next",
@@ -433,6 +497,62 @@ pub fn builtin() -> Vec<Command> {
             ArgKind::None,
             "Saves and closes mNote.",
             act(|e, call, cx| e.quit(true, call.bang, cx)),
+        ),
+        Command::ex_only(
+            "tabedit",
+            4,
+            ArgKind::Note,
+            "Opens a note in a new tab after this one.",
+            act(|e, call, cx| e.tab_new(call.args.as_deref(), cx)),
+        ),
+        Command::ex_only(
+            "tabNext",
+            4,
+            ArgKind::Any,
+            "Shows the previous tab.",
+            act(|e, call, cx| e.tab_previous(call.args.as_deref(), cx)),
+        ),
+        Command::ex_only(
+            "tabfirst",
+            6,
+            ArgKind::None,
+            "Shows the first tab.",
+            act(|e, _, cx| e.tab_edge(false, cx)),
+        ),
+        Command::ex_only(
+            "tabrewind",
+            4,
+            ArgKind::None,
+            "Shows the first tab.",
+            act(|e, _, cx| e.tab_edge(false, cx)),
+        ),
+        Command::ex_only(
+            "tablast",
+            4,
+            ArgKind::None,
+            "Shows the last tab.",
+            act(|e, _, cx| e.tab_edge(true, cx)),
+        ),
+        Command::ex_only(
+            "qall",
+            2,
+            ArgKind::None,
+            "Closes every tab and quits mNote.",
+            act(|e, call, cx| e.quit_all(false, call.bang, cx)),
+        ),
+        Command::ex_only(
+            "wqall",
+            3,
+            ArgKind::None,
+            "Saves every note, closes every tab and quits mNote.",
+            act(|e, call, cx| e.quit_all(true, call.bang, cx)),
+        ),
+        Command::ex_only(
+            "xall",
+            2,
+            ArgKind::None,
+            "Saves every note, closes every tab and quits mNote.",
+            act(|e, call, cx| e.quit_all(true, call.bang, cx)),
         ),
         Command::ex_only(
             "edit",

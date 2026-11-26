@@ -5,6 +5,10 @@ use super::*;
 
 impl Editor {
     pub(super) fn schedule_autosave(&mut self, cx: &mut Context<Self>) {
+        // An untitled note has nowhere to save: its text is kept as a draft.
+        if matches!(self.source, Source::Untitled(_)) {
+            return self.schedule_draft(cx);
+        }
         // With `autosave = false` notes save on `:w` / `⌘S` and when left.
         if matches!(self.source, Source::Scratch) || !self.config.autosave {
             return;

@@ -277,6 +277,40 @@ impl Editor {
         }));
     }
 
+    /// `MNOTE_SCRIPT=file`: plays the file's lines into this window, for
+    /// end-to-end checks (`tools/check-tabs.sh`), then quits. A line is keys
+    /// in Vim's notation (`:tabnew<CR>`, `<C-w>v`), `state` (prints the
+    /// tabs, panes and text as `mnote state: …`) or `# a comment`.
+    pub fn run_script(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        let lines: Vec<String> = std::fs::read_to_string(&path)
+            .map(|t| t.lines().map(str::to_owned).collect())
+            .unwrap_or_default();
+        self._tasks.push(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            for line in lines {
+                let line = line.trim().to_owned();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let _ = this.update(cx, |this, cx| {
+                    if line == "state" {
+                        eprintln!("mnote state: {}", this.state_line());
+                    } else {
+                        for key in mnote_vim::parse_keys(&line) {
+                            this.press(key, cx);
+                        }
+                    }
+                });
+                cx.background_executor()
+                    .timer(Duration::from_millis(60))
+                    .await;
+            }
+            let _ = this.update(cx, |_, cx| cx.quit());
+        }));
+    }
+
     /// `MNOTE_LATENCY_BENCH=n`: types `n` characters into this window, one
     /// every 25 ms, then prints keystroke-to-pixels times and quits. The
     /// time splits into mNote's work (handling, render, layout, paint),

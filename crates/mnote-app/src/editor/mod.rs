@@ -30,6 +30,8 @@ mod plugins;
 mod saving;
 mod services;
 mod styled;
+mod tabs;
+mod untitled;
 mod view;
 
 use std::cell::RefCell;
@@ -182,8 +184,18 @@ pub struct Editor {
     focused: PaneId,
     layout: Layout,
     next_pane: u32,
-    /// Open notes other than the focused pane's.
+    /// Open notes other than the focused pane's, shared by every tab.
     parked: Vec<Doc>,
+    /// The tabs' order, and the tabs other than the current one (whose
+    /// panes are the fields above).
+    tabs: tabs::TabSet,
+    tab_pages: Vec<tabs::TabPage>,
+    /// Closed tabs, for `:tabreopen`.
+    closed_tabs: Vec<tabs::ClosedTab>,
+    /// The last untitled note's number, and the folder each one was
+    /// opened from (where the save prompt suggests it goes).
+    next_untitled: u32,
+    untitled_folders: std::collections::HashMap<u32, String>,
     /// Which notes each edit group spanning several notes touched, so `u`
     /// in one carries to the others.
     edit_groups: mnote_core::text::GroupDocs<DocKey>,
@@ -428,6 +440,11 @@ impl Editor {
             layout: Layout::Pane(PaneId(0)),
             next_pane: 1,
             parked: Vec::new(),
+            tabs: Default::default(),
+            tab_pages: Vec::new(),
+            closed_tabs: Vec::new(),
+            next_untitled: 0,
+            untitled_folders: Default::default(),
             edit_groups: Default::default(),
             drawing_other: false,
             drawing_pane: PaneId(0),
@@ -835,6 +852,7 @@ impl Editor {
     fn path_segments(&self) -> Vec<SharedString> {
         match &self.source {
             Source::Scratch => vec![SharedString::new_static("scratch")],
+            Source::Untitled(n) => vec![panes::untitled_name(*n).into()],
             Source::Config(_) => vec![
                 SharedString::new_static("settings"),
                 SharedString::new_static("config.toml"),

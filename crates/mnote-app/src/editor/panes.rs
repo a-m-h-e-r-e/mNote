@@ -25,6 +25,9 @@ pub(super) enum Source {
     },
     /// mNote's own `config.toml` (`space ,`), outside the vault.
     Config(std::path::PathBuf),
+    /// A note with no name yet (`:tabnew`): kept as a draft until the save
+    /// prompt names it.
+    Untitled(u32),
 }
 
 impl Source {
@@ -32,7 +35,7 @@ impl Source {
     pub(super) fn key(&self) -> Option<&NotePath> {
         match self {
             Source::Note { note, .. } => Some(note),
-            Source::Scratch | Source::Config(_) => None,
+            Source::Scratch | Source::Config(_) | Source::Untitled(_) => None,
         }
     }
 
@@ -42,6 +45,7 @@ impl Source {
             Source::Scratch => DocKey::Scratch,
             Source::Note { note, .. } => DocKey::Note(note.clone()),
             Source::Config(_) => DocKey::Config,
+            Source::Untitled(n) => DocKey::Untitled(*n),
         }
     }
 }
@@ -52,6 +56,28 @@ pub enum DocKey {
     Scratch,
     Note(NotePath),
     Config,
+    Untitled(u32),
+}
+
+impl DocKey {
+    /// How lists and the status line name it.
+    pub fn label(&self) -> String {
+        match self {
+            DocKey::Note(note) => note.file_name().to_owned(),
+            DocKey::Scratch => "scratch".to_owned(),
+            DocKey::Config => "config.toml".to_owned(),
+            DocKey::Untitled(n) => untitled_name(*n),
+        }
+    }
+}
+
+/// `untitled`, then `untitled 2`, `untitled 3`…
+pub fn untitled_name(n: u32) -> String {
+    if n <= 1 {
+        "untitled".to_owned()
+    } else {
+        format!("untitled {n}")
+    }
 }
 
 /// An open note that isn't the focused pane's: everything the editor keeps
@@ -280,7 +306,7 @@ use super::Editor;
 
 impl Editor {
     /// Swaps the focused note's state with `doc`'s.
-    fn swap_doc(&mut self, doc: &mut Doc) {
+    pub(super) fn swap_doc(&mut self, doc: &mut Doc) {
         std::mem::swap(&mut self.buffer, &mut doc.buffer);
         std::mem::swap(&mut self.source, &mut doc.source);
         std::mem::swap(&mut self.autosave, &mut doc.autosave);
@@ -294,7 +320,7 @@ impl Editor {
     }
 
     /// Swaps the focused pane's scroll, view and cursor with `local`'s.
-    fn swap_local(&mut self, local: &mut PaneLocal) {
+    pub(super) fn swap_local(&mut self, local: &mut PaneLocal) {
         std::mem::swap(&mut self.lines, &mut local.lines);
         std::mem::swap(&mut self.view, &mut local.view);
         std::mem::swap(&mut self.scroll_x, &mut local.scroll_x);
@@ -312,10 +338,11 @@ impl Editor {
     }
 
     /// Whether a pane other than the focused one shows `note`.
-    fn shown_elsewhere(&self, key: &DocKey) -> bool {
+    pub(super) fn shown_elsewhere(&self, key: &DocKey) -> bool {
         self.panes
             .iter()
             .any(|p| p.id != self.focused && p.note == *key)
+            || self.shown_in_other_tabs(key)
     }
 
     /// A new doc for `buffer`, redrawing when its background parse lands.
@@ -340,7 +367,9 @@ impl Editor {
     pub(super) fn park_or_drop(&mut self, mut old: Doc) {
         let key = old.source.doc_key();
         // A note in an edit group stays, so `u` elsewhere can reach it.
-        if self.shown_elsewhere(&key) || self.edit_groups.contains(&key) {
+        // So does an untitled note with text: it's kept, as its draft is.
+        let untitled_text = matches!(key, DocKey::Untitled(_)) && old.buffer.len_chars() > 0;
+        if self.shown_elsewhere(&key) || self.edit_groups.contains(&key) || untitled_text {
             old.autosave_task = None;
             self.parked.push(old);
         }
@@ -420,7 +449,8 @@ impl Editor {
             let slot = self.panes.remove(i);
             // Its note's doc goes if no pane shows it any more.
             let still_shown = slot.note == self.source.doc_key()
-                || self.panes.iter().any(|p| p.note == slot.note);
+                || self.panes.iter().any(|p| p.note == slot.note)
+                || self.shown_in_other_tabs(&slot.note);
             if !still_shown
                 && !self.edit_groups.contains(&slot.note)
                 && let Some(d) = self.parked_index(&slot.note)
@@ -439,8 +469,16 @@ impl Editor {
         self.layout = Layout::Pane(focused);
         // Parked docs were saved when they were parked; those in an edit
         // group stay for its undo.
-        let groups = &self.edit_groups;
-        self.parked.retain(|d| groups.contains(&d.source.doc_key()));
+        let keep: Vec<bool> = self
+            .parked
+            .iter()
+            .map(|d| {
+                let key = d.source.doc_key();
+                self.edit_groups.contains(&key) || self.shown_in_other_tabs(&key)
+            })
+            .collect();
+        let mut keep = keep.into_iter();
+        self.parked.retain(|_| keep.next().unwrap_or(true));
         cx.notify();
     }
 
@@ -609,11 +647,7 @@ impl Editor {
             .into_iter()
             .filter(|&id| id != self.focused)
             .filter_map(|id| self.slot(id))
-            .map(|i| match &self.panes[i].note {
-                DocKey::Note(note) => note.file_name().to_owned(),
-                DocKey::Scratch => "scratch".to_owned(),
-                DocKey::Config => "config.toml".to_owned(),
-            })
+            .map(|i| self.panes[i].note.label())
             .collect()
     }
 }

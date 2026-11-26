@@ -282,12 +282,16 @@ impl Render for Editor {
         let column = cursor - line_start(rope, line);
         let file = match &self.source {
             Source::Scratch => SharedString::new_static("scratch (not saved)"),
+            Source::Untitled(n) => format!("{} (not saved)", panes::untitled_name(*n)).into(),
             Source::Config(_) => SharedString::new_static("config.toml"),
             Source::Note { note, .. } => note.file_name().to_owned().into(),
         };
         let view = cx.entity();
 
         let mut status = StatusLine::new(self.vim.mode()).file(file);
+        if let Some(tab) = self.tab_position() {
+            status = status.item(tab);
+        }
         // A code file says its language (`:setf` changes it).
         if self.is_code_file() {
             status = status.item(self.buffer.language().unwrap_or("plain text").to_owned());

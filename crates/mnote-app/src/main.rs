@@ -118,6 +118,10 @@ fn main() {
                     if let Some(problem) = problem {
                         editor.show_notice(problem, cx);
                     }
+                    // `MNOTE_SCRIPT=file`: plays keys from a file (checks).
+                    if let Some(script) = std::env::var_os("MNOTE_SCRIPT") {
+                        editor.run_script(script.into(), cx);
+                    }
                     // `MNOTE_LATENCY_BENCH=200`: types into the window and
                     // prints keystroke-to-pixels times.
                     if let Some(keys) = std::env::var("MNOTE_LATENCY_BENCH")
