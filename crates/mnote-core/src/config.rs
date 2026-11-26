@@ -414,7 +414,7 @@ impl Default for Config {
             relative_numbers: true,
             daily_note: "journal/{date}.md".into(),
             git_blame: false,
-            font: "IBM Plex Mono".into(),
+            font: "Lilex".into(),
             ui_font: "IBM Plex Sans".into(),
             font_size: 15,
             ui_font_size: 15,

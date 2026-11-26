@@ -1,8 +1,9 @@
-//! The two font families mNote ships inside the binary: IBM Plex Mono for note
-//! text and the app's mono labels (Zed's editor font is a version of it), and
-//! IBM Plex Sans for lists and dialogs.
+//! The font families mNote ships inside the binary: Lilex for note text and
+//! the app's mono labels (Zed's editor font, `.ZedMono`), IBM Plex Mono for
+//! those who choose it (`font = "IBM Plex Mono"`), and IBM Plex Sans for
+//! lists and dialogs.
 //!
-//! Both are under the SIL Open Font License 1.1; the licence texts sit next to
+//! All are under the SIL Open Font License 1.1; the licence texts sit next to
 //! the files in `assets/fonts/`.
 
 use std::borrow::Cow;
@@ -21,6 +22,10 @@ macro_rules! font {
 
 /// Every embedded font file, by file name.
 pub const FILES: &[(&str, &[u8])] = &[
+    ("Lilex-Regular.ttf", font!("Lilex-Regular.ttf")),
+    ("Lilex-Medium.ttf", font!("Lilex-Medium.ttf")),
+    ("Lilex-Italic.ttf", font!("Lilex-Italic.ttf")),
+    ("Lilex-SemiBold.ttf", font!("Lilex-SemiBold.ttf")),
     ("IBMPlexMono-Regular.ttf", font!("IBMPlexMono-Regular.ttf")),
     ("IBMPlexMono-Medium.ttf", font!("IBMPlexMono-Medium.ttf")),
     // Italics: preview tabs, and emphasis in notes.
@@ -67,6 +72,6 @@ mod tests {
     #[test]
     fn fonts_stay_small() {
         let total: usize = FILES.iter().map(|(_, b)| b.len()).sum();
-        assert!(total < 2 * 1024 * 1024, "bundled fonts are {total} bytes");
+        assert!(total < 3 * 1024 * 1024, "bundled fonts are {total} bytes");
     }
 }

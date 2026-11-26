@@ -191,7 +191,7 @@ pub const SHADOW_MODAL_LIGHT: &[ShadowLayer] = &[
 /// Font families: the first family in each design-system stack.
 pub mod family {
     pub const PROSE: &str = "IBM Plex Sans";
-    pub const MONO: &str = "IBM Plex Mono";
+    pub const MONO: &str = "Lilex";
 }
 
 /// Which family a text style uses.

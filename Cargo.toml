@@ -63,6 +63,10 @@ unsafe_code = "deny"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 
+[profile.release]
+# Without symbols: they are 3.6 MB of the 25 MB budget.
+strip = true
+
 [profile.dev]
 # Line tables are enough for backtraces and keep gpui debug builds a fraction of the size.
 debug = "line-tables-only"

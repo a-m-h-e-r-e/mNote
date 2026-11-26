@@ -58,7 +58,7 @@ impl View {
     }
 }
 
-/// Width of one character of note text: IBM Plex Mono's 0.6 em, at the
+/// Width of one character of note text: 0.6 em, as in Lilex and IBM Plex Mono, at the
 /// note's size (other mono fonts are close).
 pub fn char_w() -> f32 {
     9.6 * crate::theme::note_scale()
