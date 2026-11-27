@@ -530,6 +530,22 @@ impl Buffer {
         }
     }
 
+    /// A snapshot of the syntax for the current text, without waiting (see
+    /// [`mnote_lang::view`]): what Vim's syntax-aware hooks and the editing
+    /// services read. `None` without a grammar or before the first parse.
+    pub fn syntax_snapshot(&mut self) -> Option<mnote_lang::view::SyntaxSnapshot> {
+        let rope = &self.rope;
+        let language = self.language.clone()?;
+        let syntax = self.syntax.as_mut()?;
+        let root = syntax.tree(rope)?.clone();
+        Some(mnote_lang::view::SyntaxSnapshot::new(
+            rope.clone(),
+            &language,
+            root,
+            syntax.layers(rope),
+        ))
+    }
+
     /// Switches to `language` (`:setfiletype`): its parser from now on, or
     /// plain text without a grammar. A waker set before is dropped; set it
     /// again with [`Self::on_syntax_ready`].

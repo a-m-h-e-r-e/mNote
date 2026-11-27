@@ -1900,6 +1900,13 @@ impl Vim {
 
     fn run_motion(&mut self, motion: Motion, buf: &mut Buffer) -> Effect {
         let count = self.take_count();
+        // Only a motion that reads the syntax costs a snapshot.
+        let syntax = if motion.wants_syntax() {
+            buf.syntax_snapshot()
+        } else {
+            None
+        };
+        let syntax = syntax.as_ref();
         let text = buf.text();
         if self.op.is_some() {
             // `cw` on a word changes to its end, like `ce` (Vim's special case).
@@ -1916,7 +1923,7 @@ impl Vim {
                 return self.arrive(Some(target), false, buf);
             }
             let past_end = matches!(motion, Motion::Right);
-            let target = motion.apply(text, self.cursor, count, None, past_end);
+            let target = motion.apply(text, syntax, self.cursor, count, None, past_end);
             self.macros.failed |= stuck(text, motion, self.cursor, target);
             return self.arrive(target, is_jump(motion), buf);
         }
@@ -1929,7 +1936,7 @@ impl Vim {
             }
         }
         let past_end = self.mode != Mode::Normal;
-        let target = motion.apply(text, self.cursor, count, self.want_col, past_end);
+        let target = motion.apply(text, syntax, self.cursor, count, self.want_col, past_end);
         self.macros.failed |= stuck(text, motion, self.cursor, target);
         self.arrive(target, is_jump(motion), buf)
     }
@@ -1973,9 +1980,14 @@ impl Vim {
 
     fn text_object(&mut self, obj: char, around: bool, buf: &mut Buffer) -> Effect {
         let count = self.take_count().unwrap_or(1);
+        let ext = crate::ext::text_object(obj);
+        let syntax = match &ext {
+            Some(run) if run.wants_syntax() => buf.syntax_snapshot(),
+            _ => None,
+        };
         let text = buf.text();
-        let sel = match crate::ext::text_object(obj) {
-            Some(run) => run(text, self.cursor, around, count),
+        let sel = match ext {
+            Some(run) => run.run(text, syntax.as_ref(), self.cursor, around, count),
             None => textobj::select(text, self.cursor, obj, around, count),
         };
         let Some(sel) = sel else {

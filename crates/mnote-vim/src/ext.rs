@@ -9,6 +9,11 @@
 //! What extensions do counts like the built-ins: an operator's edits are
 //! one undo step and `.` repeats it, a motion works after any operator and
 //! in VISUAL, and a text object after `i` / `a`.
+//!
+//! Motions and text objects that need the syntax (a function's start,
+//! `af`) register as syntax-aware and are handed a [`SyntaxSnapshot`] of
+//! the buffer, taken only when one of them runs. Operators get the buffer
+//! itself, so they take one with [`Buffer::syntax_snapshot`].
 
 use std::cell::RefCell;
 use std::ops::{Range, RangeInclusive};
@@ -16,6 +21,8 @@ use std::rc::Rc;
 
 use mnote_core::Buffer;
 use ropey::Rope;
+
+pub use mnote_core::lang::view::{Capture, SyntaxNode, SyntaxSnapshot};
 
 use crate::Vim;
 use crate::ex::{CommandSpec, ExError};
@@ -28,6 +35,69 @@ pub type MotionFn = Rc<dyn Fn(&Rope, usize, usize) -> Option<Target>>;
 
 /// The text object at `pos`: `around` for `a…`, `count` for `2i(`.
 pub type TextObjectFn = Rc<dyn Fn(&Rope, usize, bool, usize) -> Option<Selection>>;
+
+/// A motion that reads the syntax: as [`MotionFn`], with the buffer's
+/// syntax (`None` without a grammar, or before its first parse).
+pub type SyntaxMotionFn =
+    Rc<dyn Fn(&Rope, Option<&SyntaxSnapshot>, usize, usize) -> Option<Target>>;
+
+/// A text object that reads the syntax: as [`TextObjectFn`], with the
+/// buffer's syntax as for [`SyntaxMotionFn`].
+pub type SyntaxTextObjectFn =
+    Rc<dyn Fn(&Rope, Option<&SyntaxSnapshot>, usize, bool, usize) -> Option<Selection>>;
+
+/// A registered motion: plain, or reading the syntax.
+#[derive(Clone)]
+pub(crate) enum MotionRun {
+    Plain(MotionFn),
+    Syntax(SyntaxMotionFn),
+}
+
+impl MotionRun {
+    pub(crate) fn wants_syntax(&self) -> bool {
+        matches!(self, MotionRun::Syntax(_))
+    }
+
+    pub(crate) fn run(
+        &self,
+        text: &Rope,
+        syntax: Option<&SyntaxSnapshot>,
+        pos: usize,
+        count: usize,
+    ) -> Option<Target> {
+        match self {
+            MotionRun::Plain(f) => f(text, pos, count),
+            MotionRun::Syntax(f) => f(text, syntax, pos, count),
+        }
+    }
+}
+
+/// A registered text object, the same way.
+#[derive(Clone)]
+pub(crate) enum ObjectRun {
+    Plain(TextObjectFn),
+    Syntax(SyntaxTextObjectFn),
+}
+
+impl ObjectRun {
+    pub(crate) fn wants_syntax(&self) -> bool {
+        matches!(self, ObjectRun::Syntax(_))
+    }
+
+    pub(crate) fn run(
+        &self,
+        text: &Rope,
+        syntax: Option<&SyntaxSnapshot>,
+        pos: usize,
+        around: bool,
+        count: usize,
+    ) -> Option<Selection> {
+        match self {
+            ObjectRun::Plain(f) => f(text, pos, around, count),
+            ObjectRun::Syntax(f) => f(text, syntax, pos, around, count),
+        }
+    }
+}
 
 /// An operator on `range` (whole lines when `linewise`). It edits through
 /// [`Vim::replace`] or [`Vim::edit_text`]; the whole run is one undo step.
@@ -77,7 +147,7 @@ impl Keys {
 struct MotionExt {
     keys: Keys,
     jump: bool,
-    run: MotionFn,
+    run: MotionRun,
 }
 
 struct OperatorExt {
@@ -95,7 +165,7 @@ pub(crate) struct ExExt {
 #[derive(Default)]
 struct Registry {
     motions: Vec<MotionExt>,
-    objects: Vec<(char, TextObjectFn)>,
+    objects: Vec<(char, ObjectRun)>,
     operators: Vec<OperatorExt>,
     commands: Vec<Rc<ExExt>>,
 }
@@ -107,6 +177,15 @@ thread_local! {
 /// Adds a motion on `keys` (`"x"` or `"gx"`); `jump` makes it a jump (`''`
 /// comes back). Returns `false` for keys it can't take.
 pub fn register_motion(keys: &str, jump: bool, run: MotionFn) -> bool {
+    add_motion(keys, jump, MotionRun::Plain(run))
+}
+
+/// Adds a motion that reads the syntax, as [`register_motion`].
+pub fn register_syntax_motion(keys: &str, jump: bool, run: SyntaxMotionFn) -> bool {
+    add_motion(keys, jump, MotionRun::Syntax(run))
+}
+
+fn add_motion(keys: &str, jump: bool, run: MotionRun) -> bool {
     let Some(keys) = Keys::parse(keys) else {
         return false;
     };
@@ -120,6 +199,16 @@ pub fn register_motion(keys: &str, jump: bool, run: MotionFn) -> bool {
 
 /// Adds a text object, used after `i` and `a` (`dix`, `vax`).
 pub fn register_text_object(key: char, run: TextObjectFn) {
+    add_text_object(key, ObjectRun::Plain(run));
+}
+
+/// Adds a text object that reads the syntax (`af`), as
+/// [`register_text_object`].
+pub fn register_syntax_text_object(key: char, run: SyntaxTextObjectFn) {
+    add_text_object(key, ObjectRun::Syntax(run));
+}
+
+fn add_text_object(key: char, run: ObjectRun) {
     REGISTRY.with(|r| {
         let mut r = r.borrow_mut();
         r.objects.retain(|(k, _)| *k != key);
@@ -185,7 +274,7 @@ pub(crate) fn motion_for(keys: Keys) -> Option<u16> {
     })
 }
 
-pub(crate) fn motion(id: u16) -> Option<(MotionFn, bool)> {
+pub(crate) fn motion(id: u16) -> Option<(MotionRun, bool)> {
     REGISTRY.with(|r| {
         r.borrow()
             .motions
@@ -194,7 +283,7 @@ pub(crate) fn motion(id: u16) -> Option<(MotionFn, bool)> {
     })
 }
 
-pub(crate) fn text_object(key: char) -> Option<TextObjectFn> {
+pub(crate) fn text_object(key: char) -> Option<ObjectRun> {
     REGISTRY.with(|r| {
         r.borrow()
             .objects
@@ -446,5 +535,74 @@ mod tests {
         check("|foo\nbar\n", "Avv<esc>j.", "foovv\nbarv|v\n");
         // A change made in VISUAL still isn't repeated.
         check("|abc\n", "vlxl.", "|c\n");
+    }
+
+    /// `Q`: to the start of the function around the cursor; `F`: the
+    /// function around it, from the syntax. Both read a snapshot.
+    fn syntax_hooks() {
+        clear();
+        let function = |syntax: Option<&SyntaxSnapshot>, pos: usize| {
+            syntax?
+                .nodes_at(pos)
+                .into_iter()
+                .find(|n| n.kind == "function_item")
+                .map(|n| n.range)
+        };
+        register_syntax_motion(
+            "Q",
+            true,
+            Rc::new(move |_, syntax, pos, _| {
+                Some(Target {
+                    pos: function(syntax, pos)?.start,
+                    kind: MotionKind::Exclusive,
+                    keep_column: false,
+                })
+            }),
+        );
+        register_syntax_text_object(
+            'F',
+            Rc::new(move |_, syntax, pos, _, _| {
+                Some(Selection {
+                    range: function(syntax, pos)?,
+                    linewise: false,
+                })
+            }),
+        );
+    }
+
+    /// Runs `keys` on Rust `text` with the cursor at `at` (after the parse).
+    fn rust(text: &str, at: &str, keys: &str) -> (String, usize) {
+        let mut buf = Buffer::with_language(text, "rust");
+        let _ = buf.syntax_tree_now();
+        let mut vim = Vim::new();
+        vim.set_cursor(text.find(at).expect("in the text"));
+        for key in crate::parse_keys(keys) {
+            vim.handle_key(key, &mut buf);
+        }
+        (buf.to_string(), vim.cursor())
+    }
+
+    #[test]
+    fn syntax_hooks_read_the_buffers_syntax() {
+        syntax_hooks();
+        let text = "struct S;\n\nfn go() {\n    let x = 1;\n}\n";
+        let (_, cursor) = rust(text, "x = 1", "Q");
+        assert_eq!(
+            cursor,
+            text.find("fn go").expect("fn"),
+            "Q goes to the function"
+        );
+        let (after, _) = rust(text, "x = 1", "diF");
+        assert_eq!(after, "struct S;\n\n\n", "diF deletes the function");
+        // Outside a function there's nothing to go to: the cursor stays.
+        let (_, cursor) = rust(text, "S;", "Q");
+        assert_eq!(cursor, text.find("S;").expect("S"));
+        // Without syntax (plain text) the hooks get none and fall back.
+        let mut buf = Buffer::new_plain(text);
+        let mut vim = Vim::new();
+        vim.set_cursor(text.find("x = 1").expect("x"));
+        vim.handle_key(crate::Key::Char('Q'), &mut buf);
+        assert_eq!(vim.cursor(), text.find("x = 1").expect("x"));
+        clear();
     }
 }

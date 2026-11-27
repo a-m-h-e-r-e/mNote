@@ -125,15 +125,26 @@ impl Motion {
         }
     }
 
+    /// Whether it's an extension motion that reads the syntax, which the
+    /// engine then takes a snapshot of for it.
+    pub fn wants_syntax(self) -> bool {
+        match self {
+            Motion::Custom(id) => crate::ext::motion(id).is_some_and(|(run, _)| run.wants_syntax()),
+            _ => false,
+        }
+    }
+
     /// Applies the motion `count` times (at least once) from `pos`.
     ///
     /// `want_col` is the column `j`/`k` aim for. `past_end` allows the cursor
     /// to stop after the last character of a line (insert and visual mode).
     /// Returns `None` when the motion can't move (an `f` with no match), so
-    /// the cursor stays put, as in Vim.
+    /// the cursor stays put, as in Vim. `syntax` is for an extension motion
+    /// that reads it ([`Motion::wants_syntax`]).
     pub fn apply(
         self,
         text: &Rope,
+        syntax: Option<&crate::ext::SyntaxSnapshot>,
         pos: usize,
         count: Option<usize>,
         want_col: Option<usize>,
@@ -142,7 +153,7 @@ impl Motion {
         let n = count.unwrap_or(1).max(1);
         if let Motion::Custom(id) = self {
             let (run, _) = crate::ext::motion(id)?;
-            return run(text, pos, n);
+            return run.run(text, syntax, pos, n);
         }
         let len = text.len_chars();
         let line = line_of(text, pos);
