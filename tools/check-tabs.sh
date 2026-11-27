@@ -461,6 +461,28 @@ expect outline 1 'overlay open'
 expect outline 2 'overlay none | mode NORMAL | reply - | folds - | line 6'
 expect outline 3 'line 1'
 
+# The context API (AMI-241): :context gathers on a background thread and
+# says what it found; asking for one provider gives only that.
+cat > "$SANDBOX/context.keys" <<'KEYS'
+:e f.rs<CR>
+wait 300
+2G
+:context<CR>
+wait 300
+state
+:context outline<CR>
+wait 300
+state
+:context nonsense<CR>
+state
+KEYS
+run context
+expect context 1 'reply Context: '
+expect context 1 'enclosing f.rs'
+expect context 2 'reply Context: 1 items'
+expect context 2 'outline f.rs'
+expect context 3 'reply No context provider nonsense'
+
 # Restoring: three runs on one vault, the session kept between them.
 printf 'vault = "%s"\nrestore_session = true\n' "$VAULT" > "$CONFIG"
 cat > "$SANDBOX/session1.keys" <<'KEYS'

@@ -8,6 +8,7 @@ pub mod blame;
 pub mod capture;
 pub mod config;
 pub mod content;
+pub mod context;
 mod error;
 pub mod files;
 pub mod folder_edit;

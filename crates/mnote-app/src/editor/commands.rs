@@ -143,6 +143,14 @@ pub fn builtin() -> Vec<Command> {
         .shown_as("outline")
         .ex("outline", 3, ArgKind::None),
         Command::new(
+            "context",
+            "Show context",
+            "What the context API gathers at the cursor (for completion, plugins and agents): each item's provider, document and size. :context links backlinks asks only those.",
+            act(|e, call, cx| e.show_context(call.args.as_deref(), cx)),
+        )
+        .shown_as("context")
+        .ex("context", 4, ArgKind::Any),
+        Command::new(
             "write",
             "Save note",
             "Saves now. Notes also save a second after you stop typing.",

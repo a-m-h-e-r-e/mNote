@@ -14,6 +14,7 @@ mod actions;
 pub mod blocks;
 mod code_files;
 pub mod commands;
+mod context;
 mod edit_groups;
 pub mod events;
 mod first_run;
@@ -236,6 +237,8 @@ pub struct Editor {
     outlines: std::collections::HashMap<DocKey, (u64, Rc<Vec<mnote_core::lang::outline::Symbol>>)>,
     /// Notes whose outline is being built in the background.
     outline_finding: std::collections::HashSet<DocKey>,
+    /// Tickets for context requests: a newer one cancels older ones.
+    context_cancel: mnote_core::context::Cancel,
     /// The unfocused pane being drawn (while `drawing_other`).
     drawing_pane: PaneId,
     /// Where a mouse drag started (a character), while the button is down.
@@ -495,6 +498,7 @@ impl Editor {
             fold_finding: RefCell::default(),
             outlines: Default::default(),
             outline_finding: Default::default(),
+            context_cancel: Default::default(),
             drawing_pane: PaneId(0),
             drag_anchor: None,
             map_task: None,

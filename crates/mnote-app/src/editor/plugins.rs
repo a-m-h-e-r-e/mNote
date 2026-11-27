@@ -210,6 +210,7 @@ const SCOPED: &[(&str, &str)] = &[
     ("", "undecorate"),
     ("clipboard", "get"),
     ("clipboard", "set"),
+    ("context", "get"),
 ];
 
 impl LuaHost {
@@ -633,6 +634,26 @@ impl LuaHost {
         )?;
 
         let source = self.source.clone();
+        // The context API (ADR-0011): plugins add providers, which
+        // `mnote.context.get` runs with the built-in ones.
+        let context = lua.create_table()?;
+        context.set("_providers", lua.create_table()?)?;
+        context.set(
+            "register",
+            lua.create_function(|lua, (name, f): (String, Function)| {
+                if mnote_core::context::PROVIDERS.contains(&name.as_str()) {
+                    return Err(mlua::Error::runtime(format!(
+                        "{name} is a built-in context provider; give yours another name"
+                    )));
+                }
+                let mnote: Table = lua.globals().get("mnote")?;
+                let context: Table = mnote.get("context")?;
+                let providers: Table = context.get("_providers")?;
+                providers.set(name, f)
+            })?,
+        )?;
+        mnote.set("context", context)?;
+
         let lang = lua.create_table()?;
         lang.set(
             "register",
@@ -751,8 +772,34 @@ impl LuaHost {
             let mnote: Table = self.lua.globals().get("mnote")?;
             let buf: Table = mnote.get("buf")?;
             let clipboard: Table = mnote.get("clipboard")?;
+            let context: Table = mnote.get("context")?;
             let e = &editor;
             let w = &window;
+            context.set(
+                "get",
+                scope.create_function(move |lua, opts: Option<Table>| {
+                    let request = context_request(opts.as_ref())?;
+                    // Taken first, so providers can read the editor too.
+                    let input = e.borrow_mut().context_input();
+                    let extra = plugin_context(lua, &request, &input)?;
+                    let answer = mnote_core::context::gather(&request, &input, extra, None)
+                        .unwrap_or_default();
+                    let out = lua.create_table()?;
+                    for (i, item) in answer.items.into_iter().enumerate() {
+                        let t = lua.create_table()?;
+                        t.set("kind", item.kind)?;
+                        t.set("document", item.document)?;
+                        t.set("text", item.text)?;
+                        t.set("priority", item.priority)?;
+                        if let Some(r) = item.range {
+                            t.set("from", r.start)?;
+                            t.set("to", r.end)?;
+                        }
+                        out.set(i + 1, t)?;
+                    }
+                    Ok(out)
+                })?,
+            )?;
             clipboard.set(
                 "get",
                 scope.create_function(move |_, ()| {
@@ -890,6 +937,79 @@ impl LuaHost {
         let _ = self.install_stubs();
         result
     }
+}
+
+/// A context request from `mnote.context.get`'s options: `{ providers,
+/// limit, unit }` (characters by default, 4000 of them).
+fn context_request(opts: Option<&Table>) -> mlua::Result<mnote_core::context::Request> {
+    use mnote_core::context::{Limit, Request};
+    let providers: Vec<String> = match opts {
+        Some(o) => o
+            .get::<Option<Vec<String>>>("providers")?
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let size = match opts {
+        Some(o) => o.get::<Option<usize>>("limit")?.unwrap_or(4000),
+        None => 4000,
+    };
+    let unit = match opts {
+        Some(o) => o.get::<Option<String>>("unit")?,
+        None => None,
+    };
+    let limit = match unit.as_deref() {
+        None | Some("chars") => Limit::Chars(size),
+        Some("lines") => Limit::Lines(size),
+        Some("tokens") => Limit::Tokens(size),
+        Some(other) => {
+            return Err(mlua::Error::runtime(format!(
+                "unit is \"chars\", \"lines\" or \"tokens\" (got {other:?})"
+            )));
+        }
+    };
+    Ok(Request { providers, limit })
+}
+
+/// The items plugins' providers give for `request`: each is called with
+/// `{ document, position, providers, limit }` and returns
+/// `{ { text, priority?, document?, from?, to? }, … }`.
+fn plugin_context(
+    lua: &Lua,
+    request: &mnote_core::context::Request,
+    input: &mnote_core::context::Input,
+) -> mlua::Result<Vec<mnote_core::context::Item>> {
+    let mnote: Table = lua.globals().get("mnote")?;
+    let context: Table = mnote.get("context")?;
+    let providers: Table = context.get("_providers")?;
+    let mut out = Vec::new();
+    for pair in providers.pairs::<String, Function>() {
+        let (name, f) = pair?;
+        if !request.wants(&name) {
+            continue;
+        }
+        let asked = lua.create_table()?;
+        asked.set("document", input.document.clone())?;
+        asked.set("position", input.position)?;
+        asked.set("limit", request.limit.size())?;
+        let Some(items) = f.call::<Option<Table>>(asked)? else {
+            continue;
+        };
+        for item in items.sequence_values::<Table>() {
+            let item = item?;
+            let from = item.get::<Option<usize>>("from")?;
+            let to = item.get::<Option<usize>>("to")?;
+            out.push(mnote_core::context::Item {
+                kind: name.clone(),
+                document: item
+                    .get::<Option<String>>("document")?
+                    .unwrap_or_else(|| input.document.clone()),
+                range: from.zip(to).map(|(a, b)| a..b),
+                text: item.get::<Option<String>>("text")?.unwrap_or_default(),
+                priority: item.get::<Option<i32>>("priority")?.unwrap_or(0),
+            });
+        }
+    }
+    Ok(out)
 }
 
 /// A line index from Lua: from the start, or negative from the end (`-1`
@@ -1815,6 +1935,16 @@ pub const API: &[(&str, &str, &str)] = &[
         "A pane's tabs in order (the focused pane's without `pane`): each one's note (its path; `untitled` for one with no name), whether it's shown, a preview, or holds text not in a file.",
     ),
     (
+        "mnote.context.get",
+        "({ providers, limit, unit }) -> { { kind, document, text, priority, from?, to? }, … }",
+        "What's around the cursor, for a plugin or an agent (ADR-0011): the selection, the enclosing function or section, recent edits, the outline, linked notes, backlinks, other open documents, and plugins' providers, highest priority first, trimmed to `limit` (4000 by default) `unit`s (`\"chars\"`, `\"lines\"` or `\"tokens\"`, about 4 characters). `providers` picks some by name. `from` and `to` are character offsets in `document`.",
+    ),
+    (
+        "mnote.context.register",
+        "(name, fn)",
+        "Adds a context provider: `fn` gets `{ document, position, limit }` and returns `{ { text, priority, document, from, to }, … }` (all but `text` optional), merged with the built-in ones by priority.",
+    ),
+    (
         "mnote.tab.open",
         "(path, { pane, preview })",
         "Opens a note as a tab of a pane (focusing it), as a preview if `preview`, once the function returns.",
@@ -2109,6 +2239,12 @@ mod tests {
         assert!(err.contains("one of"), "{err}");
         let err = host("mnote.tabs()").err().unwrap_or_default();
         assert!(err.contains("inside a command or a key"), "{err}");
+        let err = host("mnote.context.get()").err().unwrap_or_default();
+        assert!(err.contains("inside a command or a key"), "{err}");
+        let err = host(r#"mnote.context.register("outline", function() end)"#)
+            .err()
+            .unwrap_or_default();
+        assert!(err.contains("built-in context provider"), "{err}");
         // The clipboard needs the window: outside a call it says so.
         let err = host("mnote.clipboard.get()").err().unwrap_or_default();
         assert!(err.contains("inside a command or a key"), "{err}");
@@ -2139,6 +2275,73 @@ mod tests {
             mnote_core::filetype::for_path(std::path::Path::new("a.ptl")).map(|f| f.name),
             Some("plugin-test-lang".into())
         );
+    }
+
+    #[test]
+    fn plugin_context_providers_join_the_built_in_ones() {
+        use mnote_core::context::{Input, Limit, Request, gather};
+        let h = host(
+            r#"
+            mnote.context.register("tasks", function(asked)
+              return {
+                { text = "open task in " .. asked.document, priority = 200 },
+                { text = "low", priority = -5, document = "todo.md", from = 1, to = 4 },
+              }
+            end)
+            "#,
+        )
+        .expect("loads");
+        let input = Input {
+            document: "a.md".into(),
+            text: mnote_core::Rope::from_str("# A\n\nText.\n"),
+            revision: 0,
+            position: 6,
+            syntax: None,
+            selection: None,
+            edits: Vec::new(),
+            links: Vec::new(),
+            backlinks: vec![mnote_core::context::Other {
+                document: "b.md".into(),
+                text: "see [[a]]".into(),
+            }],
+            open: Vec::new(),
+        };
+        let request = Request {
+            providers: Vec::new(),
+            limit: Limit::Chars(1000),
+        };
+        let extra = plugin_context(&h.lua, &request, &input).expect("calls the provider");
+        assert_eq!(extra.len(), 2);
+        assert_eq!(extra[1].range, Some(1..4));
+        assert_eq!(extra[1].document, "todo.md");
+        let answer = gather(&request, &input, extra, None).expect("an answer");
+        let kinds: Vec<&str> = answer.items.iter().map(|i| i.kind.as_str()).collect();
+        assert_eq!(kinds, ["tasks", "backlinks", "tasks"]);
+        assert_eq!(answer.items[0].text, "open task in a.md");
+        // Only providers asked for run.
+        let only = Request {
+            providers: vec!["backlinks".into()],
+            limit: Limit::Chars(1000),
+        };
+        assert!(
+            plugin_context(&h.lua, &only, &input)
+                .expect("runs")
+                .is_empty()
+        );
+        // Options from Lua.
+        let lua = mlua::Lua::new();
+        let opts: mlua::Table = lua
+            .load(r#"return { providers = { "links" }, limit = 50, unit = "lines" }"#)
+            .eval()
+            .expect("a table");
+        let req = context_request(Some(&opts)).expect("reads");
+        assert_eq!(req.limit, Limit::Lines(50));
+        assert_eq!(req.providers, ["links"]);
+        let bad: mlua::Table = lua
+            .load(r#"return { unit = "words" }"#)
+            .eval()
+            .expect("a table");
+        assert!(context_request(Some(&bad)).is_err());
     }
 
     #[test]
