@@ -421,7 +421,7 @@ After these, the AI design starts from a finished base: `mnote-ai` adds provider
 
 ## Open questions
 
-- Folding needs the view to hide lines; is that in 1b or its own phase?
-- Should `.editorconfig` be read (it's what other editors use for indent settings)?
+- ~~Folding needs the view to hide lines; is that in 1b or its own phase?~~ Decided in 1b (AMI-239): closed folds' lines draw at zero height, so line numbers stay as they are everywhere; the scrollbar counts a fold as one row. `zz`/`zt`/`zb` still count hidden lines.
+- Should `.editorconfig` be read (it's what other editors use for indent settings)? Not in 1b: each document's indent comes from its language pack and `:set` (AMI-234); `.editorconfig` can feed the same settings later.
 - Format on save: off by default, or on when the language has a formatter?
 - `review_edits`: off by default (as VS Code and Helix apply workspace edits at once), or on for edits that touch files that aren't open?

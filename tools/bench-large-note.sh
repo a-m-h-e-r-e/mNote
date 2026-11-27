@@ -1,13 +1,18 @@
 #!/bin/sh
 # Keystroke latency on a large note (336 KB of long lines), wrapped and not,
-# and on a 1 MB Rust file; then switching tabs (AMI-224): 3 panes × 8 tabs
-# on 1 MB notes, `gt` 200 times. Runs a release build in a throwaway HOME
-# (your own notes and config are never touched) and fails if mNote's own
-# work goes over budget at p95: 8 ms per key, 16 ms per tab switch.
+# and on a 1 MB Rust file; editing code there (AMI-242): Enter with indent
+# and a bracket with auto-pairs (8 ms), closing and opening a fold of 10 000
+# lines and opening the outline (16 ms); then switching tabs (AMI-224): 3
+# panes × 8 tabs on 1 MB notes, `gt` 200 times. Runs a release build in a
+# throwaway HOME (your own notes and config are never touched) and fails if
+# mNote's own work goes over budget at p95: 8 ms per key, 16 ms for a fold,
+# the outline or a tab switch.
 #
 #   tools/bench-large-note.sh
 #
-# Needs a display: it opens a window for each run.
+# Needs a display: it opens a window for each run. Keep the window in front
+# (macOS draws a covered window less often, and a key is only timed when
+# its frame is drawn): a run that times no keys fails.
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -69,6 +74,39 @@ if [ -z "$colours" ] || [ "$(echo "$colours > 50" | bc)" = 1 ]; then
     echo "  over 50 ms to first colours (or no result)"
     status=1
 fi
+
+# Editing code on the 1 MB Rust file: each `bench` line times its keys
+# from the first key to the frame that shows them.
+{
+    echo ":e large.rs<CR>"
+    echo "wait 1500"
+    echo "4GA"
+    echo "bench 200 <CR>"
+    echo "bench 200 ("
+    echo "<Esc>3G"
+    echo "bench 60 za"
+    echo "bench 30 :outline<CR> | <Esc>"
+    echo "<Esc>"
+} > "$SANDBOX/code.keys"
+printf 'vault = "%s"\nwrap = false\nrestore_session = false\n' "$SANDBOX/home/notes" > "$SANDBOX/home/.config/mnote/config.toml"
+reports=$(HOME="$SANDBOX/home" XDG_CONFIG_HOME="$SANDBOX/home/.config" \
+    MNOTE_LATENCY=1 MNOTE_SCRIPT="$SANDBOX/code.keys" "$BIN" 2>&1 |
+    grep -E "latency over|mNote's work" || true)
+n=0
+for check in "enter with indent:8" "auto-pairs:8" "fold of 10 000 lines:16" "outline:16"; do
+    n=$((n + 1))
+    name=${check%:*}
+    budget=${check##*:}
+    # Each report is a count line, then the work line; none counted fails.
+    keys=$(echo "$reports" | sed -n "$((2 * n - 1))p" | sed -n 's/.*over \([0-9]*\) keys.*/\1/p')
+    work=$(echo "$reports" | sed -n "$((2 * n))p")
+    echo "rust 1 MB, $name: ${work#*wait): } over ${keys:-0} keys"
+    p95=$(echo "$work" | sed -n 's/.*p95 \([0-9.]*\) ms.*/\1/p')
+    if [ "${keys:-0}" = 0 ] || [ -z "$p95" ] || [ "$(echo "$p95 > $budget" | bc)" = 1 ]; then
+        echo "  over the $budget ms budget (or no result)"
+        status=1
+    fi
+done
 
 # Switching tabs: 24 notes of 1 MB in n1…n8 | (n9…n16 over n17…n24), then
 # `gt` round the focused pane's 8 tabs.

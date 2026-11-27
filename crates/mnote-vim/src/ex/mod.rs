@@ -1042,10 +1042,11 @@ impl Vim {
         let o = &self.options;
         let on = |b: bool, name: &str| format!("{}{name}", if b { "" } else { "no" });
         format!(
-            "shiftwidth={}  tabstop={}  {}  scrolloff={}  {}  {}  {}  {}",
+            "shiftwidth={}  tabstop={}  {}  {}  scrolloff={}  {}  {}  {}  {}",
             o.shiftwidth,
             o.tabstop,
             on(o.expandtab, "expandtab"),
+            on(o.autopairs, "autopairs"),
             o.scrolloff,
             on(o.ignorecase, "ignorecase"),
             on(o.smartcase, "smartcase"),

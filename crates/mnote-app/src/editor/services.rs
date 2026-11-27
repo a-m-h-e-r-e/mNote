@@ -285,7 +285,8 @@ impl Editor {
     /// the keyboard sends it), `wait 500` (milliseconds), `bench 200 gt`
     /// (presses the keys 200 times, 50 ms apart, and prints their
     /// key-to-pixels times as the latency bench does; needs
-    /// `MNOTE_LATENCY`) or `# a comment`.
+    /// `MNOTE_LATENCY`; keys after ` | ` undo each round, untimed:
+    /// `bench 30 :outline<CR> | <Esc>`) or `# a comment`.
     pub fn run_script(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
         let lines: Vec<String> = std::fs::read_to_string(&path)
             .map(|t| t.lines().map(str::to_owned).collect())
@@ -313,7 +314,11 @@ impl Editor {
                     .and_then(|rest| rest.split_once(' '))
                     .and_then(|(n, keys)| Some((n.parse::<usize>().ok()?, keys.to_owned())))
                 {
-                    let keys = mnote_vim::parse_keys(&keys);
+                    // `bench 30 :outline<CR> | <Esc>`: the keys after ` | `
+                    // undo each round, untimed.
+                    let (keys, after) = keys.split_once(" | ").unwrap_or((&keys, ""));
+                    let keys = mnote_vim::parse_keys(keys);
+                    let after = mnote_vim::parse_keys(after);
                     let Ok(Some(log)) = this.update(cx, |this, _| this.latency.log.clone()) else {
                         eprintln!("mnote script: bench needs MNOTE_LATENCY");
                         continue;
@@ -329,6 +334,16 @@ impl Editor {
                         cx.background_executor()
                             .timer(Duration::from_millis(50))
                             .await;
+                        if !after.is_empty() {
+                            let _ = this.update(cx, |this, cx| {
+                                for key in &after {
+                                    this.press(*key, cx);
+                                }
+                            });
+                            cx.background_executor()
+                                .timer(Duration::from_millis(50))
+                                .await;
+                        }
                     }
                     // The first rounds warm caches up.
                     let samples: Vec<(f32, f32)> =

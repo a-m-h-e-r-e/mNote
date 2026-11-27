@@ -29,6 +29,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 ## Docs
 
 - [Tabs and panes](docs/tabs.md): opening notes, preview tabs, keys, the mouse and settings.
+- [Editing code](docs/code.md): indent, comments, text objects, auto-pairs, folds, the outline and context.
 - [Plugins](docs/plugins.md): the Lua API and events.
 
 ## Design

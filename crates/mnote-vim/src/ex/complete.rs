@@ -152,6 +152,8 @@ fn option_candidates(word: &str, options: &Options) -> Vec<Candidate> {
         ),
         ("expandtab", on_off(options.expandtab)),
         ("noexpandtab", "indent with tabs".to_owned()),
+        ("autopairs", on_off(options.autopairs)),
+        ("noautopairs", "brackets and quotes don't pair".to_owned()),
         (
             "scrolloff",
             format!("lines kept around the cursor, now {}", options.scrolloff),
@@ -235,6 +237,7 @@ mod tests {
             names("set no"),
             [
                 "noexpandtab",
+                "noautopairs",
                 "noignorecase",
                 "nosmartcase",
                 "norelativenumber",
