@@ -42,6 +42,16 @@ pub const FILES: &[(&str, &[u8])] = &[
     ),
 ];
 
+/// The families of the embedded fonts: always there once `register` ran, so
+/// choosing one needs no search through the system's fonts.
+pub const FAMILIES: &[&str] = &["Lilex", "IBM Plex Mono", "IBM Plex Sans"];
+
+/// Whether `name` is one of the embedded families (any case, as config.toml
+/// font names are matched).
+pub fn is_bundled(name: &str) -> bool {
+    FAMILIES.iter().any(|f| f.eq_ignore_ascii_case(name))
+}
+
 /// Registers the embedded fonts with gpui's text system. Called once at
 /// startup, before the first window opens. If registration fails, mNote keeps
 /// running on the system fonts the design system lists as fallbacks.
@@ -67,6 +77,19 @@ mod tests {
                 "{name} is not a TrueType font"
             );
         }
+    }
+
+    #[test]
+    fn every_embedded_file_belongs_to_a_listed_family() {
+        for (name, _) in FILES {
+            let stem = name.split('-').next().unwrap_or_default();
+            assert!(
+                FAMILIES.iter().any(|f| f.replace(' ', "") == stem),
+                "{name} has no entry in FAMILIES"
+            );
+        }
+        assert!(is_bundled("lilex") && is_bundled("IBM Plex Mono"));
+        assert!(!is_bundled("Menlo"));
     }
 
     #[test]
