@@ -20,6 +20,7 @@ pub mod predicates;
 pub mod queries;
 pub mod scopes;
 pub mod syntax;
+pub mod textobjects;
 pub mod view;
 
 pub use error::LangError;

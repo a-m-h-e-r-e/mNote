@@ -67,6 +67,14 @@ pub enum Motion {
     NextHeading,
     /// `[[`: previous Markdown heading.
     PrevHeading,
+    /// `]m` `[m` `]M` `[M` (functions) and, in code, `]]` `[[` (classes):
+    /// the next or previous start, or with `end` last character, of a
+    /// code object, from the syntax (AMI-236).
+    Object {
+        class: bool,
+        forward: bool,
+        end: bool,
+    },
     /// One added with [`crate::ext::register_motion`], by id.
     Custom(u16),
 }
@@ -129,6 +137,7 @@ impl Motion {
     /// engine then takes a snapshot of for it.
     pub fn wants_syntax(self) -> bool {
         match self {
+            Motion::Object { .. } => true,
             Motion::Custom(id) => crate::ext::motion(id).is_some_and(|(run, _)| run.wants_syntax()),
             _ => false,
         }
@@ -154,6 +163,19 @@ impl Motion {
         if let Motion::Custom(id) = self {
             let (run, _) = crate::ext::motion(id)?;
             return run.run(text, syntax, pos, n);
+        }
+        if let Motion::Object {
+            class,
+            forward,
+            end,
+        } = self
+        {
+            let object = if class { "class" } else { "function" };
+            return Some(Target {
+                pos: syntax?.object_jump(object, pos, forward, end, n)?,
+                kind: MotionKind::Exclusive,
+                keep_column: false,
+            });
         }
         let len = text.len_chars();
         let line = line_of(text, pos);
@@ -251,7 +273,7 @@ impl Motion {
                 line_start(text, to)
             }
             // Handled above.
-            Motion::Custom(_) => return None,
+            Motion::Custom(_) | Motion::Object { .. } => return None,
             Motion::PrevHeading => {
                 // The nth heading before the cursor's line, or the first line.
                 let mut before = Vec::with_capacity(n);

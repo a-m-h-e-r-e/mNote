@@ -1476,10 +1476,28 @@ impl Vim {
                 self.paste_indented(forward && c == 'p', buf);
                 return Effect::Handled;
             }
+            // `]m` `[m` `]M` `[M`: functions, from the syntax.
+            (Pending::Bracket { forward }, Key::Char(c @ ('m' | 'M'))) => {
+                if !self.has_code_objects(buf) {
+                    return self.no_code_objects(buf);
+                }
+                Motion::Object {
+                    class: false,
+                    forward,
+                    end: c == 'M',
+                }
+            }
+            // `]]` `[[`: classes in code, headings in notes.
             (Pending::Bracket { forward }, Key::Char(c))
                 if c == if forward { ']' } else { '[' } =>
             {
-                if forward {
+                if self.has_code_objects(buf) {
+                    Motion::Object {
+                        class: true,
+                        forward,
+                        end: false,
+                    }
+                } else if forward {
                     Motion::NextHeading
                 } else {
                     Motion::PrevHeading
@@ -2021,10 +2039,61 @@ impl Vim {
             Some(run) if run.wants_syntax() => buf.syntax_snapshot(),
             _ => None,
         };
+        let code = code_object(obj);
+        let syntax = match (&syntax, code) {
+            (None, Some(_)) if ext.is_none() => buf.syntax_snapshot(),
+            _ => syntax,
+        };
         let text = buf.text();
-        let sel = match ext {
-            Some(run) => run.run(text, syntax.as_ref(), self.cursor, around, count),
-            None => textobj::select(text, self.cursor, obj, around, count),
+        let sel = match (ext, code) {
+            (Some(run), _) => run.run(text, syntax.as_ref(), self.cursor, around, count),
+            (None, Some(object)) => {
+                let Some(syntax) = syntax.as_ref().filter(|s| s.has_text_objects(self.cursor))
+                else {
+                    // Without a text-objects query the keys do nothing, and say why.
+                    let language = syntax
+                        .as_ref()
+                        .map(|s| s.language_at(self.cursor).to_owned())
+                        .or_else(|| buf.language().map(str::to_owned))
+                        .unwrap_or_else(|| "plain text".to_owned());
+                    self.show_message(format!("{language} has no code text objects"));
+                    self.macros.failed = true;
+                    self.cancel();
+                    return Effect::Handled;
+                };
+                let mut at = if self.mode.is_visual() {
+                    self.anchor.min(self.cursor)..self.anchor.max(self.cursor) + 1
+                } else {
+                    self.cursor..self.cursor + 1
+                };
+                let mut found = None;
+                // Each count, and each repeat in VISUAL, grows to the next one out.
+                for _ in 0..count.max(1) {
+                    match syntax.text_object(object, !around, at.clone()) {
+                        Some(r) => {
+                            at = r.clone();
+                            found = Some(r);
+                        }
+                        None => break,
+                    }
+                }
+                found.map(|range| {
+                    let linewise = around
+                        && matches!(object, "function" | "class")
+                        && whole_lines(text, &range);
+                    textobj::Selection {
+                        range: if linewise {
+                            line_start(text, line_of(text, range.start))
+                                ..(line_end(text, line_of(text, range.end.saturating_sub(1))) + 1)
+                                    .min(text.len_chars())
+                        } else {
+                            range
+                        },
+                        linewise,
+                    }
+                })
+            }
+            (None, None) => textobj::select(text, self.cursor, obj, around, count),
         };
         let Some(sel) = sel else {
             self.macros.failed = true;
@@ -2494,6 +2563,9 @@ fn is_jump(motion: Motion) -> bool {
     if let Motion::Custom(id) = motion {
         return crate::ext::motion(id).is_some_and(|(_, jump)| jump);
     }
+    if let Motion::Object { .. } = motion {
+        return true;
+    }
     matches!(
         motion,
         Motion::FirstLine
@@ -2684,6 +2756,49 @@ impl Vim {
         self.edit(buf, start..start + lead_chars, &indent);
         self.cursor = self.cursor - lead_chars + indent.chars().count();
     }
+}
+
+impl Vim {
+    /// Whether the language at the cursor is code with text objects (a
+    /// note's prose isn't, a fence in it may be).
+    fn has_code_objects(&self, buf: &mut Buffer) -> bool {
+        buf.syntax_snapshot().is_some_and(|s| {
+            s.language_at(self.cursor) != "markdown" && s.has_text_objects(self.cursor)
+        })
+    }
+
+    /// `]m` where the language has no text objects: nothing, and why.
+    fn no_code_objects(&mut self, buf: &mut Buffer) -> Effect {
+        let language = buf
+            .syntax_snapshot()
+            .map(|s| s.language_at(self.cursor).to_owned())
+            .or_else(|| buf.language().map(str::to_owned))
+            .unwrap_or_else(|| "plain text".to_owned());
+        self.show_message(format!("{language} has no code text objects"));
+        self.macros.failed = true;
+        self.cancel();
+        Effect::Handled
+    }
+}
+
+/// The code object a text-object key names (AMI-236): `f` a function, `c`
+/// a class, `a` a parameter (argument), `/` a comment.
+fn code_object(key: char) -> Option<&'static str> {
+    Some(match key {
+        'f' => "function",
+        'c' => "class",
+        'a' => "parameter",
+        '/' => "comment",
+        _ => return None,
+    })
+}
+
+/// Whether `range` runs from its first line's first non-blank to its last
+/// line's end: then `af` takes the lines whole.
+fn whole_lines(text: &Rope, range: &Range<usize>) -> bool {
+    let first = line_of(text, range.start);
+    let last = line_of(text, range.end.saturating_sub(1).max(range.start));
+    first_non_blank(text, first) == range.start && line_end(text, last) == range.end
 }
 
 /// How many columns the indent `s` takes, with tabs `tabstop` wide.

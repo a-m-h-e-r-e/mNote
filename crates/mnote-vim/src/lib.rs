@@ -12,6 +12,8 @@
 
 mod anchors;
 mod block;
+#[cfg(test)]
+mod code_object_tests;
 mod comment;
 pub mod ex;
 pub mod ext;
