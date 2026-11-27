@@ -413,6 +413,36 @@ expect zoom 2 'reply Zoom 120%'
 expect zoom 3 'reply Zoom 110%'
 expect zoom 4 'reply Zoom 100%'
 
+# Folds (AMI-238, AMI-239): zc closes the function around the cursor; j
+# and k step over it as one line; a search into it opens it; a tab keeps
+# its own folds.
+printf 'fn a() {\n    let x = 1;\n    x\n}\n\nfn b() {\n    2\n}\n' > "$VAULT/f.rs"
+cat > "$SANDBOX/folds.keys" <<'KEYS'
+:e f.rs<CR>
+wait 300
+2Gzc
+state
+j
+state
+k
+state
+/x<CR>
+state
+ggzc
+:tabnew b<CR>
+state
+gT
+state
+KEYS
+run folds
+expect folds 1 'folds 1-4 | line 2'
+expect folds 2 'folds 1-4 | line 5'
+expect folds 3 'folds 1-4 | line 1'
+expect folds 4 'folds - | line 2'
+# A new tab has none; back on f.rs, its fold is still closed.
+expect folds 5 'folds - | line 1'
+expect folds 6 'folds 1-4 | line 1'
+
 # Restoring: three runs on one vault, the session kept between them.
 printf 'vault = "%s"\nrestore_session = true\n' "$VAULT" > "$CONFIG"
 cat > "$SANDBOX/session1.keys" <<'KEYS'

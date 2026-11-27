@@ -946,8 +946,17 @@ impl Editor {
             .map(|p| format!("[{}]", row(p)))
             .collect();
         let text: String = self.buffer.to_string().replace('\n', "\\n");
+        // Closed folds (1-based lines) and the cursor's line, for folds.
+        let rope = self.buffer.text();
+        let folds: Vec<String> = self
+            .vim
+            .closed_folds(rope)
+            .iter()
+            .map(|r| format!("{}-{}", r.start() + 1, r.end() + 1))
+            .collect();
+        let line = mnote_vim::text::line_of(rope, self.vim.cursor()) + 1;
         format!(
-            "pane {}/{} | {} | {} | parked {} | closed {} | overlay {} | mode {} | reply {} | cursor {} | text {}",
+            "pane {}/{} | {} | {} | parked {} | closed {} | overlay {} | mode {} | reply {} | folds {} | line {} | cursor {} | text {}",
             at + 1,
             order.len(),
             focused,
@@ -965,6 +974,12 @@ impl Editor {
             self.reply
                 .as_ref()
                 .map_or("-".to_owned(), |r| r.0.to_string()),
+            if folds.is_empty() {
+                "-".to_owned()
+            } else {
+                folds.join(",")
+            },
+            line,
             self.vim.cursor(),
             text,
         )

@@ -40,6 +40,35 @@ struct PaneView {
     scroll_x: Rc<Cell<Pixels>>,
     /// The longest visible line, in characters.
     widest: usize,
+    /// Its closed folds' hidden lines, so a fold counts as one row.
+    rows: Rows,
+}
+
+/// Lines as rows on screen, with closed folds' lines hidden (AMI-239).
+struct Rows(Vec<std::ops::RangeInclusive<usize>>);
+
+impl Rows {
+    /// The row line `line` is shown on (a hidden line, its fold's).
+    fn row(&self, line: usize) -> usize {
+        let hidden: usize = self
+            .0
+            .iter()
+            .filter(|r| *r.start() < line)
+            .map(|r| r.end().min(&line) - r.start())
+            .sum();
+        line - hidden
+    }
+
+    /// The line shown on row `row`.
+    fn line(&self, row: usize) -> usize {
+        let mut line = row;
+        for r in &self.0 {
+            if *r.start() < line {
+                line += r.end() - r.start();
+            }
+        }
+        line
+    }
 }
 
 /// The scrollbars' thickness, as in VS Code; the thumb fills it.
@@ -237,6 +266,7 @@ impl Editor {
                 cursor_line,
                 scroll_x: self.scroll_x.clone(),
                 widest,
+                rows: Rows(self.vim.hidden_folds(rope)),
             });
         }
         let local = slot.local.as_ref()?;
@@ -250,6 +280,7 @@ impl Editor {
             cursor_line,
             scroll_x: local.scroll_x.clone(),
             widest,
+            rows: Rows(mnote_vim::hidden_lines(&local.folds, rope)),
         })
     }
 
@@ -277,12 +308,16 @@ impl Editor {
             cursor_line,
             scroll_x,
             widest,
+            rows,
         }) = self.pane_view(pane)
         else {
             return Vec::new();
         };
         let line_h = text::NOTE_BODY.line_height() / px(1.);
-        let top = lines.logical_scroll_top().item_ix;
+        // In rows, a closed fold counting as one.
+        let top = rows.row(lines.logical_scroll_top().item_ix);
+        let cursor_line = rows.row(cursor_line);
+        let total = rows.row(total.saturating_sub(1)) + 1;
         let (track, thumb, mark) = (p.line, p.line_strong, p.cursor);
         let mut out = Vec::new();
 
@@ -415,10 +450,15 @@ impl Editor {
 
     /// Scrolls pane `pane` so `at` (0 top … 1 bottom) of its note shows.
     fn scroll_pane_to(&mut self, pane: PaneId, at: f32, cx: &mut Context<Self>) {
-        let Some(PaneView { lines, total, .. }) = self.pane_view(pane) else {
+        let Some(PaneView {
+            lines, total, rows, ..
+        }) = self.pane_view(pane)
+        else {
             return;
         };
-        let item = ((at.clamp(0., 1.) * total as f32) as usize).min(total.saturating_sub(1));
+        let shown = rows.row(total.saturating_sub(1)) + 1;
+        let row = ((at.clamp(0., 1.) * shown as f32) as usize).min(shown.saturating_sub(1));
+        let item = rows.line(row).min(total.saturating_sub(1));
         lines.scroll_to(ListOffset {
             item_ix: item,
             offset_in_item: px(0.),
@@ -475,6 +515,25 @@ impl Editor {
             let content = widest as f32 * styled::char_w();
             let at = (event.position.x - b.left()) / b.size.width;
             self.scroll_pane_sideways(pane, at, content, b.size.width / px(1.), cx);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Rows;
+
+    #[test]
+    fn a_closed_fold_is_one_row() {
+        // Lines 2..=5 and 9..=10 folded: 0 1 [2] 6 7 8 [9] 11.
+        let rows = Rows(vec![2..=5, 9..=10]);
+        assert_eq!(rows.row(1), 1);
+        assert_eq!(rows.row(2), 2);
+        assert_eq!(rows.row(4), 2, "a hidden line is its fold's row");
+        assert_eq!(rows.row(6), 3);
+        assert_eq!(rows.row(11), 7);
+        for line in [0, 1, 2, 6, 7, 8, 9, 11] {
+            assert_eq!(rows.line(rows.row(line)), line, "line {line}");
         }
     }
 }

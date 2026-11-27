@@ -15,10 +15,23 @@ impl SyntaxSnapshot {
     /// Every fold, as line ranges, ordered by first line and then outermost
     /// first.
     pub fn fold_ranges(&self) -> Vec<RangeInclusive<usize>> {
+        self.fold_ranges_in(0..self.text().len_lines())
+    }
+
+    /// The folds reaching into lines `lines` (a screenful, say), the same
+    /// way: cheaper than all of them on a large file.
+    pub fn fold_ranges_in(&self, lines: std::ops::Range<usize>) -> Vec<RangeInclusive<usize>> {
         let rope = self.text();
         let len = rope.len_chars();
+        let line_char = |l: usize| {
+            if l >= rope.len_lines() {
+                len
+            } else {
+                rope.line_to_char(l)
+            }
+        };
         let mut out: Vec<RangeInclusive<usize>> = self
-            .captures("folds", 0..len)
+            .captures("folds", line_char(lines.start)..line_char(lines.end))
             .into_iter()
             .filter(|c| c.name == "fold" && !c.range.is_empty())
             .filter_map(|c| {

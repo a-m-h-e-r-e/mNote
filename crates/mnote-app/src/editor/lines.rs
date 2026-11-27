@@ -5,21 +5,84 @@
 use super::*;
 
 impl Editor {
+    /// Whether line `ix` starts a fold that could close (the gutter's
+    /// `▾`). Each 128-line block's starts are found from the syntax on a
+    /// background thread (on a large file that costs more than a keystroke
+    /// may); until a block's are up to date its last ones show, and the
+    /// pane redraws when they arrive.
+    fn starts_fold(&mut self, ix: usize, cx: &mut Context<Self>) -> bool {
+        const BLOCK: usize = 128;
+        let block = ix / BLOCK;
+        let key = (self.source.doc_key(), block);
+        let revision = self.buffer.revision();
+        let (fresh, found) = match self.fold_starts.borrow().get(&key) {
+            Some((at, starts)) => (*at == revision, starts.contains(&ix)),
+            None => (false, false),
+        };
+        if fresh || !self.fold_finding.borrow_mut().insert(key.clone()) {
+            return found;
+        }
+        let Some(snapshot) = self.buffer.syntax_snapshot() else {
+            self.fold_finding.borrow_mut().remove(&key);
+            return found;
+        };
+        let lines = block * BLOCK..(block + 1) * BLOCK;
+        cx.spawn(async move |this, cx| {
+            let starts = cx
+                .background_executor()
+                .spawn(async move {
+                    snapshot
+                        .fold_ranges_in(lines.clone())
+                        .into_iter()
+                        .map(|r| *r.start())
+                        .filter(|l| lines.contains(l))
+                        .collect::<std::collections::HashSet<usize>>()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.fold_finding.borrow_mut().remove(&key);
+                let mut cache = this.fold_starts.borrow_mut();
+                if cache.len() > 256 {
+                    cache.clear();
+                }
+                cache.insert(key, (revision, Rc::new(starts)));
+                cx.notify();
+            });
+        })
+        .detach();
+        found
+    }
+
     pub(super) fn render_line(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let rope = self.buffer.text();
         // A final newline is followed by an empty rope line Vim doesn't show.
         if ix >= line_count(rope) {
             return div().into_any_element();
         }
+        // Lines inside a closed fold take no room; its first line stands
+        // for it (AMI-239).
+        let hidden = self.vim.hidden_folds(rope);
+        if hidden.iter().any(|r| *r.start() < ix && ix <= *r.end()) {
+            return div().h(px(0.)).into_any_element();
+        }
+        let folded = hidden.iter().find(|r| *r.start() == ix).cloned();
+        let foldable = folded.is_none() && self.starts_fold(ix, cx);
         let p = cx.theme().palette;
+        let rope = self.buffer.text();
         let start = line_start(rope, ix);
         let len = line_len(rope, ix);
         let content: SharedString = rope.slice(start..start + len).to_string().into();
 
         let cursor = self.vim.cursor();
         let cursor_line = line_of(rope, cursor);
-        // An unfocused pane shows no cursor line.
-        let current = ix == cursor_line && !self.drawing_other;
+        // An unfocused pane shows no cursor line; a fold the cursor is
+        // hidden in shows it on its line.
+        let current = !self.drawing_other
+            && (ix == cursor_line || folded.as_ref().is_some_and(|r| r.contains(&cursor_line)));
+        let fold_label = folded.as_ref().map(|r| {
+            let n = r.end() - r.start();
+            SharedString::from(format!("⋯ {n} {}", if n == 1 { "line" } else { "lines" }))
+        });
         // Its cursor's line still shows its own number, as Vim's does.
         let number = if ix == cursor_line || !self.vim.options().relativenumber {
             ix + 1
@@ -392,6 +455,17 @@ impl Editor {
                 .when_some(look.height, |row, h| row.h(h).overflow_hidden())
                 .children(prefix)
                 .child(div().flex_1().min_w_0().child(line))
+                .children(fold_label.clone().map(|label| {
+                    div()
+                        .flex_none()
+                        .pl(px(space::S3))
+                        .h(line_height)
+                        .flex()
+                        .items_center()
+                        .text_style(text::HINT)
+                        .text_color(Theme::color(p.ink_3))
+                        .child(label)
+                }))
                 .children(marks.iter().filter_map(|m| {
                     match &m.kind {
                         mnote_core::MarkKind::VirtualText {
@@ -483,6 +557,19 @@ impl Editor {
                             .top_0()
                             .text_color(c)
                             .child(t)
+                    }))
+                    // `▸` a closed fold, a quiet `▾` one that can close.
+                    .children((folded.is_some() || foldable).then(|| {
+                        div()
+                            .absolute()
+                            .left(px(space::S1))
+                            .top_0()
+                            .text_color(Theme::color(if folded.is_some() {
+                                p.ink_2
+                            } else {
+                                p.line_strong
+                            }))
+                            .child(if folded.is_some() { "▸" } else { "▾" })
                     }))
                     .child(gutter_number),
             )

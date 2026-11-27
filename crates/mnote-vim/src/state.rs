@@ -309,6 +309,9 @@ pub struct Vim {
     origin: Origin,
     /// Closed folds, as character ranges that move with edits (AMI-238).
     pub(crate) closed: Vec<Range<usize>>,
+    /// The key just handled moved the cursor up or down by lines, which
+    /// steps over closed folds rather than opening them (AMI-239).
+    pub(crate) vertical: bool,
     /// Keys of the command being typed, and of the last change, for `.`.
     keys: Vec<Key>,
     last_change: Option<LastChange>,
@@ -347,6 +350,7 @@ impl Default for Vim {
             registers: Registers::default(),
             marks: HashMap::new(),
             closed: Vec::new(),
+            vertical: false,
             options: crate::ex::Options::default(),
             anchors: crate::anchors::Anchors::default(),
             view: crate::view::View::default(),
@@ -495,10 +499,23 @@ impl Vim {
 
     /// Handles one key, editing `buf` as needed.
     pub fn handle_key(&mut self, key: Key, buf: &mut Buffer) -> Effect {
+        let revision = buf.revision();
+        if self.macros.depth == 0 {
+            self.vertical = false;
+        }
         self.macros.depth += 1;
         self.record_key(key);
         let effect = self.dispatch_key(key, buf);
         self.macros.depth -= 1;
+        // Once a command is complete (not after `z` of `zc`, or while a
+        // command line is typed).
+        if self.macros.depth == 0
+            && !self.closed.is_empty()
+            && self.is_idle()
+            && self.mode != Mode::Command
+        {
+            self.open_folds_around_cursor(buf, revision);
+        }
         effect
     }
 
@@ -1986,7 +2003,27 @@ impl Vim {
     }
 
     fn run_motion(&mut self, motion: Motion, buf: &mut Buffer) -> Effect {
-        let count = self.take_count();
+        let mut count = self.take_count();
+        // `j` and `k` count a closed fold as one line.
+        if matches!(motion, Motion::Up | Motion::Down) {
+            self.vertical = true;
+            if !self.closed.is_empty() {
+                let text = buf.text();
+                let line = line_of(text, self.cursor);
+                let to = self.fold_step(
+                    text,
+                    line,
+                    count.unwrap_or(1).max(1),
+                    motion == Motion::Down,
+                );
+                if to == line {
+                    self.macros.failed = true;
+                    self.cancel();
+                    return Effect::Handled;
+                }
+                count = Some(to.abs_diff(line));
+            }
+        }
         // Only a motion that reads the syntax costs a snapshot.
         let syntax = if motion.wants_syntax() {
             buf.syntax_snapshot()

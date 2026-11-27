@@ -57,8 +57,67 @@ impl Vim {
         self.closed.retain(|r| r.start < r.end);
     }
 
+    /// The closed folds that aren't inside another closed one: what's
+    /// hidden, by first and last line.
+    pub fn hidden_folds(&self, text: &Rope) -> Vec<RangeInclusive<usize>> {
+        outermost(self.closed_folds(text))
+    }
+
+    /// The line `n` shown lines down (or up) from `line`, a closed fold
+    /// counting as one, landing on its first line.
+    pub(crate) fn fold_step(&self, text: &Rope, line: usize, n: usize, down: bool) -> usize {
+        let hidden = self.hidden_folds(text);
+        let around = |l: usize| hidden.iter().find(|r| r.contains(&l));
+        let last = crate::text::last_line(text);
+        let mut at = line;
+        for _ in 0..n {
+            if down {
+                let end = around(at).map_or(at, |r| *r.end());
+                if end >= last {
+                    break;
+                }
+                at = end + 1;
+            } else {
+                let start = around(at).map_or(at, |r| *r.start());
+                if start == 0 {
+                    break;
+                }
+                at = around(start - 1).map_or(start - 1, |r| *r.start());
+            }
+        }
+        at
+    }
+
+    /// After a key: a cursor that went into a closed fold some other way
+    /// than `j`/`k` (a search, a jump, `G`), or one that changed the text
+    /// in one, shows its line: the folds around it open, as Vim's
+    /// `foldopen` does.
+    pub(crate) fn open_folds_around_cursor(&mut self, buf: &Buffer, revision: u64) {
+        let text = buf.text();
+        let line = line_of(text, self.cursor);
+        let hidden = self.hidden_folds(text);
+        let Some(fold) = hidden.iter().find(|r| r.contains(&line)) else {
+            return;
+        };
+        let edited = buf.revision() != revision;
+        let inside = line != *fold.start();
+        if edited || (inside && !self.vertical) {
+            let around: Vec<RangeInclusive<usize>> = self
+                .closed_folds(text)
+                .into_iter()
+                .filter(|r| r.contains(&line))
+                .collect();
+            for r in &around {
+                self.open_fold(text, r);
+            }
+        }
+    }
+
     /// `zc` `zo` `za` `zC` `zO` `zA` `zv` `zR` `zM` `zj` `zk`.
     pub(crate) fn fold_command(&mut self, c: char, buf: &mut Buffer) -> Effect {
+        // A fold closed around the cursor keeps it (shown on its first
+        // line), as in Vim.
+        self.vertical = true;
         let count = self.take_count().unwrap_or(1).max(1);
         let all = buf
             .syntax_snapshot()
@@ -184,6 +243,24 @@ impl Vim {
         self.done(buf, false);
         Effect::Handled
     }
+}
+
+/// The ranges not inside another (sorted by first line, outermost first).
+fn outermost(sorted: Vec<RangeInclusive<usize>>) -> Vec<RangeInclusive<usize>> {
+    let mut out: Vec<RangeInclusive<usize>> = Vec::new();
+    for r in sorted {
+        if out.last().is_some_and(|o| o.contains(r.start())) {
+            continue;
+        }
+        out.push(r);
+    }
+    out
+}
+
+/// The lines folds kept as characters hide: the outermost, by first and
+/// last line.
+pub fn hidden_lines(folds: &[Range<usize>], text: &Rope) -> Vec<RangeInclusive<usize>> {
+    outermost(fold_lines(folds, text))
 }
 
 /// Folds kept as characters ([`Vim::folds`]) as line ranges, by first
@@ -321,5 +398,41 @@ mod tests {
             vim.message().map(|m| m.text.as_str()),
             Some("E490: No fold found")
         );
+    }
+
+    #[test]
+    fn j_and_k_step_over_a_closed_fold() {
+        let (mut vim, mut buf) = setup(0);
+        keys(&mut vim, &mut buf, "zc");
+        assert_eq!(closed(&vim, &buf), [(0, 4)]);
+        keys(&mut vim, &mut buf, "j");
+        assert_eq!(line_of(buf.text(), vim.cursor()), 5, "past the fold's end");
+        keys(&mut vim, &mut buf, "k");
+        assert_eq!(
+            line_of(buf.text(), vim.cursor()),
+            0,
+            "back to its first line"
+        );
+        assert_eq!(closed(&vim, &buf), [(0, 4)], "still closed");
+        keys(&mut vim, &mut buf, "2j");
+        assert_eq!(line_of(buf.text(), vim.cursor()), 6);
+    }
+
+    #[test]
+    fn jumps_searches_and_edits_into_a_fold_open_it() {
+        let (mut vim, mut buf) = setup(7);
+        keys(&mut vim, &mut buf, "zcggG");
+        assert!(closed(&vim, &buf).is_empty(), "G into it opens it");
+        keys(&mut vim, &mut buf, "kzcgg/z()<CR>");
+        assert!(closed(&vim, &buf).is_empty(), "a search hit in it opens it");
+        assert_eq!(line_of(buf.text(), vim.cursor()), 7);
+        keys(&mut vim, &mut buf, "ggzcA x<Esc>");
+        assert!(
+            closed(&vim, &buf).is_empty(),
+            "an edit on its line opens it"
+        );
+        // Moving along its first line leaves it closed.
+        keys(&mut vim, &mut buf, "uzcl");
+        assert_eq!(closed(&vim, &buf), [(0, 4)]);
     }
 }

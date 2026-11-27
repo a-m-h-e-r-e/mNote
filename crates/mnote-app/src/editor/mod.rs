@@ -129,6 +129,11 @@ impl Completer for VaultPaths {
     }
 }
 
+/// Lines that start a fold, by note and 128-line block: the text revision
+/// they were found at, and the lines.
+type FoldStarts =
+    std::collections::HashMap<(DocKey, usize), (u64, Rc<std::collections::HashSet<usize>>)>;
+
 pub struct Editor {
     buffer: Buffer,
     vim: Vim,
@@ -221,6 +226,11 @@ pub struct Editor {
     /// A line of an unfocused pane is being drawn: no caret, selection or
     /// typed-command preview.
     drawing_other: bool,
+    /// Lines starting a fold, per note, revision and block of 128 lines,
+    /// found as blocks are drawn (AMI-239).
+    fold_starts: RefCell<FoldStarts>,
+    /// Blocks whose fold starts are being found in the background.
+    fold_finding: RefCell<std::collections::HashSet<(DocKey, usize)>>,
     /// The unfocused pane being drawn (while `drawing_other`).
     drawing_pane: PaneId,
     /// Where a mouse drag started (a character), while the button is down.
@@ -476,6 +486,8 @@ impl Editor {
             untitled_folders: Default::default(),
             edit_groups: Default::default(),
             drawing_other: false,
+            fold_starts: RefCell::default(),
+            fold_finding: RefCell::default(),
             drawing_pane: PaneId(0),
             drag_anchor: None,
             map_task: None,
