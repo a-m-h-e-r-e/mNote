@@ -15,6 +15,8 @@ mod block;
 #[cfg(test)]
 mod code_object_tests;
 mod comment;
+mod folds;
+pub use folds::{fold_chars, fold_lines};
 pub mod ex;
 pub mod ext;
 #[cfg(test)]

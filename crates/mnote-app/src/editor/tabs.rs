@@ -33,6 +33,8 @@ pub(super) struct Tab {
     /// Where a restored tab's cursor goes (row, column) and its view, until
     /// it's first shown (it's dormant till then: its note isn't read).
     pub restore: Option<(usize, usize, super::styled::View)>,
+    /// A restored tab's closed folds (first and last lines), the same way.
+    pub restore_folds: Vec<(usize, usize)>,
 }
 
 impl Tab {
@@ -43,6 +45,7 @@ impl Tab {
             local: None,
             seen: 0,
             restore: None,
+            restore_folds: Vec::new(),
         }
     }
 }
@@ -185,6 +188,11 @@ impl Editor {
             view: self.view,
             cursor: self.vim.cursor(),
             scroll_x: std::mem::take(&mut self.scroll_x),
+            folds: {
+                let folds = self.vim.folds();
+                self.vim.set_folds(Vec::new());
+                folds
+            },
         }
     }
 
@@ -341,6 +349,7 @@ impl Editor {
         self.wraps.borrow_mut().clear();
         self.scroll_x.set(px(0.));
         self.vim.set_cursor(0);
+        self.vim.set_folds(Vec::new());
         self.vim.clear_jumps();
         self.lines.reset(self.buffer.text().len_lines());
     }
@@ -372,6 +381,7 @@ impl Editor {
         let tab = &mut self.panes[fi].tabs[i];
         let seen = tab.seen;
         let restore = tab.restore.take();
+        let restore_folds = std::mem::take(&mut tab.restore_folds);
         match tab.local.take() {
             Some(mut local) => {
                 self.swap_local(&mut local);
@@ -393,6 +403,12 @@ impl Editor {
                     self.view = view;
                     let at = super::session::char_at(self.buffer.text(), row, col);
                     self.vim.set_cursor(at);
+                }
+                let text = self.buffer.text().clone();
+                for (first, last) in restore_folds {
+                    if last < text.len_lines() {
+                        self.vim.close_fold_lines(&text, first, last);
+                    }
                 }
             }
         }
@@ -747,6 +763,7 @@ impl Editor {
             view,
             cursor: 0,
             scroll_x: Default::default(),
+            folds: Vec::new(),
         });
         old.tabs.remove(active);
         old.active = if next > active { next - 1 } else { next };

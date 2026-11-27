@@ -11,6 +11,7 @@ pub mod coords;
 pub mod editing;
 pub mod error;
 pub mod filetype;
+pub mod folds;
 pub mod grammar;
 pub mod highlight;
 pub mod indent;

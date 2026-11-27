@@ -307,6 +307,8 @@ pub struct Vim {
     /// Who the edits made now come from (the user, unless a plugin is
     /// running), recorded in the buffer's change log.
     origin: Origin,
+    /// Closed folds, as character ranges that move with edits (AMI-238).
+    pub(crate) closed: Vec<Range<usize>>,
     /// Keys of the command being typed, and of the last change, for `.`.
     keys: Vec<Key>,
     last_change: Option<LastChange>,
@@ -344,6 +346,7 @@ impl Default for Vim {
             last_find: None,
             registers: Registers::default(),
             marks: HashMap::new(),
+            closed: Vec::new(),
             options: crate::ex::Options::default(),
             anchors: crate::anchors::Anchors::default(),
             view: crate::view::View::default(),
@@ -1488,6 +1491,14 @@ impl Vim {
                 self.pending = Pending::None;
                 return self.scroll_cursor(c, buf);
             }
+            // Folds: `zc` `zo` `za` `zC` `zO` `zA` `zv` `zR` `zM` `zj` `zk`.
+            (
+                Pending::Z,
+                Key::Char(c @ ('c' | 'o' | 'a' | 'C' | 'O' | 'A' | 'v' | 'R' | 'M' | 'j' | 'k')),
+            ) if self.op.is_none() => {
+                self.pending = Pending::None;
+                return self.fold_command(c, buf);
+            }
             (Pending::Z, Key::Enter) if self.op.is_none() => {
                 self.pending = Pending::None;
                 return self.scroll_cursor('\n', buf);
@@ -2464,6 +2475,7 @@ impl Vim {
             }
         }
         self.jumps.edited(range.clone(), added);
+        self.shift_folds(&range, added);
         if let Some(before) = before {
             self.anchors.apply_edit(&before, range, added);
         }

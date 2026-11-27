@@ -33,6 +33,8 @@ pub(super) struct SavedTab {
     pub col: usize,
     pub view: View,
     pub preview: bool,
+    /// Closed folds, as first and last lines.
+    pub folds: Vec<(usize, usize)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -184,6 +186,14 @@ impl Session {
                     quoted(tab.view.name()),
                     tab.preview
                 ));
+                if !tab.folds.is_empty() {
+                    let folds: Vec<String> = tab
+                        .folds
+                        .iter()
+                        .map(|(a, b)| format!("[{a}, {b}]"))
+                        .collect();
+                    out.push_str(&format!("folds = [{}]\n", folds.join(", ")));
+                }
             }
         }
         out
@@ -221,7 +231,19 @@ impl Session {
                         .and_then(|n| usize::try_from(n).ok())
                         .unwrap_or(0)
                 };
+                let folds = tab
+                    .get("folds")
+                    .and_then(|f| f.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|f| {
+                        let pair = f.as_array()?;
+                        let n = |i: usize| usize::try_from(pair.get(i)?.as_integer()?).ok();
+                        Some((n(0)?, n(1)?)).filter(|(a, b)| a < b)
+                    })
+                    .collect();
                 tabs.push(SavedTab {
+                    folds,
                     what,
                     row: num("row"),
                     col: num("col"),
@@ -311,6 +333,26 @@ impl Editor {
                 } else {
                     tab.local.as_ref().map(|l| (l.cursor, l.view))
                 };
+                // Its closed folds, by line, the same way.
+                let folds = match self.text_of(&tab.doc) {
+                    Some(rope) => {
+                        let shown = if id == self.focused && i == slot.active {
+                            Some(self.vim.folds())
+                        } else if i == slot.active {
+                            slot.local.as_ref().map(|l| l.folds.clone())
+                        } else {
+                            tab.local.as_ref().map(|l| l.folds.clone())
+                        };
+                        match shown {
+                            Some(folds) => mnote_vim::fold_lines(&folds, rope)
+                                .into_iter()
+                                .map(|r| (*r.start(), *r.end()))
+                                .collect(),
+                            None => tab.restore_folds.clone(),
+                        }
+                    }
+                    None => tab.restore_folds.clone(),
+                };
                 let (row, col, view) = match (cursor, &tab.restore) {
                     (Some((at, view)), _) => match self.text_of(&tab.doc) {
                         Some(rope) => {
@@ -339,6 +381,7 @@ impl Editor {
                     col,
                     view,
                     preview: tab.preview,
+                    folds,
                 });
             }
             panes.push(SavedPane { tabs, active });
@@ -482,6 +525,7 @@ impl Editor {
                 let mut tab = Tab::new(doc);
                 tab.preview = t.preview;
                 tab.restore = Some((t.row, t.col, t.view));
+                tab.restore_folds = t.folds.clone();
                 tabs.push(tab);
             }
             panes.push((!tabs.is_empty()).then(|| {
@@ -539,6 +583,7 @@ impl Editor {
             let active = self.panes[si].active;
             let key = self.panes[si].tabs[active].doc.clone();
             let restore = self.panes[si].tabs[active].restore.take();
+            let restore_folds = std::mem::take(&mut self.panes[si].tabs[active].restore_folds);
             if !self.ensure_parked(&key) {
                 continue;
             }
@@ -554,6 +599,12 @@ impl Editor {
                     self.lines
                         .scroll_to_reveal_item(row.min(self.buffer.text().len_lines()));
                 }
+                let text = self.buffer.text().clone();
+                for (first, last) in restore_folds {
+                    if last < text.len_lines() {
+                        self.vim.close_fold_lines(&text, first, last);
+                    }
+                }
             } else {
                 let text = self.text_of(&key).cloned().unwrap_or_default();
                 let (row, col, view) = restore.unwrap_or((0, 0, self.view));
@@ -564,6 +615,11 @@ impl Editor {
                     view,
                     cursor: char_at(&text, row, col),
                     scroll_x: Default::default(),
+                    folds: restore_folds
+                        .into_iter()
+                        .filter(|(_, last)| *last < text.len_lines())
+                        .map(|(first, last)| mnote_vim::fold_chars(&text, &(first..=last)))
+                        .collect(),
                 });
             }
         }
@@ -649,6 +705,7 @@ mod tests {
             col: 2,
             view: View::default(),
             preview: false,
+            folds: Vec::new(),
         }
     }
 
@@ -676,11 +733,15 @@ mod tests {
                         col: 0,
                         view: View::default(),
                         preview: true,
+                        folds: Vec::new(),
                     }],
                     active: 0,
                 },
                 SavedPane {
-                    tabs: vec![tab("src/main.rs", 7)],
+                    tabs: vec![SavedTab {
+                        folds: vec![(0, 4), (6, 8)],
+                        ..tab("src/main.rs", 7)
+                    }],
                     active: 0,
                 },
             ],
@@ -693,6 +754,7 @@ mod tests {
         let session = sample();
         let text = session.to_toml();
         assert!(text.contains("layout = \"row(0,col(1,2))\""), "{text}");
+        assert!(text.contains("folds = [[0, 4], [6, 8]]"), "{text}");
         assert_eq!(Session::parse(&text), Some(session));
     }
 

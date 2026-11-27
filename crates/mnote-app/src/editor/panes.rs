@@ -184,6 +184,8 @@ pub(super) struct PaneLocal {
     pub cursor: usize,
     /// How far it's scrolled sideways (`nowrap`).
     pub scroll_x: Rc<std::cell::Cell<gpui::Pixels>>,
+    /// Its closed folds (Vim's while it's shown).
+    pub folds: Vec<std::ops::Range<usize>>,
 }
 
 /// A pane: its tabs, the one shown, and its state while it isn't focused.
@@ -408,6 +410,9 @@ impl Editor {
         let cursor = self.vim.cursor();
         self.vim.set_cursor(local.cursor);
         local.cursor = cursor;
+        let folds = self.vim.folds();
+        self.vim.set_folds(std::mem::take(&mut local.folds));
+        local.folds = folds;
     }
 
     fn slot(&self, id: PaneId) -> Option<usize> {
@@ -502,6 +507,7 @@ impl Editor {
                 view: self.view,
                 cursor: self.vim.cursor(),
                 scroll_x: Rc::new(std::cell::Cell::new(self.scroll_x.get())),
+                folds: self.vim.folds(),
             }),
         ));
         self.layout.split(self.focused, id, axis);
