@@ -745,10 +745,17 @@ impl Editor {
             }
         }
         // Fonts: an installed one, else the bundled default (and say so).
-        let installed = cx.text_system().all_font_names();
+        // Listing the system's fonts takes ~90 ms, so it's only done for a
+        // font that isn't one of the bundled ones (the defaults).
+        let bundled = crate::theme::fonts::is_bundled;
+        let installed = if bundled(&config.font) && bundled(&config.ui_font) {
+            Vec::new()
+        } else {
+            cx.text_system().all_font_names()
+        };
         let mut missing = Vec::new();
         let mut pick = |want: &str, default: &'static str| {
-            if installed.iter().any(|n| n.eq_ignore_ascii_case(want)) {
+            if bundled(want) || installed.iter().any(|n| n.eq_ignore_ascii_case(want)) {
                 SharedString::from(want.to_owned())
             } else {
                 missing.push(want.to_owned());
