@@ -14,6 +14,8 @@ mod anchors;
 mod block;
 pub mod ex;
 pub mod ext;
+#[cfg(test)]
+mod indent_tests;
 mod input;
 mod insert_keys;
 mod keys;

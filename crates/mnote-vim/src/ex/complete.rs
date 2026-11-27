@@ -147,6 +147,12 @@ fn option_candidates(word: &str, options: &Options) -> Vec<Candidate> {
             format!("indent step, now {}", options.shiftwidth),
         ),
         (
+            "tabstop",
+            format!("columns a tab is, now {}", options.tabstop),
+        ),
+        ("expandtab", on_off(options.expandtab)),
+        ("noexpandtab", "indent with tabs".to_owned()),
+        (
             "scrolloff",
             format!("lines kept around the cursor, now {}", options.scrolloff),
         ),
@@ -227,7 +233,13 @@ mod tests {
         assert_eq!(names("set ig"), ["ignorecase"]);
         assert_eq!(
             names("set no"),
-            ["noignorecase", "nosmartcase", "norelativenumber", "nowrap"]
+            [
+                "noexpandtab",
+                "noignorecase",
+                "nosmartcase",
+                "norelativenumber",
+                "nowrap"
+            ]
         );
         assert_eq!(names("se sw=4 rel"), ["relativenumber"]);
         assert_eq!(names("view s"), ["styled", "source"]);

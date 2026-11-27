@@ -94,11 +94,74 @@ pub(super) struct Doc {
     pub line_cache: super::code_files::LineCache,
     pub table_cache: HashMap<usize, (u64, TableLayout)>,
     pub image_paths: RefCell<HashMap<String, Option<std::path::PathBuf>>>,
+    /// Its indent settings while it isn't shown (Vim's `shiftwidth`,
+    /// `tabstop`, `expandtab`): from its language pack, then as `:set`
+    /// leaves them, as Vim's buffer-local options.
+    pub indent: IndentOptions,
+}
+
+/// A document's `shiftwidth`, `tabstop` and `expandtab`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct IndentOptions {
+    pub shiftwidth: usize,
+    pub tabstop: usize,
+    pub expandtab: bool,
+}
+
+impl IndentOptions {
+    /// What `language`'s pack says (`indent = { unit, tab_width }`): a tab
+    /// unit indents with tabs, spaces with that many. Without a language,
+    /// two spaces, as notes have always had.
+    pub fn for_language(language: Option<&str>) -> Self {
+        let pack = language.and_then(mnote_core::lang::languages::pack);
+        match pack {
+            Some(pack) => {
+                let unit = &pack.indent.unit;
+                let tabstop = (pack.indent.tab_width as usize).max(1);
+                if unit.contains('\t') {
+                    IndentOptions {
+                        shiftwidth: tabstop,
+                        tabstop,
+                        expandtab: false,
+                    }
+                } else {
+                    IndentOptions {
+                        shiftwidth: unit.chars().count().max(1),
+                        tabstop,
+                        expandtab: true,
+                    }
+                }
+            }
+            None => IndentOptions {
+                shiftwidth: 2,
+                tabstop: 4,
+                expandtab: true,
+            },
+        }
+    }
+
+    /// Vim's now.
+    pub fn of(options: &mnote_vim::ex::Options) -> Self {
+        IndentOptions {
+            shiftwidth: options.shiftwidth,
+            tabstop: options.tabstop,
+            expandtab: options.expandtab,
+        }
+    }
+
+    /// Into Vim's.
+    pub fn apply(self, options: &mut mnote_vim::ex::Options) {
+        options.shiftwidth = self.shiftwidth;
+        options.tabstop = self.tabstop;
+        options.expandtab = self.expandtab;
+    }
 }
 
 impl Doc {
     pub(super) fn new(buffer: Buffer, source: Source) -> Self {
+        let indent = IndentOptions::for_language(buffer.language());
         Doc {
+            indent,
             buffer,
             source,
             autosave: Autosave::default(),
@@ -325,6 +388,16 @@ impl Editor {
         std::mem::swap(&mut self.line_cache, &mut doc.line_cache);
         std::mem::swap(&mut self.table_cache, &mut doc.table_cache);
         std::mem::swap(&mut self.image_paths, &mut doc.image_paths);
+        // Vim's indent settings are the shown document's.
+        let shown = IndentOptions::of(self.vim.options());
+        doc.indent.apply(self.vim.options_mut());
+        doc.indent = shown;
+    }
+
+    /// After the shown document's language changed (`:setfiletype`, a
+    /// name given on save): its pack's indent settings.
+    pub(super) fn indent_for_language(&mut self) {
+        IndentOptions::for_language(self.buffer.language()).apply(self.vim.options_mut());
     }
 
     /// Swaps the focused pane's scroll, view and cursor with `local`'s.

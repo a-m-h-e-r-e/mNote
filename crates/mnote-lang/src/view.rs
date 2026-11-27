@@ -42,11 +42,11 @@ pub struct Capture {
 /// A document's trees and text at one moment.
 #[derive(Debug, Clone)]
 pub struct SyntaxSnapshot {
-    rope: Rope,
-    language: String,
-    root: Tree,
+    pub(crate) rope: Rope,
+    pub(crate) language: String,
+    pub(crate) root: Tree,
     /// Injection layers, deepest first.
-    layers: Vec<Layer>,
+    pub(crate) layers: Vec<Layer>,
 }
 
 impl SyntaxSnapshot {

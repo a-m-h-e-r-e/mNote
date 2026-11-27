@@ -162,8 +162,14 @@ impl ExOutcome {
 /// Options set with `:set`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
-    /// `shiftwidth`/`sw`: spaces added or removed by `>` and `<`.
+    /// `shiftwidth`/`sw`: columns added or removed by `>` and `<`, and one
+    /// level of indent.
     pub shiftwidth: usize,
+    /// `tabstop`/`ts`: how many columns a tab is.
+    pub tabstop: usize,
+    /// `expandtab`/`et`: indent with spaces; off, with tabs (and spaces
+    /// for what's less than a tab).
+    pub expandtab: bool,
     /// `ignorecase`/`ic`
     pub ignorecase: bool,
     /// `smartcase`/`scs`: with `ignorecase`, an uppercase letter makes the
@@ -185,6 +191,8 @@ impl Default for Options {
     fn default() -> Self {
         Options {
             shiftwidth: 2,
+            tabstop: 4,
+            expandtab: true,
             ignorecase: true,
             smartcase: true,
             relativenumber: true,
@@ -979,11 +987,14 @@ impl Vim {
                 }
                 continue;
             }
-            if matches!(base, "shiftwidth" | "sw" | "scrolloff" | "so") {
-                let (full, slot) = if base.starts_with("sh") || base == "sw" {
-                    ("shiftwidth", &mut self.options.shiftwidth)
-                } else {
-                    ("scrolloff", &mut self.options.scrolloff)
+            if matches!(
+                base,
+                "shiftwidth" | "sw" | "scrolloff" | "so" | "tabstop" | "ts"
+            ) {
+                let (full, slot) = match base {
+                    "shiftwidth" | "sw" => ("shiftwidth", &mut self.options.shiftwidth),
+                    "tabstop" | "ts" => ("tabstop", &mut self.options.tabstop),
+                    _ => ("scrolloff", &mut self.options.scrolloff),
                 };
                 match value {
                     Some(v) => {
@@ -1003,6 +1014,7 @@ impl Vim {
                     "ic" => "ignorecase",
                     "scs" => "smartcase",
                     "rnu" => "relativenumber",
+                    "et" => "expandtab",
                     other => other,
                 };
                 messages.push(format!("{}{full}", if *slot { "" } else { "no" }));
@@ -1025,8 +1037,10 @@ impl Vim {
         let o = &self.options;
         let on = |b: bool, name: &str| format!("{}{name}", if b { "" } else { "no" });
         format!(
-            "shiftwidth={}  scrolloff={}  {}  {}  {}  {}",
+            "shiftwidth={}  tabstop={}  {}  scrolloff={}  {}  {}  {}  {}",
             o.shiftwidth,
+            o.tabstop,
+            on(o.expandtab, "expandtab"),
             o.scrolloff,
             on(o.ignorecase, "ignorecase"),
             on(o.smartcase, "smartcase"),
@@ -1081,6 +1095,7 @@ fn flag<'a>(options: &'a mut Options, name: &str) -> Option<&'a mut bool> {
         "smartcase" | "scs" => &mut options.smartcase,
         "relativenumber" | "rnu" => &mut options.relativenumber,
         "wrap" => &mut options.wrap,
+        "expandtab" | "et" => &mut options.expandtab,
         _ => return None,
     })
 }

@@ -13,6 +13,7 @@ pub mod error;
 pub mod filetype;
 pub mod grammar;
 pub mod highlight;
+pub mod indent;
 pub mod languages;
 pub mod pack;
 pub mod predicates;

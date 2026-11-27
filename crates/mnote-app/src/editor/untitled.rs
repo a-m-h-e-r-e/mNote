@@ -160,6 +160,7 @@ impl Editor {
                 mnote_core::filetype::for_path(note.as_path()).and_then(|f| f.language)
         {
             self.buffer.set_language(&language);
+            self.indent_for_language();
             let tx = self.syntax_ready.clone();
             self.buffer.on_syntax_ready(move || {
                 let _ = tx.try_send(());

@@ -158,6 +158,12 @@ impl Vim {
                     }
                 }
             }
+            // `=` on a block re-indents its lines, as on lines.
+            Operator::Reindent => {
+                for line in b.top..=b.bottom {
+                    self.reindent_line(line, buf);
+                }
+            }
             Operator::Indent | Operator::Outdent => {
                 let width = self.options.shiftwidth;
                 // Bottom up, so the spans read before editing stay right.

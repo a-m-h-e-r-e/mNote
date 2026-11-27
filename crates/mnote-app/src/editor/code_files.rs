@@ -265,6 +265,7 @@ impl Editor {
         let language =
             mnote_core::lang::languages::pack(name).map_or_else(|| name.to_owned(), |p| p.name);
         self.buffer.set_language(&language);
+        self.indent_for_language();
         let tx = self.syntax_ready.clone();
         self.buffer.on_syntax_ready(move || {
             let _ = tx.try_send(());

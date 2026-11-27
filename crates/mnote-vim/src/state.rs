@@ -40,6 +40,8 @@ pub enum Operator {
     Upper,
     /// `g~`: swaps upper and lower case.
     Toggle,
+    /// `=`: indents lines as their language's syntax says.
+    Reindent,
     /// One added with [`crate::ext::register_operator`], by id.
     Func(u16),
 }
@@ -52,6 +54,7 @@ impl Operator {
             'y' => Operator::Yank,
             '>' => Operator::Indent,
             '<' => Operator::Outdent,
+            '=' => Operator::Reindent,
             _ => return None,
         })
     }
@@ -68,6 +71,7 @@ impl Operator {
             Operator::Lower => 'u',
             Operator::Upper => 'U',
             Operator::Toggle => '~',
+            Operator::Reindent => '=',
             Operator::Func(id) => crate::ext::operator_line_key(id),
         }
     }
@@ -722,11 +726,17 @@ impl Vim {
                 self.enter(Mode::Normal, buf.text());
                 self.done(buf, true);
             }
-            Key::Char(c) => self.typed(buf, &c.to_string()),
+            Key::Char(c) => {
+                self.typed(buf, &c.to_string());
+                self.reindent_after_typing(c, buf);
+            }
             Key::Tab => self.typed(buf, "\t"),
             Key::Enter => {
-                let indent = indent_of(buf.text(), line_of(buf.text(), self.cursor));
-                self.insert_text(buf, &format!("\n{indent}"));
+                let line = line_of(buf.text(), self.cursor);
+                let fallback = indent_of(buf.text(), line);
+                self.insert_text(buf, "\n");
+                let indent = self.syntax_indent(buf, line + 1).unwrap_or(fallback);
+                self.insert_text(buf, &indent);
                 if let Some(s) = &mut self.insert {
                     s.typed.push('\n');
                 }
@@ -1446,6 +1456,12 @@ impl Vim {
                 self.pending = Pending::None;
                 return self.scroll_cursor('\n', buf);
             }
+            // `]p` and `[p` (`]P`, `[P`): put lines, indented to fit.
+            (Pending::Bracket { forward }, Key::Char(c @ ('p' | 'P'))) if self.op.is_none() => {
+                self.pending = Pending::None;
+                self.paste_indented(forward && c == 'p', buf);
+                return Effect::Handled;
+            }
             (Pending::Bracket { forward }, Key::Char(c))
                 if c == if forward { ']' } else { '[' } =>
             {
@@ -1684,15 +1700,21 @@ impl Vim {
             }
             'o' | 'O' => {
                 let count = self.count.take().unwrap_or(1);
-                let indent = indent_of(text, line);
+                let fallback = indent_of(text, line);
                 let (start, end) = (line_start(text, line), line_end(text, line));
                 buf.begin_change(self.cursor);
+                // The new line first, then its indent from the syntax
+                // around it (the tree follows the edit at once).
                 if c == 'o' {
                     self.cursor = end;
-                    self.insert_text(buf, &format!("\n{indent}"));
+                    self.insert_text(buf, "\n");
+                    let indent = self.syntax_indent(buf, line + 1).unwrap_or(fallback);
+                    self.insert_text(buf, &indent);
                 } else {
-                    self.edit(buf, start..start, &format!("{indent}\n"));
-                    self.cursor = start + indent.chars().count();
+                    self.edit(buf, start..start, "\n");
+                    self.cursor = start;
+                    let indent = self.syntax_indent(buf, line).unwrap_or(fallback);
+                    self.insert_text(buf, &indent);
                 }
                 self.start_insert(buf, count, "\n");
             }
@@ -2099,6 +2121,15 @@ impl Vim {
                 }
                 self.start_insert(buf, 1, "");
             }
+            Operator::Reindent => {
+                buf.begin_change(self.cursor);
+                for line in start_line..=end_line {
+                    self.reindent_line(line, buf);
+                }
+                self.cursor = first_non_blank(buf.text(), start_line);
+                buf.end_change(self.cursor);
+                self.done(buf, true);
+            }
             Operator::Indent | Operator::Outdent => {
                 let (first, last) = (start_line, end_line);
                 buf.begin_change(self.cursor);
@@ -2169,6 +2200,47 @@ impl Vim {
             if reg.linewise {
                 self.cursor = line_start(text, line_of(text, self.cursor));
             }
+        }
+        buf.end_change(self.cursor);
+        self.done(buf, true);
+    }
+
+    /// `]p` / `[p`: puts the register's lines after (or before) this one,
+    /// shifted together so the first gets the indent the syntax gives it
+    /// there (without one, this line's, as Vim's `]p`); the lines keep
+    /// their indent relative to each other. Text that isn't whole lines
+    /// goes in as `p` puts it.
+    fn paste_indented(&mut self, after: bool, buf: &mut Buffer) {
+        let count = self.count.take().unwrap_or(1);
+        let Some(reg) = self.registers.get(self.register.take()) else {
+            self.done(buf, false);
+            return;
+        };
+        buf.begin_change(self.cursor);
+        let line = line_of(buf.text(), self.cursor);
+        let here = indent_of(buf.text(), line);
+        self.put(&reg, after, buf, count);
+        if reg.linewise && !reg.block {
+            let first = if after { line + 1 } else { line };
+            let lines = reg.text.lines().count() * count;
+            let want = self.syntax_indent(buf, first).unwrap_or(here);
+            let ts = self.options.tabstop;
+            let width = |s: &str| indent_width(s, ts);
+            let shift = width(&want) as i64 - width(&indent_of(buf.text(), first)) as i64;
+            if shift != 0 {
+                for l in first..(first + lines).min(buf.text().len_lines()) {
+                    let text = buf.text();
+                    let lead = indent_of(text, l);
+                    if line_len(text, l) == lead.chars().count() {
+                        continue;
+                    }
+                    let cols = (width(&lead) as i64 + shift).max(0) as usize;
+                    let start = line_start(text, l);
+                    let new = self.indent_text(cols);
+                    self.edit(buf, start..start + lead.chars().count(), &new);
+                }
+            }
+            self.cursor = first_non_blank(buf.text(), first);
         }
         buf.end_change(self.cursor);
         self.done(buf, true);
@@ -2462,6 +2534,88 @@ fn ends_with_newline(text: &Rope, end: usize) -> bool {
 }
 
 /// The leading spaces and tabs of `line`.
+impl Vim {
+    /// `cols` columns of indent, with spaces, or with `noexpandtab` tabs
+    /// and spaces for what's left.
+    fn indent_text(&self, cols: usize) -> String {
+        if self.options.expandtab {
+            " ".repeat(cols)
+        } else {
+            let ts = self.options.tabstop.max(1);
+            format!("{}{}", "\t".repeat(cols / ts), " ".repeat(cols % ts))
+        }
+    }
+
+    /// The indent the syntax gives line `line` (AMI-234), as text: `None`
+    /// when its language has no indent query or says to keep the indent
+    /// (`@indent.auto`), and the caller does what Vim's `autoindent` does.
+    fn syntax_indent(&self, buf: &mut Buffer, line: usize) -> Option<String> {
+        use mnote_core::lang::indent::Indent;
+        let snapshot = buf.syntax_snapshot()?;
+        let sw = self.options.shiftwidth.max(1);
+        match snapshot.indent(line, sw, self.options.tabstop.max(1))? {
+            Indent::Columns(cols) => Some(self.indent_text(cols)),
+            Indent::Keep => None,
+        }
+    }
+
+    /// `=` on one line: its indent from the syntax. A blank line is
+    /// emptied; a line whose language has no say keeps its indent.
+    pub(crate) fn reindent_line(&mut self, line: usize, buf: &mut Buffer) {
+        let text = buf.text();
+        let start = line_start(text, line);
+        let lead = indent_of(text, line).chars().count();
+        if line_len(text, line) == lead {
+            if lead > 0 {
+                self.edit(buf, start..start + lead, "");
+            }
+            return;
+        }
+        if let Some(indent) = self.syntax_indent(buf, line)
+            && indent != indent_of(buf.text(), line)
+        {
+            self.edit(buf, start..start + lead, &indent);
+        }
+    }
+
+    /// While inserting, a closing bracket typed as a line's first character,
+    /// a `:` (Python's `else:`), or `else` itself re-indents the line, as
+    /// Vim's `indentkeys` (`0}`, `0)`, `0]`, `:`, `e`). Only brackets may
+    /// move it in; the others only take it out.
+    fn reindent_after_typing(&mut self, c: char, buf: &mut Buffer) {
+        let text = buf.text();
+        let line = line_of(text, self.cursor);
+        let start = line_start(text, line);
+        let before: String = text.slice(start..self.cursor).to_string();
+        let typed = before.trim_start();
+        let closer = matches!(typed, "}" | ")" | "]");
+        let word = c == ':' || (c == 'e' && typed == "else");
+        if !closer && !word {
+            return;
+        }
+        let Some(indent) = self.syntax_indent(buf, line) else {
+            return;
+        };
+        let lead = before.len() - typed.len();
+        let old = &before[..lead];
+        let ts = self.options.tabstop;
+        let width = |s: &str| indent_width(s, ts);
+        if indent == old || (!closer && width(&indent) >= width(old)) {
+            return;
+        }
+        let lead_chars = old.chars().count();
+        self.edit(buf, start..start + lead_chars, &indent);
+        self.cursor = self.cursor - lead_chars + indent.chars().count();
+    }
+}
+
+/// How many columns the indent `s` takes, with tabs `tabstop` wide.
+fn indent_width(s: &str, tabstop: usize) -> usize {
+    let ts = tabstop.max(1);
+    s.chars()
+        .fold(0, |w, c| if c == '\t' { w + ts - w % ts } else { w + 1 })
+}
+
 pub(crate) fn indent_of(text: &Rope, line: usize) -> String {
     let start = line_start(text, line);
     (0..line_len(text, line))

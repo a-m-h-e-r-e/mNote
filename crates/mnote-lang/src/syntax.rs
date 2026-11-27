@@ -568,7 +568,7 @@ fn node_text(rope: &Rope, node: Node) -> String {
         .collect()
 }
 
-fn ts_range(rope: &Rope, r: &Range<usize>) -> tree_sitter::Range {
+pub(crate) fn ts_range(rope: &Rope, r: &Range<usize>) -> tree_sitter::Range {
     tree_sitter::Range {
         start_byte: r.start,
         end_byte: r.end,
@@ -602,7 +602,7 @@ pub fn drop_tree_later(tree: Option<Tree>) {
 
 /// Parses `rope` (where the parser's included ranges say), giving up after
 /// `limit`.
-fn parse(
+pub(crate) fn parse(
     parser: &mut Parser,
     rope: &Rope,
     old_tree: Option<&Tree>,
