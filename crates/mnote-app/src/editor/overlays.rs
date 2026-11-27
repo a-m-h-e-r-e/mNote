@@ -91,6 +91,15 @@ impl Editor {
         self.open_picker(picker, cx);
     }
 
+    /// `⌘⇧O`, `:outline`: the focused note's symbols (AMI-240).
+    pub(super) fn open_outline(&mut self, cx: &mut Context<Self>) {
+        let title = self.source.doc_key().label();
+        let text = self.buffer.text().clone();
+        let snapshot = self.buffer.syntax_snapshot();
+        let picker = crate::picker::outline::OutlinePicker::new(title, text, snapshot);
+        self.open_picker(Picker::new(Box::new(picker)), cx);
+    }
+
     pub(super) fn open_picker(&mut self, picker: Picker, cx: &mut Context<Self>) {
         self.picker = Some(picker);
         self.restart_blink(cx);

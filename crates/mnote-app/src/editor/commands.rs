@@ -134,6 +134,15 @@ pub fn builtin() -> Vec<Command> {
         )
         .bind("<D-k>"),
         Command::new(
+            "outline",
+            "Outline",
+            "This file's functions, types and other symbols, or a note's headings: type to filter, ⏎ goes there.",
+            act(|e, _, cx| e.open_outline(cx)),
+        )
+        .bind("<D-S-o>")
+        .shown_as("outline")
+        .ex("outline", 3, ArgKind::None),
+        Command::new(
             "write",
             "Save note",
             "Saves now. Notes also save a second after you stop typing.",

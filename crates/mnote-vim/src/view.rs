@@ -119,6 +119,12 @@ impl Vim {
         self.jumps = Jumps::default();
     }
 
+    /// Remembers the cursor as where a jump starts, for a jump the app
+    /// makes (the outline's): `''` and `⌃o` come back.
+    pub fn mark_jump(&mut self, text: &ropey::Rope) {
+        self.record_jump(text);
+    }
+
     /// Remembers the cursor as where a jump starts: for `''` and `⌃o`.
     pub(crate) fn record_jump(&mut self, text: &ropey::Rope) {
         self.marks.insert('\'', self.cursor);

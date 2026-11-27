@@ -327,6 +327,8 @@ impl Editor {
 
     pub(super) fn go_to_line(&mut self, line: usize) {
         let rope = self.buffer.text();
+        // A jump: `⌃o` comes back.
+        self.vim.mark_jump(rope);
         let line = line.min(line_count(rope).saturating_sub(1));
         self.vim.set_cursor(line_start(rope, line));
         self.lines.scroll_to_reveal_item(line);

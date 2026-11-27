@@ -190,6 +190,9 @@ const KNOWN_DIRECTIVES: &[&str] = &[
     // Text objects: joins two captures into one range (read by the editing
     // services that use them).
     "make-range!",
+    // Tags queries: trim a doc comment's markers, join adjacent comments.
+    "strip!",
+    "select-adjacent!",
 ];
 
 fn nodes<'a>(m: &'a QueryMatch, capture: u32) -> impl Iterator<Item = Node<'a>> + 'a {

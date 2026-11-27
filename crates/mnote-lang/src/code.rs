@@ -226,6 +226,9 @@ struct Builtin {
     language: Language,
     highlights: Vec<&'static str>,
     injections: Vec<&'static str>,
+    /// Its `tags` query (definitions, for the outline), the grammar
+    /// crate's own.
+    tags: Vec<&'static str>,
     /// Whether its highlight query expects later patterns to win where they
     /// overlap. The grammar crates don't agree (Python's puts its catch-all
     /// `(identifier) @variable` first, JSON its specific key pattern first);
@@ -242,6 +245,7 @@ fn builtin_grammars() -> Vec<Builtin> {
         language,
         highlights: highlights.to_vec(),
         injections: Vec::new(),
+        tags: Vec::new(),
         later_wins: true,
     };
     vec![
@@ -251,16 +255,22 @@ fn builtin_grammars() -> Vec<Builtin> {
             injections: vec![tree_sitter_md::INJECTION_QUERY_BLOCK],
             ..b("markdown", tree_sitter_md::LANGUAGE.into(), &[])
         },
-        b(
-            "rust",
-            tree_sitter_rust::LANGUAGE.into(),
-            &[tree_sitter_rust::HIGHLIGHTS_QUERY],
-        ),
-        b(
-            "python",
-            tree_sitter_python::LANGUAGE.into(),
-            &[tree_sitter_python::HIGHLIGHTS_QUERY],
-        ),
+        Builtin {
+            tags: vec![tree_sitter_rust::TAGS_QUERY],
+            ..b(
+                "rust",
+                tree_sitter_rust::LANGUAGE.into(),
+                &[tree_sitter_rust::HIGHLIGHTS_QUERY],
+            )
+        },
+        Builtin {
+            tags: vec![tree_sitter_python::TAGS_QUERY],
+            ..b(
+                "python",
+                tree_sitter_python::LANGUAGE.into(),
+                &[tree_sitter_python::HIGHLIGHTS_QUERY],
+            )
+        },
         b(
             "javascript",
             tree_sitter_javascript::LANGUAGE.into(),
@@ -312,6 +322,18 @@ pub(crate) fn builtin_queries() -> Vec<(String, &'static str, String)> {
         }
         if !b.injections.is_empty() {
             out.push((b.grammar.to_owned(), "injections", b.injections.join("\n")));
+        }
+        // TypeScript's tags add to JavaScript's, as its highlights do.
+        let tags = match b.grammar {
+            "javascript" => vec![tree_sitter_javascript::TAGS_QUERY],
+            "typescript" | "tsx" => vec![
+                tree_sitter_javascript::TAGS_QUERY,
+                tree_sitter_typescript::TAGS_QUERY,
+            ],
+            _ => b.tags.clone(),
+        };
+        if !tags.is_empty() {
+            out.push((b.grammar.to_owned(), "tags", tags.join("\n")));
         }
     }
     for (language, kind, text) in crate::editing::BUNDLED {

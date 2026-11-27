@@ -16,6 +16,7 @@ pub mod grammar;
 pub mod highlight;
 pub mod indent;
 pub mod languages;
+pub mod outline;
 pub mod pack;
 pub mod predicates;
 pub mod queries;

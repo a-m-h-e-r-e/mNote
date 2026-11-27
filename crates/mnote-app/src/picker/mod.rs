@@ -12,6 +12,7 @@ pub mod custom;
 pub mod explorer;
 pub mod finder;
 pub mod list;
+pub mod outline;
 pub mod palette;
 
 use std::ops::Range;
@@ -186,6 +187,8 @@ pub enum JobResult {
         generation: u64,
         files: Vec<FileHits>,
     },
+    /// A file's outline, built from its syntax.
+    Outline(Vec<mnote_core::lang::outline::Symbol>),
     /// Plain-text mentions of a note, for backlinks.
     Mentions(Vec<(NotePath, mnote_core::mentions::Mention)>),
     /// Links rewritten after a rename or move; `message` is the toast to

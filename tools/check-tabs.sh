@@ -443,6 +443,24 @@ expect folds 4 'folds - | line 2'
 expect folds 5 'folds - | line 1'
 expect folds 6 'folds 1-4 | line 1'
 
+# The outline (AMI-240): ⌘⇧O lists f.rs's functions; typing filters, ⏎
+# goes there, and ⌃o comes back.
+cat > "$SANDBOX/outline.keys" <<'KEYS'
+:e f.rs<CR>
+wait 300
+stroke cmd-shift-o
+wait 400
+state
+b<CR>
+state
+<C-o>
+state
+KEYS
+run outline
+expect outline 1 'overlay open'
+expect outline 2 'overlay none | mode NORMAL | reply - | folds - | line 6'
+expect outline 3 'line 1'
+
 # Restoring: three runs on one vault, the session kept between them.
 printf 'vault = "%s"\nrestore_session = true\n' "$VAULT" > "$CONFIG"
 cat > "$SANDBOX/session1.keys" <<'KEYS'

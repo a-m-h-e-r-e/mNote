@@ -469,7 +469,7 @@ impl PickerDelegate for BacklinksPicker {
                     undo: false,
                 });
             }
-            JobResult::Content { .. } => {}
+            JobResult::Content { .. } | JobResult::Outline(_) => {}
         }
     }
 

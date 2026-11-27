@@ -109,7 +109,89 @@ fn item_kind(kind: &str) -> Option<(Option<&'static str>, &'static str)> {
     })
 }
 
+/// An outline symbol as a breadcrumb: its kind word and colour.
+fn symbol_crumb(symbol: &mnote_core::lang::outline::Symbol) -> Crumb {
+    let (kind, scope) = match symbol.kind.as_str() {
+        "function" | "method" => (Some("fn"), "function"),
+        "module" | "namespace" => (Some("mod"), "module"),
+        "interface" => (Some("interface"), "type"),
+        "macro" => (Some("macro"), "function.macro"),
+        "heading" => (None, "markup.heading"),
+        "constant" => (None, "constant"),
+        _ => (None, "type"),
+    };
+    Crumb {
+        kind,
+        name: symbol.name.lines().next().unwrap_or("").to_owned(),
+        scope,
+    }
+}
+
 impl Editor {
+    /// Builds, in the background, the outline of each note another pane
+    /// shows whose text changed since (its breadcrumbs come from it).
+    pub(super) fn refresh_outlines(&mut self, cx: &mut Context<Self>) {
+        let keys: Vec<DocKey> = self
+            .panes
+            .iter()
+            .filter(|s| s.id != self.focused)
+            .map(|s| s.note.clone())
+            .collect();
+        for key in keys {
+            // The note may be the focused pane's too, and then it's shown.
+            let buffer = if key == self.source.doc_key() {
+                &mut self.buffer
+            } else {
+                match self.parked_index(&key) {
+                    Some(i) => &mut self.parked[i].buffer,
+                    None => continue,
+                }
+            };
+            let revision = buffer.revision();
+            if self
+                .outlines
+                .get(&key)
+                .is_some_and(|(at, _)| *at == revision)
+                || self.outline_finding.contains(&key)
+            {
+                continue;
+            }
+            let Some(snapshot) = buffer.syntax_snapshot() else {
+                continue;
+            };
+            self.outline_finding.insert(key.clone());
+            cx.spawn(async move |this, cx| {
+                let outline = cx
+                    .background_executor()
+                    .spawn(async move { snapshot.outline() })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.outline_finding.remove(&key);
+                    this.outlines.insert(key, (revision, Rc::new(outline)));
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        // Forget those no pane shows.
+        let shown: Vec<DocKey> = self.panes.iter().map(|s| s.note.clone()).collect();
+        self.outlines.retain(|k, _| shown.contains(k));
+    }
+
+    /// The symbols around another pane's cursor, from its note's outline.
+    fn other_crumbs(&self, pane: PaneId) -> Vec<Crumb> {
+        let Some(slot) = self.panes.iter().find(|s| s.id == pane) else {
+            return Vec::new();
+        };
+        let (Some(local), Some((_, outline))) = (&slot.local, self.outlines.get(&slot.note)) else {
+            return Vec::new();
+        };
+        mnote_core::lang::view::SyntaxSnapshot::symbols_at(outline, local.cursor)
+            .into_iter()
+            .map(symbol_crumb)
+            .collect()
+    }
+
     /// The symbols around the focused pane's cursor, outermost first.
     fn crumbs(&self) -> Vec<Crumb> {
         let Some(tree) = &self.tree else {
@@ -191,7 +273,7 @@ impl Editor {
         let crumbs = if pane == self.focused {
             self.crumbs()
         } else {
-            Vec::new()
+            self.other_crumbs(pane)
         };
         let theme = cx.theme();
         let color_of =

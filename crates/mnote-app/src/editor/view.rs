@@ -312,6 +312,7 @@ impl Render for Editor {
         self.sync_window(window);
         // The session is written a second after panes or tabs change.
         self.schedule_session_save(cx);
+        self.refresh_outlines(cx);
         crate::startup::first_frame();
         let rope = self.buffer.text();
         let cursor = self.vim.cursor();
