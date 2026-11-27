@@ -130,6 +130,9 @@ pub(crate) struct InsertSession {
     pub(crate) broken: bool,
     /// Where typing started, for `⌃u`.
     pub(crate) start: usize,
+    /// Closers auto-pairs put after the cursor, nearest first: what a count
+    /// repeats after the typed text, and what typing a closer steps over.
+    pub(crate) closers: String,
 }
 
 /// A REPLACE-mode session (`R`): what each typed character overwrote, for
@@ -715,8 +718,10 @@ impl Vim {
                     && session.count > 1
                     && !session.broken
                 {
-                    let unit = format!("{}{}", session.prefix, session.typed);
+                    let unit = format!("{}{}{}", session.prefix, session.typed, session.closers);
                     let repeat = unit.repeat(session.count - 1);
+                    // The repeats go after the closers auto-pairs left.
+                    self.cursor += session.closers.chars().count();
                     self.insert_text(buf, &repeat);
                 }
                 // `I` / `A` / `c` on a block: the same typing on its other lines.
@@ -733,10 +738,13 @@ impl Vim {
                 self.done(buf, true);
             }
             Key::Char(c) => {
-                self.typed(buf, &c.to_string());
+                if !self.auto_pair(c, buf) {
+                    self.typed(buf, &c.to_string());
+                }
                 self.reindent_after_typing(c, buf);
             }
             Key::Tab => self.typed(buf, "\t"),
+            Key::Enter if self.between_pair(buf, true).is_some() => self.open_pair(buf),
             Key::Enter => {
                 let line = line_of(buf.text(), self.cursor);
                 let fallback = indent_of(buf.text(), line);
@@ -745,6 +753,20 @@ impl Vim {
                 self.insert_text(buf, &indent);
                 if let Some(s) = &mut self.insert {
                     s.typed.push('\n');
+                }
+            }
+            Key::Backspace | Key::Ctrl('h') if self.between_pair(buf, false).is_some() => {
+                // Between a pair: both go.
+                self.cursor -= 1;
+                self.edit(buf, self.cursor..self.cursor + 2, "");
+                if let Some(s) = &mut self.insert {
+                    if s.typed.pop().is_none() {
+                        s.broken = true;
+                    }
+                    if !s.closers.is_empty() {
+                        s.closers.remove(0);
+                    }
+                    s.start = s.start.min(self.cursor);
                 }
             }
             Key::Backspace | Key::Ctrl('h') => {
@@ -2624,6 +2646,128 @@ fn ends_with_newline(text: &Rope, end: usize) -> bool {
 
 /// The leading spaces and tabs of `line`.
 impl Vim {
+    /// The pairs auto-pairs uses at the cursor: the language's single
+    /// character `auto_pairs`, in code only (a fence's, not a note's
+    /// prose), with `autopairs` on.
+    fn pairs_here(&self, buf: &mut Buffer) -> Option<PairsHere> {
+        if !self.options.autopairs {
+            return None;
+        }
+        let syntax = buf.syntax_snapshot();
+        let language = match &syntax {
+            Some(s) => s.language_at(self.cursor).to_owned(),
+            None => buf.language()?.to_owned(),
+        };
+        if language == "markdown" {
+            return None;
+        }
+        let pack = mnote_core::lang::languages::pack(&language)?;
+        let one = |s: &str| {
+            let mut c = s.chars();
+            match (c.next(), c.next()) {
+                (Some(c), None) => Some(c),
+                _ => None,
+            }
+        };
+        let pairs: Vec<(char, char)> = pack
+            .auto_pairs
+            .iter()
+            .filter_map(|(o, c)| Some((one(o)?, one(c)?)))
+            .collect();
+        (!pairs.is_empty()).then_some((pairs, syntax))
+    }
+
+    /// Typing `c` with auto-pairs: an opener adds its closer after the
+    /// cursor, and a closer just before the same one steps over it. Nothing
+    /// pairs before a word character or inside a string or comment, nor a
+    /// quote after a word character. Whether it was handled.
+    fn auto_pair(&mut self, c: char, buf: &mut Buffer) -> bool {
+        if c.is_alphanumeric() || c.is_whitespace() {
+            return false;
+        }
+        let Some((pairs, syntax)) = self.pairs_here(buf) else {
+            return false;
+        };
+        let text = buf.text();
+        let next = (self.cursor < text.len_chars())
+            .then(|| text.char(self.cursor))
+            .filter(|n| *n != '\n');
+        let prev = (self.cursor > 0).then(|| text.char(self.cursor - 1));
+        let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+        // Step over the closer that's already there.
+        if next == Some(c) && pairs.iter().any(|(_, close)| *close == c) {
+            self.cursor += 1;
+            if let Some(s) = &mut self.insert {
+                s.typed.push(c);
+                if s.closers.starts_with(c) {
+                    s.closers.remove(0);
+                }
+            }
+            return true;
+        }
+        let Some(&(open, close)) = pairs.iter().find(|(o, _)| *o == c) else {
+            return false;
+        };
+        if word(next) || (open == close && word(prev)) {
+            return false;
+        }
+        // Inside a string or a comment, brackets and quotes are just text.
+        if syntax
+            .as_ref()
+            .is_some_and(|s| s.is_literal_at(self.cursor))
+        {
+            return false;
+        }
+        let at = self.cursor;
+        self.edit(buf, at..at, &format!("{open}{close}"));
+        self.cursor = at + 1;
+        if let Some(s) = &mut self.insert {
+            s.typed.push(open);
+            s.closers.insert(0, close);
+        }
+        true
+    }
+
+    /// The pair the cursor sits between (`(|)`), if auto-pairs is on here;
+    /// with `brackets`, only a bracket pair, not quotes.
+    fn between_pair(&self, buf: &mut Buffer, brackets: bool) -> Option<(char, char)> {
+        let text = buf.text();
+        if self.cursor == 0 || self.cursor >= text.len_chars() {
+            return None;
+        }
+        let (prev, next) = (text.char(self.cursor - 1), text.char(self.cursor));
+        // Cheap first: most keys aren't between punctuation.
+        if !prev.is_ascii_punctuation() || !next.is_ascii_punctuation() {
+            return None;
+        }
+        let (pairs, _) = self.pairs_here(buf)?;
+        pairs
+            .into_iter()
+            .find(|&(o, c)| o == prev && c == next && (!brackets || o != c))
+    }
+
+    /// Enter between a bracket pair (`{|}`): the closer goes to a line of
+    /// its own and the cursor to an indented line between.
+    fn open_pair(&mut self, buf: &mut Buffer) {
+        let line = line_of(buf.text(), self.cursor);
+        let fallback = indent_of(buf.text(), line);
+        self.insert_text(buf, "\n");
+        let at = self.cursor;
+        self.edit(buf, at..at, "\n");
+        // The closer's line, then the one between.
+        let closer = self
+            .syntax_indent(buf, line + 2)
+            .unwrap_or_else(|| fallback.clone());
+        let start = line_start(buf.text(), line + 2);
+        self.edit(buf, start..start, &closer);
+        let inner = self.syntax_indent(buf, line + 1).unwrap_or(fallback);
+        self.insert_text(buf, &inner);
+        if let Some(s) = &mut self.insert {
+            // Repeating can't replay this: it depends on what's around.
+            s.broken = true;
+        }
+    }
+
     /// `gc` and `gb` on `range` (lines `first..=last`): the comment edits
     /// for the language there, one undo step, the cursor moving with its
     /// text. A language without comments says so.
@@ -2780,6 +2924,9 @@ impl Vim {
         Effect::Handled
     }
 }
+
+/// The auto-pairs at the cursor, and the syntax it was read from.
+type PairsHere = (Vec<(char, char)>, Option<crate::ext::SyntaxSnapshot>);
 
 /// The code object a text-object key names (AMI-236): `f` a function, `c`
 /// a class, `a` a parameter (argument), `/` a comment.

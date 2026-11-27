@@ -538,12 +538,16 @@ impl Buffer {
         let language = self.language.clone()?;
         let syntax = self.syntax.as_mut()?;
         let root = syntax.tree(rope)?.clone();
-        Some(mnote_lang::view::SyntaxSnapshot::new(
-            rope.clone(),
-            &language,
-            root,
-            syntax.layers(rope),
-        ))
+        let stale = !syntax.is_current();
+        Some(
+            mnote_lang::view::SyntaxSnapshot::new(
+                rope.clone(),
+                &language,
+                root,
+                syntax.layers(rope),
+            )
+            .with_stale(stale),
+        )
     }
 
     /// Switches to `language` (`:setfiletype`): its parser from now on, or

@@ -351,6 +351,8 @@ pub struct Config {
     pub preview_tabs: bool,
     /// Reopen the vault's panes and tabs as they were left.
     pub restore_session: bool,
+    /// In code, an opening bracket or quote typed adds its closer.
+    pub auto_pairs: bool,
     /// Show the window's close, minimize and zoom buttons (ADR-0015: they
     /// are hidden, and the tab rows reach the window's top edge).
     pub window_buttons: bool,
@@ -427,6 +429,7 @@ impl Default for Config {
             show_tabs: TabsChoice::Auto,
             preview_tabs: true,
             restore_session: true,
+            auto_pairs: true,
             window_buttons: false,
             large_file_injections_mb: 4,
             large_file_highlight_mb: 16,
@@ -532,6 +535,9 @@ impl Config {
                             ));
                         }
                     }
+                }
+                "auto_pairs" => {
+                    config.auto_pairs = value.as_bool().ok_or_else(|| wrong("true or false"))?;
                 }
                 "restore_session" => {
                     config.restore_session =
@@ -951,6 +957,16 @@ impl Config {
                 quoted(self.show_tabs.name()),
             ),
             Setting::new(
+                "auto_pairs",
+                &format!(
+                    "In code files and code blocks, typing an opening bracket or quote\n\
+                     adds its closer, typing the closer steps over it, and Backspace\n\
+                     between them deletes both. Values: true, false. Default: {}",
+                    on_off(d.auto_pairs)
+                ),
+                on_off(self.auto_pairs).into(),
+            ),
+            Setting::new(
                 "restore_session",
                 &format!(
                     "Reopen the vault's panes and tabs as they were left, with their\n\
@@ -1364,6 +1380,7 @@ mod tests {
             show_tabs: TabsChoice::Auto,
             preview_tabs: true,
             restore_session: true,
+            auto_pairs: true,
             window_buttons: false,
             large_file_injections_mb: 2,
             large_file_highlight_mb: 8,

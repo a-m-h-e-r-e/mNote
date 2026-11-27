@@ -19,6 +19,8 @@ name = "rust"
 aliases = ["rs"]
 extensions = ["rs"]
 comment = { line = "//", block = ["/*", "*/"] }
+# No `'`: it starts lifetimes (`&'a`) as often as characters.
+auto_pairs = [["(", ")"], ["[", "]"], ["{", "}"], ["\"", "\""]]
 roots = ["Cargo.toml", ".git"]
 servers = ["rust-analyzer"]
 formatter = ["rustfmt", "--emit=stdout", "--edition=2024"]

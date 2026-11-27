@@ -170,6 +170,9 @@ pub struct Options {
     /// `expandtab`/`et`: indent with spaces; off, with tabs (and spaces
     /// for what's less than a tab).
     pub expandtab: bool,
+    /// `autopairs`/`ap`: in code, an opening bracket or quote typed adds
+    /// its closer (config.toml's `auto_pairs`).
+    pub autopairs: bool,
     /// `ignorecase`/`ic`
     pub ignorecase: bool,
     /// `smartcase`/`scs`: with `ignorecase`, an uppercase letter makes the
@@ -193,6 +196,7 @@ impl Default for Options {
             shiftwidth: 2,
             tabstop: 4,
             expandtab: true,
+            autopairs: true,
             ignorecase: true,
             smartcase: true,
             relativenumber: true,
@@ -1015,6 +1019,7 @@ impl Vim {
                     "scs" => "smartcase",
                     "rnu" => "relativenumber",
                     "et" => "expandtab",
+                    "ap" => "autopairs",
                     other => other,
                 };
                 messages.push(format!("{}{full}", if *slot { "" } else { "no" }));
@@ -1096,6 +1101,7 @@ fn flag<'a>(options: &'a mut Options, name: &str) -> Option<&'a mut bool> {
         "relativenumber" | "rnu" => &mut options.relativenumber,
         "wrap" => &mut options.wrap,
         "expandtab" | "et" => &mut options.expandtab,
+        "autopairs" | "ap" => &mut options.autopairs,
         _ => return None,
     })
 }

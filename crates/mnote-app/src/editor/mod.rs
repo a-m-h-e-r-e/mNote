@@ -725,6 +725,7 @@ impl Editor {
         self.vim.share_clipboard(config.system_clipboard);
         self.vim.set_wrap_motion(config.wrap_motion);
         self.vim.options_mut().scrolloff = config.scrolloff as usize;
+        self.vim.options_mut().autopairs = config.auto_pairs;
         // config.toml's mappings replace the built-in ones (only mapping
         // commands; anything else is reported).
         if let Some(lines) = &config.mappings {

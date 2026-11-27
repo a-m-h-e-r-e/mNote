@@ -24,6 +24,8 @@ mod insert_keys;
 mod keys;
 mod macros;
 mod motion;
+#[cfg(test)]
+mod pair_tests;
 mod registers;
 mod state;
 pub mod text;

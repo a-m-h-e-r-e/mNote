@@ -47,6 +47,9 @@ pub struct SyntaxSnapshot {
     pub(crate) root: Tree,
     /// Injection layers, deepest first.
     pub(crate) layers: Vec<Layer>,
+    /// Its trees only follow the latest edits by shifting: what was just
+    /// typed isn't parsed into them yet.
+    stale: bool,
 }
 
 impl SyntaxSnapshot {
@@ -59,7 +62,15 @@ impl SyntaxSnapshot {
             language: language.to_owned(),
             root,
             layers,
+            stale: false,
         }
+    }
+
+    /// Marks it as taken while a parse is still catching up with the text
+    /// (see [`Self::is_literal_at`]).
+    pub fn with_stale(mut self, stale: bool) -> Self {
+        self.stale = stale;
+        self
     }
 
     /// The text it was taken of.
@@ -75,6 +86,33 @@ impl SyntaxSnapshot {
             .iter()
             .find(|l| l.covers(byte))
             .map_or(self.language.as_str(), |l| l.language.as_str())
+    }
+
+    /// Whether character `pos` is inside a string or a comment (or a
+    /// character literal, a heredoc, a regex), in the deepest tree there:
+    /// where brackets and quotes are text, not code.
+    pub fn is_literal_at(&self, pos: usize) -> bool {
+        const LITERALS: [&str; 5] = ["string", "comment", "char_literal", "heredoc", "regex"];
+        let byte = self.byte(pos);
+        let (tree, language, ranges) = match self.layers.iter().find(|l| l.covers(byte)) {
+            Some(l) => (&l.tree, l.language.as_str(), Some(l.ranges.as_slice())),
+            None => (&self.root, self.language.as_str(), None),
+        };
+        // A quote just typed isn't in a shifted tree: parse it in first.
+        let fresh = if self.stale {
+            crate::indent::reparse(&self.rope, tree, language, ranges)
+        } else {
+            None
+        };
+        let tree = fresh.as_ref().unwrap_or(tree);
+        let mut node = tree.root_node().descendant_for_byte_range(byte, byte);
+        while let Some(n) = node {
+            if LITERALS.iter().any(|k| n.kind().contains(k)) {
+                return true;
+            }
+            node = n.parent();
+        }
+        false
     }
 
     /// The nodes at character `pos`, innermost first: in the deepest layer

@@ -324,7 +324,7 @@ impl SyntaxSnapshot {
 
 /// `tree` parsed again for `rope` (in `ranges` for a layer), reusing it:
 /// quick after a small edit. `None` if that can't be done in time.
-fn reparse(
+pub(crate) fn reparse(
     rope: &ropey::Rope,
     tree: &Tree,
     language: &str,

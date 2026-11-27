@@ -137,7 +137,7 @@ impl Motion {
     /// engine then takes a snapshot of for it.
     pub fn wants_syntax(self) -> bool {
         match self {
-            Motion::Object { .. } => true,
+            Motion::Object { .. } | Motion::MatchingBracket => true,
             Motion::Custom(id) => crate::ext::motion(id).is_some_and(|(run, _)| run.wants_syntax()),
             _ => false,
         }
@@ -250,7 +250,7 @@ impl Motion {
                         keep_column: false,
                     });
                 }
-                None => matching_bracket(text, pos)?,
+                None => matching_bracket(text, pos, syntax)?,
             },
             Motion::ParagraphForward => repeat(n, pos, |p| paragraph_forward(text, p)),
             Motion::ParagraphBackward => repeat(n, pos, |p| paragraph_backward(text, p)),
@@ -493,7 +493,24 @@ fn find_in_line(text: &Rope, pos: usize, find: Find, n: usize, repeating: bool) 
     None
 }
 
-fn matching_bracket(text: &Rope, pos: usize) -> Option<usize> {
+/// `%`, skipping brackets in strings and comments when there's syntax to
+/// tell (and the one under the cursor isn't in one itself).
+fn matching_bracket(
+    text: &Rope,
+    pos: usize,
+    syntax: Option<&crate::ext::SyntaxSnapshot>,
+) -> Option<usize> {
+    let line = line_of(text, pos);
+    let end = line_end(text, line);
+    let skip = |i: usize| syntax.is_some_and(|s| s.is_literal_at(i));
+    let at = (pos..end).find(|&i| matches!(text.char(i), '(' | '[' | '{' | ')' | ']' | '}'));
+    match at {
+        Some(at) if syntax.is_some() && !skip(at) => scan_bracket(text, pos, &skip),
+        _ => scan_bracket(text, pos, &|_| false),
+    }
+}
+
+fn scan_bracket(text: &Rope, pos: usize, skip: &dyn Fn(usize) -> bool) -> Option<usize> {
     let line = line_of(text, pos);
     let end = line_end(text, line);
     // Use the bracket under the cursor, or the first one after it on the line.
@@ -513,6 +530,9 @@ fn matching_bracket(text: &Rope, pos: usize) -> Option<usize> {
     if forward {
         for i in at..text.len_chars() {
             let c = text.char(i);
+            if (c == open || c == close) && skip(i) {
+                continue;
+            }
             if c == open {
                 depth += 1;
             } else if c == close {
@@ -525,6 +545,9 @@ fn matching_bracket(text: &Rope, pos: usize) -> Option<usize> {
     } else {
         for i in (0..=at).rev() {
             let c = text.char(i);
+            if (c == open || c == close) && skip(i) {
+                continue;
+            }
             if c == close {
                 depth += 1;
             } else if c == open {
