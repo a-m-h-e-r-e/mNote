@@ -314,7 +314,17 @@ pub(crate) fn builtin_queries() -> Vec<(String, &'static str, String)> {
             out.push((b.grammar.to_owned(), "injections", b.injections.join("\n")));
         }
     }
+    for (language, kind, text) in crate::editing::BUNDLED {
+        out.push(((*language).to_owned(), *kind, (*text).to_owned()));
+    }
     out
+}
+
+/// Whether `lang`'s queries may come from Neovim's folders: only for a
+/// grammar loaded at run time, which is likely the one those queries were
+/// written for. Built-in grammars use mNote's own, the user's and plugins'.
+pub(crate) fn takes_neovim_queries(lang: &str) -> bool {
+    for_lang(lang).is_some_and(|e| e.loaded)
 }
 
 /// Languages added with [`register_language`], kept across rebuilds.

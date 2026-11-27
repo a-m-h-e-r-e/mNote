@@ -8,6 +8,7 @@
 
 pub mod code;
 pub mod coords;
+pub mod editing;
 pub mod error;
 pub mod filetype;
 pub mod grammar;

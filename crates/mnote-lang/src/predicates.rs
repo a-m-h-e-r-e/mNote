@@ -7,6 +7,7 @@
 //! - `#contains?`: the text holds one of the strings;
 //! - `#has-ancestor?`, `#has-parent?`: the node's ancestors or parent have one
 //!   of the types;
+//! - `#kind-eq?`: the node is one of the types;
 //! - `#offset!`: moves a capture's edges by rows and columns.
 //!
 //! A pattern using a predicate mNote doesn't know never matches (it's
@@ -39,6 +40,11 @@ enum Check {
         kinds: Vec<String>,
         negate: bool,
         parent_only: bool,
+    },
+    Kind {
+        capture: u32,
+        kinds: Vec<String>,
+        negate: bool,
     },
 }
 
@@ -118,6 +124,11 @@ impl Checks {
                             parent_only: base == "has-parent?",
                         })
                     }
+                    ("kind-eq?", Some(capture)) => list.push(Check::Kind {
+                        capture,
+                        kinds: strings,
+                        negate,
+                    }),
                     ("offset!", Some(capture)) => {
                         let n: Vec<i64> = strings.iter().filter_map(|s| s.parse().ok()).collect();
                         if let [r1, c1, r2, c2] = n[..] {
@@ -176,6 +187,9 @@ const KNOWN_DIRECTIVES: &[&str] = &[
     "gsub!",
     "trim!",
     "downcase!",
+    // Text objects: joins two captures into one range (read by the editing
+    // services that use them).
+    "make-range!",
 ];
 
 fn nodes<'a>(m: &'a QueryMatch, capture: u32) -> impl Iterator<Item = Node<'a>> + 'a {
@@ -234,6 +248,11 @@ fn check_one(check: &Check, m: &QueryMatch, rope: &Rope) -> bool {
             }
             found != *negate
         }),
+        Check::Kind {
+            capture,
+            kinds,
+            negate,
+        } => nodes(m, *capture).all(|n| kinds.iter().any(|k| k == n.kind()) != *negate),
     }
 }
 
@@ -405,6 +424,11 @@ mod tests {
             code,
         );
         assert_eq!(found, ["MAX", "small", "Foo", "new"]);
+        let code = "fn f(x: u8) { g(x) }";
+        let (found, _) = rust_matches(r#"((_ (identifier) @c) @n (#kind-eq? @n parameter))"#, code);
+        assert_eq!(found, ["x: u8", "x"]);
+        let (found, _) = rust_matches(r#"(((identifier) @c) (#not-kind-eq? @c identifier))"#, code);
+        assert!(found.is_empty());
     }
 
     #[test]

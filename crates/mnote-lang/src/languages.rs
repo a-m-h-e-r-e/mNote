@@ -64,7 +64,11 @@ struct Registry {
     queries: QuerySet,
     /// Resolved queries by language and kind, filled as they're asked for.
     resolved: Mutex<HashMap<(String, String), Option<Resolved>>>,
+    /// Compiled editing queries by language and kind, the same way.
+    editing: Mutex<EditingCache>,
 }
+
+type EditingCache = HashMap<(String, String), Option<Arc<crate::editing::EditingQuery>>>;
 
 fn cell() -> &'static RwLock<Arc<Registry>> {
     static REGISTRY: OnceLock<RwLock<Arc<Registry>>> = OnceLock::new();
@@ -217,6 +221,7 @@ fn build(
         packs,
         queries,
         resolved: Mutex::new(HashMap::new()),
+        editing: Mutex::new(HashMap::new()),
     };
     (registry, found)
 }
@@ -309,6 +314,47 @@ pub fn query(language: &str, kind: &str) -> Option<Resolved> {
         cache.insert(key, resolved.clone());
     }
     resolved
+}
+
+/// `language`'s editing query of `kind` as text (see [`crate::editing`]):
+/// for a built-in grammar without Neovim's files, which don't fit it.
+pub fn editing_query_text(language: &str, kind: &str) -> Option<Resolved> {
+    let registry = current();
+    let resolved = if crate::code::takes_neovim_queries(language) {
+        registry.queries.resolve(language, kind)
+    } else {
+        registry
+            .queries
+            .resolve_without(language, kind, Layer::Neovim)
+    };
+    match resolved {
+        Ok(r) => r,
+        Err(err) => {
+            report([err]);
+            None
+        }
+    }
+}
+
+/// `language`'s editing query of `kind`, compiled once per registry.
+pub(crate) fn editing_query(
+    language: &str,
+    kind: &str,
+) -> Option<Arc<crate::editing::EditingQuery>> {
+    let registry = current();
+    let key = (language.to_owned(), kind.to_owned());
+    if let Ok(cache) = registry.editing.lock()
+        && let Some(hit) = cache.get(&key)
+    {
+        return hit.clone();
+    }
+    let compiled = editing_query_text(language, kind)
+        .and_then(|r| crate::editing::compile(language, kind, &r.text))
+        .map(Arc::new);
+    if let Ok(mut cache) = registry.editing.lock() {
+        cache.insert(key, compiled.clone());
+    }
+    compiled
 }
 
 /// The language of a file: by its exact name, then its extension, then its

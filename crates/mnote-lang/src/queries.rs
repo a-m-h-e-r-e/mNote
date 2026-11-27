@@ -155,16 +155,29 @@ impl QuerySet {
     /// when it has none. A required parent that's missing, or an
     /// inheritance loop, is an error.
     pub fn resolve(&self, language: &str, kind: &str) -> Result<Option<Resolved>, LangError> {
-        self.resolve_seen(language, kind, &mut HashSet::new())
+        self.resolve_seen(language, kind, None, &mut HashSet::new())
+    }
+
+    /// The same, leaving out every file of `skip` (inherited ones too):
+    /// Neovim's, for a grammar whose version theirs weren't written for.
+    pub fn resolve_without(
+        &self,
+        language: &str,
+        kind: &str,
+        skip: Layer,
+    ) -> Result<Option<Resolved>, LangError> {
+        self.resolve_seen(language, kind, Some(skip), &mut HashSet::new())
     }
 
     fn resolve_seen(
         &self,
         language: &str,
         kind: &str,
+        skip: Option<Layer>,
         seen: &mut HashSet<String>,
     ) -> Result<Option<Resolved>, LangError> {
-        let files = self.files_for(language, kind)?;
+        let mut files = self.files_for(language, kind)?;
+        files.retain(|f| Some(f.layer) != skip);
         if files.is_empty() {
             return Ok(None);
         }
@@ -188,7 +201,7 @@ impl QuerySet {
         let mut text = String::new();
         if let Some(base) = base {
             for (parent, optional) in modelines(&base.text).0 {
-                match self.resolve_seen(&parent, kind, seen)? {
+                match self.resolve_seen(&parent, kind, skip, seen)? {
                     Some(inherited) => {
                         text.push_str(&inherited.text);
                         text.push('\n');
@@ -222,7 +235,8 @@ impl QuerySet {
 /// Neovim's query folders, highest first as Neovim ranks them (its
 /// runtime path): the user's own, the installed queries, then
 /// nvim-treesitter's (its main branch keeps them in `runtime/queries`,
-/// master in `queries`), and last `after/`, whose files normally extend.
+/// master in `queries`) and nvim-treesitter-textobjects', and last
+/// `after/`, whose files normally extend.
 /// `config` and `data` are Neovim's folders (`~/.config/nvim`,
 /// `~/.local/share/nvim`).
 pub fn neovim_query_folders(config: &Path, data: &Path) -> Vec<PathBuf> {
@@ -232,6 +246,9 @@ pub fn neovim_query_folders(config: &Path, data: &Path) -> Vec<PathBuf> {
         data.join("lazy/nvim-treesitter/runtime/queries"),
         data.join("lazy/nvim-treesitter/queries"),
         data.join("site/pack/packer/start/nvim-treesitter/queries"),
+        // Text objects live in their own plugin.
+        data.join("lazy/nvim-treesitter-textobjects/queries"),
+        data.join("site/pack/packer/start/nvim-treesitter-textobjects/queries"),
         config.join("after/queries"),
     ]
 }
@@ -326,6 +343,38 @@ mod tests {
                 && !r.text.contains("@neovim\n")
         );
         assert_eq!(r.layer, Layer::User);
+    }
+
+    #[test]
+    fn a_layer_can_be_left_out_inherited_files_too() {
+        let mut set = QuerySet::default();
+        set.add("ecma", "indents", file("(ecma_builtin)", Layer::Builtin, 0));
+        set.add("ecma", "indents", file("(ecma_neovim)", Layer::Neovim, 0));
+        set.add(
+            "javascript",
+            "indents",
+            file("; inherits: ecma\n(js_builtin)", Layer::Builtin, 0),
+        );
+        set.add(
+            "javascript",
+            "indents",
+            file("; inherits: ecma\n(js_neovim)", Layer::Neovim, 0),
+        );
+        set.add(
+            "javascript",
+            "indents",
+            file("; extends\n(js_user)", Layer::User, 0),
+        );
+        let all = set.resolve("javascript", "indents").unwrap().unwrap();
+        assert!(all.text.contains("(js_neovim)") && all.text.contains("(ecma_neovim)"));
+        let own = set
+            .resolve_without("javascript", "indents", Layer::Neovim)
+            .unwrap()
+            .unwrap();
+        assert!(!own.text.contains("neovim"), "{}", own.text);
+        assert!(own.text.contains("(ecma_builtin)") && own.text.contains("(js_builtin)"));
+        assert!(own.text.contains("(js_user)"), "the user's still extend it");
+        assert_eq!(own.layer, Layer::Builtin);
     }
 
     #[test]
