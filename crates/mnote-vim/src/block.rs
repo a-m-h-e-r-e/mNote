@@ -158,6 +158,14 @@ impl Vim {
                     }
                 }
             }
+            // `gc` and `gb` on a block act on its lines.
+            Operator::Comment | Operator::BlockComment => {
+                buf.end_change(self.cursor);
+                self.cursor = line_start(buf.text(), b.top);
+                let range = line_start(buf.text(), b.top)..line_end(buf.text(), b.bottom);
+                self.comment(op, range, true, b.top, b.bottom, buf);
+                return;
+            }
             // `=` on a block re-indents its lines, as on lines.
             Operator::Reindent => {
                 for line in b.top..=b.bottom {

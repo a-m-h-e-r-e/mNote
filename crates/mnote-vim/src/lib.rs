@@ -12,6 +12,7 @@
 
 mod anchors;
 mod block;
+mod comment;
 pub mod ex;
 pub mod ext;
 #[cfg(test)]

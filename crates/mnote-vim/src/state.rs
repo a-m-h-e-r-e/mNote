@@ -42,6 +42,10 @@ pub enum Operator {
     Toggle,
     /// `=`: indents lines as their language's syntax says.
     Reindent,
+    /// `gc`: comments lines in or out, with the language's comment token.
+    Comment,
+    /// `gb`: wraps text in the language's block comment, or unwraps it.
+    BlockComment,
     /// One added with [`crate::ext::register_operator`], by id.
     Func(u16),
 }
@@ -72,6 +76,8 @@ impl Operator {
             Operator::Upper => 'U',
             Operator::Toggle => '~',
             Operator::Reindent => '=',
+            // `gcc` and `gbc`, as Comment.nvim.
+            Operator::Comment | Operator::BlockComment => 'c',
             Operator::Func(id) => crate::ext::operator_line_key(id),
         }
     }
@@ -1419,6 +1425,14 @@ impl Vim {
                 self.cmd.app_command = Some(crate::ex::AppCommand::new("follow"));
                 return Effect::Handled;
             }
+            (Pending::G, Key::Char(c @ ('c' | 'b'))) => {
+                let op = if c == 'c' {
+                    Operator::Comment
+                } else {
+                    Operator::BlockComment
+                };
+                return self.operator_key(op, buf);
+            }
             (Pending::G, Key::Char(c @ ('u' | 'U' | '~'))) => {
                 let op = match c {
                     'u' => Operator::Lower,
@@ -2121,6 +2135,9 @@ impl Vim {
                 }
                 self.start_insert(buf, 1, "");
             }
+            Operator::Comment | Operator::BlockComment => {
+                self.comment(op, range.clone(), linewise, start_line, end_line, buf);
+            }
             Operator::Reindent => {
                 buf.begin_change(self.cursor);
                 for line in start_line..=end_line {
@@ -2535,6 +2552,66 @@ fn ends_with_newline(text: &Rope, end: usize) -> bool {
 
 /// The leading spaces and tabs of `line`.
 impl Vim {
+    /// `gc` and `gb` on `range` (lines `first..=last`): the comment edits
+    /// for the language there, one undo step, the cursor moving with its
+    /// text. A language without comments says so.
+    pub(crate) fn comment(
+        &mut self,
+        op: Operator,
+        range: Range<usize>,
+        linewise: bool,
+        first: usize,
+        last: usize,
+        buf: &mut Buffer,
+    ) {
+        let at = first_non_blank(buf.text(), first);
+        let (language, tokens) = crate::comment::tokens_at(buf, at.max(range.start));
+        let edits = match (&tokens, op) {
+            (Some(c), Operator::Comment) => {
+                crate::comment::toggle_lines(buf.text(), first, last, c)
+            }
+            (Some(c), _) => match &c.block {
+                Some((open, close)) => {
+                    let range = if linewise {
+                        line_start(buf.text(), first)..line_end(buf.text(), last)
+                    } else {
+                        range
+                    };
+                    crate::comment::toggle_block(buf.text(), range, linewise, open, close)
+                }
+                None => Vec::new(),
+            },
+            (None, _) => Vec::new(),
+        };
+        if edits.is_empty() {
+            let what = language.as_deref().unwrap_or("plain text");
+            let kind = if tokens.is_some() {
+                "block comments"
+            } else {
+                "comments"
+            };
+            if tokens.is_none() || op == Operator::BlockComment {
+                self.show_message(format!("{what} has no {kind}"));
+            }
+            self.done(buf, false);
+            return;
+        }
+        buf.begin_change(self.cursor);
+        let mut cursor = self.cursor;
+        for (r, s) in edits {
+            // Edits come last first; the cursor moves with those before it.
+            if r.end <= cursor {
+                cursor = cursor + s.chars().count() - r.len();
+            } else if r.start < cursor {
+                cursor = r.start;
+            }
+            self.edit(buf, r, &s);
+        }
+        self.cursor = clamp_normal(buf.text(), cursor);
+        buf.end_change(self.cursor);
+        self.done(buf, true);
+    }
+
     /// `cols` columns of indent, with spaces, or with `noexpandtab` tabs
     /// and spaces for what's left.
     fn indent_text(&self, cols: usize) -> String {
